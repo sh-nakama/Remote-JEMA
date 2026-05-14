@@ -35,22 +35,17 @@ jobs:
 
           api = HfApi(token=os.environ["HF_TOKEN"])
 
-          # Ensure Space repo exists
-          api.create_repo(
-              repo_id="nakama-s/repower",
-              repo_type="space",
-              space_sdk="streamlit",
-              exist_ok=True,
-              private=False,
-          )
-
+          # Space already exists as Docker SDK — just upload files.
           # Build deployment directory:
           #   space/* (app.py, requirements.txt, README.md, packages.txt)
           #   src/    (package source)
+          #   Dockerfile  (used by HF Docker SDK)
           deploy = Path("/tmp/space-deploy")
           shutil.rmtree(deploy, ignore_errors=True)
           shutil.copytree("space", deploy)
           shutil.copytree("src", deploy / "src")
+          shutil.copy("Dockerfile", deploy / "Dockerfile")
+          shutil.copy("pyproject.toml", deploy / "pyproject.toml")
 
           api.upload_folder(
               folder_path=str(deploy),

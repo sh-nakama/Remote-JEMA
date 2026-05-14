@@ -11,13 +11,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY pyproject.toml .
 RUN pip install --no-cache-dir -e .
 
-# Copy source
+# Copy source and Space entry point
 COPY src/ src/
-COPY dashboard/ dashboard/
+COPY app.py app.py
 
 # Create data directory
 RUN mkdir -p data
 
-# Default: run streamlit dashboard
-EXPOSE 8501
-CMD ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# HF Docker Spaces require port 7860
+EXPOSE 7860
+CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
