@@ -1,0 +1,22 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./src:/app/src
+      - ./dashboard:/app/dashboard
+    env_file:
+      - .env
+
+  # One-shot job runner (use: docker compose run --rm job repower run-all)
+  job:
+    build: .
+    entrypoint: ["python", "-m", "repower.cli"]
+    volumes:
+      - ./data:/app/data
+    env_file:
+      - .env
+    profiles:
+      - jobs

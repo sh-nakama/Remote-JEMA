@@ -1,0 +1,35 @@
+name: Daily Scrape & Analyze
+
+on:
+  schedule:
+    # 20:30 UTC = 05:30 JST
+    - cron: "30 20 * * *"
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Pull latest DB from Hugging Face
+        run: python -m repower.cli pull-hf
+        continue-on-error: true  # First run won't have a DB yet
+
+      - name: Run full pipeline
+        run: python -m repower.cli run-all
+
+      - name: Push updated DB to Hugging Face
+        run: python -m repower.cli push-hf
