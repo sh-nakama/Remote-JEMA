@@ -7,12 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python deps
+# Install Python deps (src/ must exist before editable install with src layout)
 COPY pyproject.toml .
+COPY src/ src/
 RUN pip install --no-cache-dir -e .
 
-# Copy source and Space entry point
-COPY src/ src/
+# Copy Space entry point
 COPY app.py app.py
 
 # Create data directory
