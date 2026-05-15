@@ -201,6 +201,20 @@ class BaseAreaScraper:
         df["time"] = df["time"].astype(str).str.strip()
         df["time"] = df["time"].apply(_normalize_hhmm)
 
+        # Some TSOs (e.g. Kyuden) report end-of-day as "24:00" on the same date;
+        # roll those rows over to "00:00" of the following day so timestamps
+        # parse cleanly downstream and remain monotonic.
+        rollover = df["time"] == "24:00"
+        if rollover.any():
+            df.loc[rollover, "date"] = df.loc[rollover, "date"].apply(
+                lambda d: d + pd.Timedelta(days=1) if pd.notna(d) else d
+            )
+            # Convert back to date objects (Timedelta arithmetic produces Timestamps)
+            df.loc[rollover, "date"] = df.loc[rollover, "date"].apply(
+                lambda d: d.date() if hasattr(d, "date") else d
+            )
+            df.loc[rollover, "time"] = "00:00"
+
         # Numeric coercion for present supply fields
         for col in SUPPLY_FIELDS:
             if col in df.columns:

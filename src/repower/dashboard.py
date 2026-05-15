@@ -46,6 +46,12 @@ def _ds(start: date, end: date, area: str = "tepco") -> pd.DataFrame:
     df = pd.DataFrame(
         [{c.name: getattr(r, c.name) for c in DemandSupply30m.__table__.columns} for r in rows]
     )
+    # Normalize "24:00" rows (some TSOs report end-of-day this way) to next-day 00:00
+    rollover = df["time"].astype(str).str.strip() == "24:00"
+    if rollover.any():
+        df.loc[rollover, "date"] = pd.to_datetime(df.loc[rollover, "date"]) + pd.Timedelta(days=1)
+        df.loc[rollover, "date"] = df.loc[rollover, "date"].dt.date
+        df.loc[rollover, "time"] = "00:00"
     df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
     # De-duplicate (date,time) keeping latest id, then sort chronologically.
     # Without this, unsorted SQLite output produces zig-zag "multiple lines" in plots.
