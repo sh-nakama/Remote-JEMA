@@ -43,6 +43,10 @@ def _ds(start: date, end: date) -> pd.DataFrame:
         [{c.name: getattr(r, c.name) for c in DemandSupply30m.__table__.columns} for r in rows]
     )
     df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
+    # De-duplicate (date,time) keeping latest id, then sort chronologically.
+    # Without this, unsorted SQLite output produces zig-zag "multiple lines" in plots.
+    df = df.sort_values(["datetime", "id"]).drop_duplicates("datetime", keep="last")
+    df = df.sort_values("datetime").reset_index(drop=True)
     return df
 
 
@@ -59,6 +63,8 @@ def _jepx(start: date, end: date) -> pd.DataFrame:
         [{c.name: getattr(r, c.name) for c in JepxSpot30m.__table__.columns} for r in rows]
     )
     df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
+    df = df.sort_values(["datetime", "id"]).drop_duplicates("datetime", keep="last")
+    df = df.sort_values("datetime").reset_index(drop=True)
     return df
 
 
@@ -71,9 +77,72 @@ def _fuels(start: date, end: date) -> pd.DataFrame:
     ).scalars().all()
     if not rows:
         return pd.DataFrame()
-    return pd.DataFrame(
+    df = pd.DataFrame(
         [{c.name: getattr(r, c.name) for c in FuelDaily.__table__.columns} for r in rows]
     )
+    df = df.sort_values(["date", "ticker", "id"]).drop_duplicates(["date", "ticker"], keep="last")
+    return df.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def _data_date_bounds() -> tuple[date, date] | None:
+    """Return (min, max) date present in DemandSupply30m, or None if empty."""
+    session = _db_session()
+    from sqlalchemy import func
+    row = session.execute(
+        select(func.min(DemandSupply30m.date), func.max(DemandSupply30m.date))
+    ).one_or_none()
+    if not row or row[0] is None:
+        return None
+    return row[0], row[1]
+
+
+# ── Date range UI helper ──────────────────────────────────────────────────
+
+_RANGE_PRESETS: dict[str, int | None] = {
+    "1M": 30,
+    "3M": 90,
+    "6M": 180,
+    "1Y": 365,
+    "3Y": 365 * 3,
+    "All": None,
+    "Custom": -1,
+}
+
+
+def _date_range_picker(key: str, default: str = "1M") -> tuple[date, date]:
+    """Render quick preset buttons + optional custom picker. Returns (start, end)."""
+    bounds = _data_date_bounds()
+    data_min = bounds[0] if bounds else date.today() - timedelta(days=365)
+    data_max = bounds[1] if bounds else date.today()
+
+    state_key = f"_range_{key}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = default
+
+    cols = st.columns(len(_RANGE_PRESETS))
+    for i, label in enumerate(_RANGE_PRESETS.keys()):
+        if cols[i].button(label, key=f"{key}_btn_{label}",
+                          type="primary" if st.session_state[state_key] == label else "secondary"):
+            st.session_state[state_key] = label
+
+    choice = st.session_state[state_key]
+    end_date = data_max
+
+    if choice == "Custom":
+        picked = st.date_input(
+            "Date range",
+            value=(max(data_min, data_max - timedelta(days=30)), data_max),
+            min_value=data_min, max_value=data_max,
+            key=f"{key}_custom",
+        )
+        if isinstance(picked, tuple) and len(picked) == 2:
+            return picked[0], picked[1]
+        return data_min, data_max
+
+    days = _RANGE_PRESETS[choice]
+    if days is None:
+        return data_min, data_max
+    return max(data_min, end_date - timedelta(days=days)), end_date
 
 
 def _analyses() -> pd.DataFrame:
@@ -118,7 +187,20 @@ def main(show_refresh: bool = False) -> None:
     # ── TODAY ─────────────────────────────────────────────────────────────
     if tab_choice == "Today":
         st.header("Today's Supply & Demand")
-        target = st.date_input("Date", value=date.today() - timedelta(days=1))
+        bounds = _data_date_bounds()
+        latest = bounds[1] if bounds else date.today() - timedelta(days=1)
+        earliest = bounds[0] if bounds else latest - timedelta(days=365)
+        c1, c2, c3 = st.columns([1, 1, 3])
+        if c1.button("Latest", key="today_latest"):
+            st.session_state["today_date"] = latest
+        if c2.button("Yesterday", key="today_yesterday"):
+            st.session_state["today_date"] = min(latest, date.today() - timedelta(days=1))
+        target = c3.date_input(
+            "Date",
+            value=st.session_state.get("today_date", latest),
+            min_value=earliest, max_value=latest,
+            key="today_date",
+        )
         df = _ds(target, target)
         jepx_df = _jepx(target, target)
 
@@ -173,9 +255,30 @@ def main(show_refresh: bool = False) -> None:
     # ── COMPARE ───────────────────────────────────────────────────────────
     elif tab_choice == "Compare":
         st.header("Compare Two Days")
+        bounds = _data_date_bounds()
+        latest = bounds[1] if bounds else date.today() - timedelta(days=1)
+        earliest = bounds[0] if bounds else latest - timedelta(days=365)
+
+        preset_cols = st.columns(4)
+        if preset_cols[0].button("Yesterday vs week ago", key="cmp_w"):
+            st.session_state["cmp_a"] = latest
+            st.session_state["cmp_b"] = max(earliest, latest - timedelta(days=7))
+        if preset_cols[1].button("Yesterday vs month ago", key="cmp_m"):
+            st.session_state["cmp_a"] = latest
+            st.session_state["cmp_b"] = max(earliest, latest - timedelta(days=30))
+        if preset_cols[2].button("Yesterday vs year ago", key="cmp_y"):
+            st.session_state["cmp_a"] = latest
+            st.session_state["cmp_b"] = max(earliest, latest - timedelta(days=365))
+
         col1, col2 = st.columns(2)
-        date1 = col1.date_input("Date A", value=date.today() - timedelta(days=1))
-        date2 = col2.date_input("Date B", value=date.today() - timedelta(days=8))
+        date1 = col1.date_input(
+            "Date A", value=st.session_state.get("cmp_a", latest),
+            min_value=earliest, max_value=latest, key="cmp_a",
+        )
+        date2 = col2.date_input(
+            "Date B", value=st.session_state.get("cmp_b", max(earliest, latest - timedelta(days=7))),
+            min_value=earliest, max_value=latest, key="cmp_b",
+        )
 
         df1 = _ds(date1, date1)
         df2 = _ds(date2, date2)
@@ -203,9 +306,8 @@ def main(show_refresh: bool = False) -> None:
     # ── TRENDS ────────────────────────────────────────────────────────────
     elif tab_choice == "Trends":
         st.header("Trends (Rolling)")
-        days = st.slider("Days back", 7, 90, 30)
-        end_date = date.today() - timedelta(days=1)
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _date_range_picker("trends", default="1M")
+        st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
         df = _ds(start_date, end_date)
         jepx_df = _jepx(start_date, end_date)
@@ -248,9 +350,8 @@ def main(show_refresh: bool = False) -> None:
     # ── DRIVERS ───────────────────────────────────────────────────────────
     elif tab_choice == "Drivers":
         st.header("Price Drivers — Fuels & Correlations")
-        days = st.slider("Days back", 7, 90, 30, key="drivers_days")
-        end_date = date.today() - timedelta(days=1)
-        start_date = end_date - timedelta(days=days)
+        start_date, end_date = _date_range_picker("drivers", default="3M")
+        st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
         fuels_df = _fuels(start_date, end_date)
         jepx_df = _jepx(start_date, end_date)
