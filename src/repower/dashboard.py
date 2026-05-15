@@ -16,6 +16,7 @@ from repower.db import (
     AnalysisRecord,
     DemandSupply30m,
     FuelDaily,
+    JepxAreaPrice30m,
     JepxSpot30m,
     get_session,
     init_db,
@@ -75,6 +76,61 @@ def _jepx(start: date, end: date) -> pd.DataFrame:
     df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
     df = df.sort_values(["datetime", "id"]).drop_duplicates("datetime", keep="last")
     df = df.sort_values("datetime").reset_index(drop=True)
+    return df
+
+
+def _jepx_area(area: str, start: date, end: date) -> pd.DataFrame:
+    """Per-area JEPX spot price. Falls back to legacy ``tokyo_area_price`` if the
+    new ``jepx_area_price_30m`` table is empty (older HF DB snapshots).
+
+    Returns a DataFrame with columns ``date, time, price, datetime``.
+    """
+    session = _db_session()
+    rows = session.execute(
+        select(JepxAreaPrice30m).where(
+            and_(
+                JepxAreaPrice30m.area == area,
+                JepxAreaPrice30m.date >= start,
+                JepxAreaPrice30m.date <= end,
+            )
+        )
+    ).scalars().all()
+    if rows:
+        df = pd.DataFrame(
+            [{c.name: getattr(r, c.name) for c in JepxAreaPrice30m.__table__.columns} for r in rows]
+        )[["area", "date", "time", "price"]]
+    else:
+        # Legacy fallback: only Tokyo lives in the wide table.
+        legacy = _jepx(start, end)
+        if legacy.empty or area != "tepco":
+            return pd.DataFrame()
+        df = legacy[["date", "time", "tokyo_area_price"]].rename(
+            columns={"tokyo_area_price": "price"}
+        )
+    rollover = df["time"].astype(str).str.strip() == "24:00"
+    if rollover.any():
+        df.loc[rollover, "date"] = pd.to_datetime(df.loc[rollover, "date"]) + pd.Timedelta(days=1)
+        df.loc[rollover, "date"] = df.loc[rollover, "date"].dt.date
+        df.loc[rollover, "time"] = "00:00"
+    df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
+    df = df.sort_values("datetime").drop_duplicates("datetime", keep="last").reset_index(drop=True)
+    return df
+
+
+def _jepx_all_areas(start: date, end: date) -> pd.DataFrame:
+    """Long-format per-area prices for every region in [start, end]."""
+    session = _db_session()
+    rows = session.execute(
+        select(JepxAreaPrice30m).where(
+            and_(JepxAreaPrice30m.date >= start, JepxAreaPrice30m.date <= end)
+        )
+    ).scalars().all()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        [{c.name: getattr(r, c.name) for c in JepxAreaPrice30m.__table__.columns} for r in rows]
+    )[["area", "date", "time", "price"]]
+    df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str))
     return df
 
 
@@ -221,7 +277,7 @@ def main(show_refresh: bool = False) -> None:
             key="today_date",
         )
         df = _ds(target, target, area=area)
-        jepx_df = _jepx(target, target)
+        jepx_df = _jepx_area(area, target, target)
 
         if df.empty:
             st.warning("No TEPCO data available for this date.")
@@ -263,11 +319,11 @@ def main(show_refresh: bool = False) -> None:
             st.plotly_chart(fig3, use_container_width=True)
 
         if not jepx_df.empty:
-            st.subheader("JEPX Spot Price — Tokyo Area")
+            st.subheader(f"JEPX Spot Price — {AREA_NAMES[area]}")
             col1, col2 = st.columns(2)
-            col1.metric("Avg Price", f"¥{jepx_df['tokyo_area_price'].mean():.2f}/kWh")
-            col2.metric("Peak Price", f"¥{jepx_df['tokyo_area_price'].max():.2f}/kWh")
-            fig4 = px.line(jepx_df, x="datetime", y="tokyo_area_price", title="Spot Price (¥/kWh)")
+            col1.metric("Avg Price", f"¥{jepx_df['price'].mean():.2f}/kWh")
+            col2.metric("Peak Price", f"¥{jepx_df['price'].max():.2f}/kWh")
+            fig4 = px.line(jepx_df, x="datetime", y="price", title="Spot Price (¥/kWh)")
             fig4.update_layout(height=300, margin=dict(t=40, b=20))
             st.plotly_chart(fig4, use_container_width=True)
 
@@ -329,7 +385,7 @@ def main(show_refresh: bool = False) -> None:
         st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
         df = _ds(start_date, end_date, area=area)
-        jepx_df = _jepx(start_date, end_date)
+        jepx_df = _jepx_area(area, start_date, end_date)
 
         if not df.empty:
             daily = df.groupby("date").agg(
@@ -357,14 +413,53 @@ def main(show_refresh: bool = False) -> None:
 
         if not jepx_df.empty:
             daily_price = jepx_df.groupby("date").agg(
-                avg_price=("tokyo_area_price", "mean"),
-                max_price=("tokyo_area_price", "max"),
+                avg_price=("price", "mean"),
+                max_price=("price", "max"),
             ).reset_index()
             daily_price["date"] = pd.to_datetime(daily_price["date"])
             fig3 = px.line(daily_price, x="date", y=["avg_price", "max_price"],
-                           title="JEPX Tokyo Daily Avg & Peak (¥/kWh)")
+                           title=f"JEPX {AREA_NAMES[area]} Daily Avg & Peak (¥/kWh)")
             fig3.update_layout(height=350)
             st.plotly_chart(fig3, use_container_width=True)
+
+        # Demand vs price overlay (dual y-axis) when both signals are present
+        if not df.empty and not jepx_df.empty:
+            daily_demand = df.groupby("date").agg(
+                avg_demand=("area_demand_mw", "mean"),
+            ).reset_index()
+            daily_demand["date"] = pd.to_datetime(daily_demand["date"])
+            daily_pr = jepx_df.groupby("date")["price"].mean().reset_index()
+            daily_pr["date"] = pd.to_datetime(daily_pr["date"])
+            merged = daily_demand.merge(daily_pr, on="date", how="inner")
+            if not merged.empty:
+                fig_dp = go.Figure()
+                fig_dp.add_trace(go.Scatter(
+                    x=merged["date"], y=merged["avg_demand"],
+                    name="Avg Demand (MW)", mode="lines", yaxis="y1",
+                ))
+                fig_dp.add_trace(go.Scatter(
+                    x=merged["date"], y=merged["price"],
+                    name="Avg Price (¥/kWh)", mode="lines", yaxis="y2",
+                    line=dict(color="crimson"),
+                ))
+                fig_dp.update_layout(
+                    title=f"Demand vs JEPX Price — {AREA_NAMES[area]} (Daily Avg)",
+                    height=380,
+                    yaxis=dict(title="Demand (MW)"),
+                    yaxis2=dict(title="Price (¥/kWh)", overlaying="y", side="right"),
+                    legend=dict(orientation="h", y=-0.2),
+                )
+                st.plotly_chart(fig_dp, use_container_width=True)
+
+                # Scatter (demand vs price) with simple correlation
+                corr = merged["avg_demand"].corr(merged["price"])
+                fig_sc = px.scatter(
+                    merged, x="avg_demand", y="price",
+                    title=f"Demand ↔ Price scatter (Pearson r = {corr:.2f})",
+                    labels={"avg_demand": "Avg Demand (MW)", "price": "Avg Price (¥/kWh)"},
+                )
+                fig_sc.update_layout(height=340)
+                st.plotly_chart(fig_sc, use_container_width=True)
 
     # ── DRIVERS ───────────────────────────────────────────────────────────
     elif tab_choice == "Drivers":
@@ -373,7 +468,7 @@ def main(show_refresh: bool = False) -> None:
         st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
         fuels_df = _fuels(start_date, end_date)
-        jepx_df = _jepx(start_date, end_date)
+        jepx_df = _jepx_area(area, start_date, end_date)
 
         if not fuels_df.empty:
             fuels_df["date"] = pd.to_datetime(fuels_df["date"])
@@ -383,7 +478,7 @@ def main(show_refresh: bool = False) -> None:
             st.plotly_chart(fig, use_container_width=True)
 
         if not jepx_df.empty and not fuels_df.empty:
-            daily_price = jepx_df.groupby("date")["tokyo_area_price"].mean().reset_index()
+            daily_price = jepx_df.groupby("date")["price"].mean().reset_index()
             daily_price.columns = ["date", "jepx_avg"]
             daily_price["date"] = pd.to_datetime(daily_price["date"])
 
@@ -394,7 +489,7 @@ def main(show_refresh: bool = False) -> None:
             if not merged.empty:
                 fig2 = px.scatter(
                     merged, x="brent", y="jepx_avg",
-                    title="JEPX Tokyo vs Brent Crude",
+                    title=f"JEPX {AREA_NAMES[area]} vs Brent Crude",
                     labels={"brent": "Brent (USD/bbl)", "jepx_avg": "JEPX Avg (¥/kWh)"},
                 )
                 fig2.update_layout(height=350)
@@ -463,6 +558,23 @@ def main(show_refresh: bool = False) -> None:
                                title="Daily Renewable Share by Area (%)")
                 fig3.update_layout(height=350)
                 st.plotly_chart(fig3, use_container_width=True)
+
+            # JEPX per-area price comparison
+            price_frames = []
+            for a in selected:
+                p = _jepx_area(a, start_date, end_date)
+                if p.empty:
+                    continue
+                day = p.groupby("date")["price"].mean().reset_index()
+                day["area"] = AREA_NAMES[a]
+                day["date"] = pd.to_datetime(day["date"])
+                price_frames.append(day)
+            if price_frames:
+                pcombo = pd.concat(price_frames, ignore_index=True)
+                fig4 = px.line(pcombo, x="date", y="price", color="area",
+                               title="Daily Avg JEPX Spot Price by Area (¥/kWh)")
+                fig4.update_layout(height=350)
+                st.plotly_chart(fig4, use_container_width=True)
 
             # Data freshness table
             st.subheader("Data freshness")

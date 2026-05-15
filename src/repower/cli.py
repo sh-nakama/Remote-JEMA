@@ -60,12 +60,19 @@ def backfill(
         help="Earliest YYYY-MM month to fetch (default 2024-04, the start of the standardised TSO publication format)",
     ),
     area: str = typer.Option("all", help="Area slug or 'all'"),
+    jepx_since: int = typer.Option(
+        2024,
+        help="Earliest JEPX year to backfill (one CSV per year). Set to 0 to skip JEPX.",
+    ),
 ):
     """One-shot historical backfill of every month from --since to today.
 
     Idempotent: existing rows are upserted in place via (area, date, time) PK,
     so this is safe to re-run. Designed to be invoked once locally or via
     workflow_dispatch, then `scrape` handles incremental daily updates.
+
+    Also backfills JEPX per-area spot prices from --jepx-since through the
+    current year (skip with --jepx-since 0).
     """
     from datetime import date as _date
     from repower.scrapers.areas import ALL_SCRAPERS, AREA_NAMES
@@ -96,6 +103,14 @@ def backfill(
         typer.echo(f"   {AREA_NAMES.get(s.AREA, s.AREA):<25} {n:>7} rows upserted")
         grand += n
     typer.echo(f"\u2550\u2550\u2550 TOTAL {grand} rows \u2550\u2550\u2550")
+
+    if jepx_since and jepx_since > 0:
+        from repower.scrapers.jepx_spot import scrape_jepx_years
+        typer.echo(f"\u2550\u2550\u2550 JEPX BACKFILL  {jepx_since} \u2192 {today.year} \u2550\u2550\u2550")
+        results = scrape_jepx_years(jepx_since, today.year)
+        for y, n in results.items():
+            typer.echo(f"   JEPX {y}                  {n:>7} rows upserted")
+        typer.echo(f"\u2550\u2550\u2550 JEPX TOTAL {sum(results.values())} rows \u2550\u2550\u2550")
 
 
 @app.command()

@@ -63,6 +63,18 @@ class JepxSpot30m(Base):
     __table_args__ = (UniqueConstraint("date", "time", name="uq_jepx_date_time"),)
 
 
+# ── JEPX per-area prices (30-min, long format) ────────────────────────────
+class JepxAreaPrice30m(Base):
+    """Per-region JEPX area price, keyed (area, date, time) like DemandSupply30m."""
+    __tablename__ = "jepx_area_price_30m"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    area = Column(String(16), nullable=False)  # hokkaido, tohoku, tepco, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
+    date = Column(Date, nullable=False)
+    time = Column(String(5), nullable=False)
+    price = Column(Float)
+    __table_args__ = (UniqueConstraint("area", "date", "time", name="uq_jepx_area_date_time"),)
+
+
 # ── Fuel / commodity prices (daily) ───────────────────────────────────────
 class FuelDaily(Base):
     __tablename__ = "fuels_daily"

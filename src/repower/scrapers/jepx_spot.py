@@ -20,9 +20,23 @@ import pandas as pd
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.config import JEPX_BASE_URL
-from repower.db import JepxSpot30m, get_session, init_db
+from repower.db import JepxAreaPrice30m, JepxSpot30m, get_session, init_db
 
 logger = logging.getLogger(__name__)
+
+
+# Map area slug → Japanese keyword used in the JEPX CSV header column name.
+JEPX_AREA_KEYWORDS: dict[str, str] = {
+    "hokkaido": "エリアプライス北海道",
+    "tohoku":   "エリアプライス東北",
+    "tepco":    "エリアプライス東京",
+    "chubu":    "エリアプライス中部",
+    "hokuriku": "エリアプライス北陸",
+    "kansai":   "エリアプライス関西",
+    "chugoku":  "エリアプライス中国",
+    "shikoku":  "エリアプライス四国",
+    "kyushu":   "エリアプライス九州",
+}
 
 
 def _csv_url(year: int) -> str:
@@ -31,7 +45,12 @@ def _csv_url(year: int) -> str:
 
 
 def fetch_jepx_csv(year: int) -> pd.DataFrame:
-    """Download and parse one year's JEPX spot CSV."""
+    """Download and parse one year's JEPX spot CSV.
+
+    Returns a long-format DataFrame with columns:
+        date, time, system_price, tokyo_area_price,
+        and one column per area slug in JEPX_AREA_KEYWORDS (e.g. ``hokkaido_price``).
+    """
     url = _csv_url(year)
     logger.info("Fetching %s", url)
 
@@ -44,31 +63,37 @@ def fetch_jepx_csv(year: int) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(text_data), header=0)
     cols = df.columns.tolist()
 
-    # Fixed indices for the 2026 jepx.jp format:
-    #   0=date, 1=period, 5=system price, 8=Tokyo area price
-    # Search by keyword first so this is resilient to minor layout changes.
     def _find_col(keyword: str, fallback: int) -> str:
         for i, c in enumerate(cols):
             if keyword in str(c):
                 return cols[i]
-        return cols[fallback]
+        return cols[fallback] if fallback < len(cols) else cols[0]
 
     date_col = cols[0]
     period_col = cols[1]
     system_col = _find_col("システムプライス", 5)
-    tokyo_col = _find_col("エリアプライス東京", 8)
 
     result = pd.DataFrame()
     result["date_raw"] = df[date_col].astype(str)
     result["period"] = pd.to_numeric(df[period_col], errors="coerce")
     result["system_price"] = pd.to_numeric(df[system_col], errors="coerce")
-    result["tokyo_area_price"] = pd.to_numeric(df[tokyo_col], errors="coerce")
+
+    # Pull every area price column we can find, by Japanese keyword.
+    for slug, kw in JEPX_AREA_KEYWORDS.items():
+        col = _find_col(kw, -1)
+        if col in df.columns:
+            result[f"{slug}_price"] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            result[f"{slug}_price"] = pd.NA
+
+    # Backwards-compat: keep the legacy "tokyo_area_price" alias.
+    result["tokyo_area_price"] = result["tepco_price"]
 
     # Convert date — format may be YYYY/MM/DD or YYYY-MM-DD
     result["date"] = pd.to_datetime(result["date_raw"], format="mixed", dayfirst=False).dt.date
 
     # Convert period (1-48) to time string HH:MM
-    def period_to_time(p: int) -> str:
+    def period_to_time(p) -> str:
         if pd.isna(p) or p < 1:
             return "00:00"
         p = int(p)
@@ -78,24 +103,31 @@ def fetch_jepx_csv(year: int) -> pd.DataFrame:
         return f"{h:02d}:{m:02d}"
 
     result["time"] = result["period"].apply(period_to_time)
-    result = result.dropna(subset=["date", "system_price"])
+    result = result.dropna(subset=["date"])
 
-    return result[["date", "time", "system_price", "tokyo_area_price"]]
+    keep = ["date", "time", "system_price", "tokyo_area_price"] + [
+        f"{slug}_price" for slug in JEPX_AREA_KEYWORDS
+    ]
+    return result[keep]
 
 
 def upsert_jepx(df: pd.DataFrame, db_path: str | None = None) -> int:
-    """Upsert JEPX spot data. Returns rows affected."""
+    """Upsert JEPX spot data into both legacy and per-area tables.
+
+    Returns the number of (date, time) rows processed (legacy table count).
+    """
     init_db(db_path)
     session = get_session(db_path)
     rows_affected = 0
 
     try:
         for _, row in df.iterrows():
+            # Legacy wide table — system + tokyo only
             stmt = sqlite_upsert(JepxSpot30m).values(
                 date=row["date"],
                 time=row["time"],
-                system_price=row["system_price"],
-                tokyo_area_price=row["tokyo_area_price"],
+                system_price=None if pd.isna(row["system_price"]) else float(row["system_price"]),
+                tokyo_area_price=None if pd.isna(row["tokyo_area_price"]) else float(row["tokyo_area_price"]),
             )
             stmt = stmt.on_conflict_do_update(
                 index_elements=["date", "time"],
@@ -106,6 +138,23 @@ def upsert_jepx(df: pd.DataFrame, db_path: str | None = None) -> int:
             )
             session.execute(stmt)
             rows_affected += 1
+
+            # New long table — one row per area
+            for slug in JEPX_AREA_KEYWORDS:
+                price = row.get(f"{slug}_price")
+                if price is None or pd.isna(price):
+                    continue
+                a_stmt = sqlite_upsert(JepxAreaPrice30m).values(
+                    area=slug,
+                    date=row["date"],
+                    time=row["time"],
+                    price=float(price),
+                )
+                a_stmt = a_stmt.on_conflict_do_update(
+                    index_elements=["area", "date", "time"],
+                    set_={"price": a_stmt.excluded.price},
+                )
+                session.execute(a_stmt)
 
         session.commit()
     finally:
@@ -130,3 +179,14 @@ def scrape_jepx(year: int | None = None, db_path: str | None = None) -> int:
     except Exception as e:
         logger.error("JEPX %d: %s", year, e)
         return 0
+
+
+def scrape_jepx_years(start_year: int, end_year: int | None = None,
+                      db_path: str | None = None) -> dict[int, int]:
+    """Backfill multiple JEPX years (inclusive). Returns ``{year: rows}``."""
+    if end_year is None:
+        end_year = date.today().year
+    out: dict[int, int] = {}
+    for y in range(start_year, end_year + 1):
+        out[y] = scrape_jepx(y, db_path)
+    return out
