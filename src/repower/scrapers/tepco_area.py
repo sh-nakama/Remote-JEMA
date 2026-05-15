@@ -136,7 +136,17 @@ def upsert_dataframe(df: pd.DataFrame, db_path: str | None = None) -> int:
 
 
 def scrape_tepco(months_back: int = 1, db_path: str | None = None) -> int:
-    """Scrape current month and `months_back` previous months. Returns total rows upserted."""
+    """Scrape TEPCO via the unified BaseAreaScraper framework.
+
+    Kept as a thin shim so legacy callers (CLI, tests) continue to work.
+    For multi-area pipelines prefer ``scrape_all_areas`` from
+    ``repower.scrapers.areas``.
+    """
+    from repower.scrapers.areas import TepcoScraper
+    return TepcoScraper().scrape(months_back=months_back, db_path=db_path)
+
+
+def _legacy_scrape_tepco(months_back: int = 1, db_path: str | None = None) -> int:
     today = date.today()
     total = 0
 

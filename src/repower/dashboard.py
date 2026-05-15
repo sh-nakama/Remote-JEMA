@@ -30,11 +30,15 @@ def _db_session():
     return get_session()
 
 
-def _ds(start: date, end: date) -> pd.DataFrame:
+def _ds(start: date, end: date, area: str = "tepco") -> pd.DataFrame:
     session = _db_session()
     rows = session.execute(
         select(DemandSupply30m).where(
-            and_(DemandSupply30m.date >= start, DemandSupply30m.date <= end)
+            and_(
+                DemandSupply30m.area == area,
+                DemandSupply30m.date >= start,
+                DemandSupply30m.date <= end,
+            )
         )
     ).scalars().all()
     if not rows:
@@ -84,12 +88,13 @@ def _fuels(start: date, end: date) -> pd.DataFrame:
     return df.sort_values(["ticker", "date"]).reset_index(drop=True)
 
 
-def _data_date_bounds() -> tuple[date, date] | None:
-    """Return (min, max) date present in DemandSupply30m, or None if empty."""
+def _data_date_bounds(area: str = "tepco") -> tuple[date, date] | None:
+    """Return (min, max) date present in DemandSupply30m for the area."""
     session = _db_session()
     from sqlalchemy import func
     row = session.execute(
         select(func.min(DemandSupply30m.date), func.max(DemandSupply30m.date))
+        .where(DemandSupply30m.area == area)
     ).one_or_none()
     if not row or row[0] is None:
         return None
@@ -109,9 +114,9 @@ _RANGE_PRESETS: dict[str, int | None] = {
 }
 
 
-def _date_range_picker(key: str, default: str = "1M") -> tuple[date, date]:
+def _date_range_picker(key: str, default: str = "1M", area: str = "tepco") -> tuple[date, date]:
     """Render quick preset buttons + optional custom picker. Returns (start, end)."""
-    bounds = _data_date_bounds()
+    bounds = _data_date_bounds(area)
     data_min = bounds[0] if bounds else date.today() - timedelta(days=365)
     data_max = bounds[1] if bounds else date.today()
 
@@ -177,17 +182,25 @@ def main(show_refresh: bool = False) -> None:
                     st.sidebar.error(f"Refresh failed: {e}")
 
     st.sidebar.markdown("---")
+    from repower.scrapers.areas import AREA_NAMES
+    area = st.sidebar.selectbox(
+        "Area / TSO",
+        options=list(AREA_NAMES.keys()),
+        format_func=lambda a: AREA_NAMES[a],
+        index=list(AREA_NAMES.keys()).index("tepco"),
+        key="area_select",
+    )
     st.sidebar.caption(f"DB: `{DB_PATH}`")
 
     tab_choice = st.sidebar.radio(
         "View",
-        ["Today", "Compare", "Trends", "Drivers", "Analyses"],
+        ["Today", "Compare", "Trends", "Drivers", "Areas Compare", "Analyses"],
     )
 
     # ── TODAY ─────────────────────────────────────────────────────────────
     if tab_choice == "Today":
-        st.header("Today's Supply & Demand")
-        bounds = _data_date_bounds()
+        st.header(f"{AREA_NAMES[area]} \u2014 Supply & Demand")
+        bounds = _data_date_bounds(area)
         latest = bounds[1] if bounds else date.today() - timedelta(days=1)
         earliest = bounds[0] if bounds else latest - timedelta(days=365)
         c1, c2, c3 = st.columns([1, 1, 3])
@@ -201,7 +214,7 @@ def main(show_refresh: bool = False) -> None:
             min_value=earliest, max_value=latest,
             key="today_date",
         )
-        df = _ds(target, target)
+        df = _ds(target, target, area=area)
         jepx_df = _jepx(target, target)
 
         if df.empty:
@@ -254,8 +267,8 @@ def main(show_refresh: bool = False) -> None:
 
     # ── COMPARE ───────────────────────────────────────────────────────────
     elif tab_choice == "Compare":
-        st.header("Compare Two Days")
-        bounds = _data_date_bounds()
+        st.header(f"{AREA_NAMES[area]} \u2014 Compare Two Days")
+        bounds = _data_date_bounds(area)
         latest = bounds[1] if bounds else date.today() - timedelta(days=1)
         earliest = bounds[0] if bounds else latest - timedelta(days=365)
 
@@ -280,8 +293,8 @@ def main(show_refresh: bool = False) -> None:
             min_value=earliest, max_value=latest, key="cmp_b",
         )
 
-        df1 = _ds(date1, date1)
-        df2 = _ds(date2, date2)
+        df1 = _ds(date1, date1, area=area)
+        df2 = _ds(date2, date2, area=area)
 
         if df1.empty or df2.empty:
             st.warning("Data not available for one or both dates.")
@@ -305,11 +318,11 @@ def main(show_refresh: bool = False) -> None:
 
     # ── TRENDS ────────────────────────────────────────────────────────────
     elif tab_choice == "Trends":
-        st.header("Trends (Rolling)")
-        start_date, end_date = _date_range_picker("trends", default="1M")
+        st.header(f"{AREA_NAMES[area]} \u2014 Trends (Rolling)")
+        start_date, end_date = _date_range_picker("trends", default="1M", area=area)
         st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
-        df = _ds(start_date, end_date)
+        df = _ds(start_date, end_date, area=area)
         jepx_df = _jepx(start_date, end_date)
 
         if not df.empty:
@@ -350,7 +363,7 @@ def main(show_refresh: bool = False) -> None:
     # ── DRIVERS ───────────────────────────────────────────────────────────
     elif tab_choice == "Drivers":
         st.header("Price Drivers — Fuels & Correlations")
-        start_date, end_date = _date_range_picker("drivers", default="3M")
+        start_date, end_date = _date_range_picker("drivers", default="3M", area=area)
         st.caption(f"Range: **{start_date}** \u2192 **{end_date}**")
 
         fuels_df = _fuels(start_date, end_date)
@@ -380,6 +393,83 @@ def main(show_refresh: bool = False) -> None:
                 )
                 fig2.update_layout(height=350)
                 st.plotly_chart(fig2, use_container_width=True)
+
+    # ── AREAS COMPARE ─────────────────────────────────────────────────────
+    elif tab_choice == "Areas Compare":
+        st.header("Multi-Area Comparison")
+        selected = st.multiselect(
+            "Areas to overlay",
+            options=list(AREA_NAMES.keys()),
+            default=["tepco", "kansai", "kyushu"],
+            format_func=lambda a: AREA_NAMES[a],
+        )
+        start_date, end_date = _date_range_picker("areas_cmp", default="1M", area=area)
+        st.caption(f"Range: **{start_date}** → **{end_date}**")
+
+        if not selected:
+            st.info("Select at least one area.")
+        else:
+            # Combined daily-peak demand overlay
+            frames = []
+            for a in selected:
+                d = _ds(start_date, end_date, area=a)
+                if d.empty:
+                    continue
+                daily = d.groupby("date").agg(peak=("area_demand_mw", "max"),
+                                              avg=("area_demand_mw", "mean")).reset_index()
+                daily["area"] = AREA_NAMES[a]
+                daily["date"] = pd.to_datetime(daily["date"])
+                frames.append(daily)
+            if not frames:
+                st.warning("No data for selected areas / range.")
+            else:
+                combo = pd.concat(frames, ignore_index=True)
+                fig = px.line(combo, x="date", y="peak", color="area",
+                              title="Daily Peak Demand by Area (MW)")
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+
+                fig2 = px.line(combo, x="date", y="avg", color="area",
+                               title="Daily Average Demand by Area (MW)")
+                fig2.update_layout(height=350)
+                st.plotly_chart(fig2, use_container_width=True)
+
+            # Renewable share comparison
+            re_frames = []
+            re_cols = ["hydro", "geothermal", "biomass", "solar_actual", "wind_actual"]
+            for a in selected:
+                d = _ds(start_date, end_date, area=a)
+                if d.empty or "total_supply" not in d.columns:
+                    continue
+                avail = [c for c in re_cols if c in d.columns]
+                if not avail:
+                    continue
+                d["re_total"] = d[avail].sum(axis=1, min_count=1)
+                day = d.groupby("date").agg(re_sum=("re_total", "sum"),
+                                            tot=("total_supply", "sum")).reset_index()
+                day["re_pct"] = day["re_sum"] / day["tot"] * 100
+                day["area"] = AREA_NAMES[a]
+                day["date"] = pd.to_datetime(day["date"])
+                re_frames.append(day[["date", "re_pct", "area"]])
+            if re_frames:
+                rcombo = pd.concat(re_frames, ignore_index=True)
+                fig3 = px.line(rcombo, x="date", y="re_pct", color="area",
+                               title="Daily Renewable Share by Area (%)")
+                fig3.update_layout(height=350)
+                st.plotly_chart(fig3, use_container_width=True)
+
+            # Data freshness table
+            st.subheader("Data freshness")
+            freshness = []
+            for a in AREA_NAMES:
+                b = _data_date_bounds(a)
+                freshness.append({
+                    "Area": AREA_NAMES[a],
+                    "Earliest": b[0] if b else "—",
+                    "Latest": b[1] if b else "—",
+                    "Days": (b[1] - b[0]).days if b else 0,
+                })
+            st.dataframe(pd.DataFrame(freshness), use_container_width=True, hide_index=True)
 
     # ── ANALYSES ──────────────────────────────────────────────────────────
     elif tab_choice == "Analyses":

@@ -72,19 +72,21 @@ def notify(
 
 @app.command()
 def run_all(
-    months_back: int = typer.Option(1, help="TEPCO months to fetch"),
+    months_back: int = typer.Option(2, help="TSO months to fetch (covers publication lag)"),
     dry_run: bool = typer.Option(False, help="Skip webhook post"),
 ):
-    """Run full pipeline: scrape → analyze → notify."""
-    from repower.scrapers.tepco_area import scrape_tepco
+    """Run full pipeline: scrape \u2192 analyze \u2192 notify."""
+    from repower.scrapers.areas import scrape_all_areas, AREA_NAMES
     from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.fuels_futures import scrape_fuels
     from repower.scrapers.news_rss import scrape_news
     from repower.analysis.features import run_analysis
     from repower.notify.webhook import notify as do_notify
 
-    typer.echo("═══ SCRAPE ═══")
-    scrape_tepco(months_back=months_back)
+    typer.echo("\u2550\u2550\u2550 SCRAPE \u2550\u2550\u2550")
+    results = scrape_all_areas(months_back=months_back)
+    for a, n in results.items():
+        typer.echo(f"   {AREA_NAMES.get(a, a):<25} {n:>6} rows")
     scrape_jepx()
     scrape_fuels()
     scrape_news()
