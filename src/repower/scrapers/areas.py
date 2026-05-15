@@ -72,12 +72,27 @@ class TohokuScraper(BaseAreaScraper):
 
 
 class ChubuScraper(BaseAreaScraper):
+    """Chuden (Chubu TSO).
+
+    Live monthly URL serves only the current and previous month at the
+    standard ``denki_yoho_content_data/eria_jukyu_{YYYYMM}_{V}.csv`` path.
+    Historical months are bundled into yearly ZIPs at
+    ``denki_yoho_content_data/eria_jukyu_{YYYY}.zip`` (one CSV per month
+    inside, fiscal-year layout: e.g. the 2024 ZIP covers Apr 2024 \u2192 Mar 2025).
+    The framework auto-uses the archive for ``months_back >= 2``.
+    """
     AREA = "chubu"
     URL_TEMPLATES = [
         "https://powergrid.chuden.co.jp/denki_yoho_content_data/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
-    ENCODING = "utf-8-sig"
+    ARCHIVE_URL_TEMPLATE = "https://powergrid.chuden.co.jp/denki_yoho_content_data/eria_jukyu_{YYYY}.zip"
+    ENCODING = "shift_jis"
     COLUMN_ORDERS_BY_NCOLS = DUAL_FORMAT
+
+    def _archive_year_for(self, year: int, month: int) -> int:
+        # Chubu's yearly ZIPs use Japanese fiscal year (Apr\u2013Mar).
+        # e.g. eria_jukyu_2024.zip covers Apr 2024 \u2192 Mar 2025.
+        return year if month >= 4 else year - 1
 
 
 class HokurikuScraper(BaseAreaScraper):

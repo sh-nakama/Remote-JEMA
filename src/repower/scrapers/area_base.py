@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import zipfile
 from datetime import date
 from typing import ClassVar, Optional
 
@@ -46,6 +48,11 @@ SUPPLY_FIELDS: list[str] = [
 class BaseAreaScraper:
     AREA: ClassVar[str] = ""
     URL_TEMPLATES: ClassVar[list[str]] = []
+    # Optional yearly ZIP archive (with {YYYY}) containing per-month CSVs named
+    # like ``eria_jukyu_{YYYYMM}_*.csv``. Used by ``scrape()`` for historical
+    # months when ``months_back > 1``. Falls back to URL_TEMPLATES if unset or
+    # the archive does not contain a given month.
+    ARCHIVE_URL_TEMPLATE: ClassVar[str] = ""
     # If a template contains {V}, the scraper probes _01.._09 (descending) at that slot.
     VERSION_RANGE: ClassVar[tuple[int, int]] = (1, 12)
     ENCODING: ClassVar[str] = "utf-8-sig"
@@ -85,15 +92,7 @@ class BaseAreaScraper:
                 if raw is None:  # 404 → try next URL
                     continue
                 logger.info("[%s] fetched %s", self.AREA, url)
-                # Strip BOM if present even when encoding declared utf-8-sig
-                if raw[:3] == b"\xef\xbb\xbf":
-                    raw = raw[3:]
-                text_data = raw.decode(self.ENCODING, errors="replace")
-                df = pd.read_csv(
-                    io.StringIO(text_data),
-                    skiprows=self.SKIP_ROWS,
-                    header=self.HEADER_ROW,
-                )
+                df = self._bytes_to_df(raw)
                 if df.empty:
                     raise ValueError("empty CSV")
                 return df
@@ -103,6 +102,72 @@ class BaseAreaScraper:
         if last_err:
             logger.error("[%s] all URLs failed for %04d-%02d: %s", self.AREA, year, month, last_err)
         return None
+
+    def _bytes_to_df(self, raw: bytes) -> pd.DataFrame:
+        """Decode raw CSV bytes (using ``ENCODING``) and parse to a DataFrame."""
+        # Strip BOM if present even when encoding declared utf-8-sig
+        if raw[:3] == b"\xef\xbb\xbf":
+            raw = raw[3:]
+        text_data = raw.decode(self.ENCODING, errors="replace")
+        return pd.read_csv(
+            io.StringIO(text_data),
+            skiprows=self.SKIP_ROWS,
+            header=self.HEADER_ROW,
+        )
+
+    def _archive_year_for(self, year: int, month: int) -> int:
+        """Map a (year, month) target to the archive year that contains it.
+
+        Default: calendar year. Override for fiscal-year archives (e.g. Chubu's
+        yearly ZIP for fiscal 2024 spans Apr 2024 \u2192 Mar 2025).
+        """
+        return year
+
+    def fetch_archive_year(self, year: int) -> dict[tuple[int, int], pd.DataFrame]:
+        """Download the yearly ZIP archive and return ``{(year, month): df}``.
+
+        Returns an empty dict if ``ARCHIVE_URL_TEMPLATE`` is unset or fetch fails.
+        Member CSVs are matched against ``eria_jukyu_(YYYY)(MM)_*.csv``.
+        """
+        if not self.ARCHIVE_URL_TEMPLATE:
+            return {}
+        url = self.ARCHIVE_URL_TEMPLATE.format(YYYY=str(year))
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+        }
+        try:
+            raw = _http_get(url, headers=headers)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[%s] archive %s -> %s", self.AREA, url, e)
+            return {}
+        if raw is None or raw[:2] != b"PK":
+            logger.info("[%s] no archive at %s", self.AREA, url)
+            return {}
+        logger.info("[%s] fetched archive %s (%d bytes)", self.AREA, url, len(raw))
+        out: dict[tuple[int, int], pd.DataFrame] = {}
+        try:
+            zf = zipfile.ZipFile(io.BytesIO(raw))
+        except zipfile.BadZipFile as e:
+            logger.warning("[%s] bad zip from %s: %s", self.AREA, url, e)
+            return {}
+        pat = re.compile(r"eria_jukyu_(\d{4})(\d{2})", re.IGNORECASE)
+        for name in zf.namelist():
+            m = pat.search(name)
+            if not m:
+                continue
+            y, mo = int(m.group(1)), int(m.group(2))
+            try:
+                with zf.open(name) as f:
+                    df = self._bytes_to_df(f.read())
+                if not df.empty:
+                    out[(y, mo)] = df
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[%s] archive member %s parse failed: %s", self.AREA, name, e)
+        return out
 
     def parse(self, df: pd.DataFrame) -> pd.DataFrame:
         """Apply positional column mapping → canonical fields."""
@@ -185,9 +250,29 @@ class BaseAreaScraper:
                 y -= 1
             targets.append((y, m))
 
+        # If a yearly archive is configured and we need more than ~2 months,
+        # bulk-pull from yearly ZIPs first (one HTTP request per year covers
+        # 12 months), then overlay live monthly fetches for the most recent
+        # 2 months so we always have the freshest data for the current month.
+        archive_dfs: dict[tuple[int, int], pd.DataFrame] = {}
+        if self.ARCHIVE_URL_TEMPLATE and months_back >= 2:
+            years_needed = sorted({self._archive_year_for(y, m) for y, m in targets})
+            for yr in years_needed:
+                archive_dfs.update(self.fetch_archive_year(yr))
+
+        # Live months override archive content for the trailing 2 months.
+        live_months = set(targets[: min(2, len(targets))])
+
         total = 0
         for y, m in targets:
-            df = self.fetch_csv(y, m)
+            df: pd.DataFrame | None = None
+            if (y, m) in live_months:
+                df = self.fetch_csv(y, m)
+            if df is None and (y, m) in archive_dfs:
+                df = archive_dfs[(y, m)]
+                logger.info("[%s] %04d-%02d: using archive copy", self.AREA, y, m)
+            if df is None:
+                df = self.fetch_csv(y, m)
             if df is None:
                 continue
             try:
