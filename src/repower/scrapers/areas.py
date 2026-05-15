@@ -18,8 +18,6 @@ verified.
 
 from __future__ import annotations
 
-import pandas as pd
-
 from repower.scrapers.area_base import BaseAreaScraper
 
 
@@ -101,11 +99,15 @@ class KansaiScraper(BaseAreaScraper):
 
 
 class ChugokuScraper(BaseAreaScraper):
-    """URL pattern still under investigation — fails soft until verified."""
+    """Energia (Chugoku TSO). Fixed URL: ``sys/eria_jukyu_{YYYYMM}_07.csv``.
+
+    Pattern reverse-engineered from ``js/script_eriajukyu_1.js`` on the public
+    eria_jukyu page; ``_07`` is hard-coded in the JS and confirmed available
+    monthly from 2024-04 onward.
+    """
     AREA = "chugoku"
     URL_TEMPLATES = [
-        "https://www.energia.co.jp/nw/jukyuu/sys/download/eria_jukyu_{YYYY}{MM}_{V}.csv",
-        "https://www.energia.co.jp/nw/service/retailer/data/area/csv/eria_jukyu_{YYYY}{MM}_{V}.csv",
+        "https://www.energia.co.jp/nw/jukyuu/sys/eria_jukyu_{YYYY}{MM}_07.csv",
     ]
     ENCODING = "utf-8-sig"
     COLUMN_ORDERS_BY_NCOLS = DUAL_FORMAT
@@ -121,19 +123,19 @@ class ShikokuScraper(BaseAreaScraper):
 
 
 class KyushuScraper(BaseAreaScraper):
-    """URL pattern still under investigation — fails soft until verified."""
+    """Kyuden (Kyushu TSO). Fixed URL: ``csv/eria_jukyu_{YYYYMM}_09.csv``.
+
+    Pattern observed via the public download page; ``_09`` is the active
+    suffix and confirmed available monthly from 2024-04 onward. The current
+    month's file is updated continuously and contains rows up to the latest
+    half-hour.
+    """
     AREA = "kyushu"
     URL_TEMPLATES = [
-        "https://www.kyuden.co.jp/td_area_jukyu/csv_area_jyukyu_jisseki/area_jyukyu_{YYYY}{MM}.csv",
-        "https://www.kyuden.co.jp/td_area_jukyu/csv_area_jyukyu_jisseki/eria_jukyu_{YYYY}{MM}_{V}.csv",
+        "https://www.kyuden.co.jp/td_area_jukyu/csv/eria_jukyu_{YYYY}{MM}_09.csv",
     ]
-    ENCODING = "utf-8-sig"
+    ENCODING = "shift_jis"
     COLUMN_ORDERS_BY_NCOLS = DUAL_FORMAT
-
-    def transform(self, df: pd.DataFrame) -> pd.DataFrame:
-        if "interconnect" in df.columns:
-            df["interconnect"] = -df["interconnect"]
-        return df
 
 
 ALL_SCRAPERS: list[type[BaseAreaScraper]] = [

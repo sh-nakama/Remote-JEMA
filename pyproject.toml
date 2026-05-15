@@ -14,6 +14,7 @@ dependencies = [
     "plotly>=5.22",
     "python-dotenv>=1.0",
     "huggingface-hub>=0.23",
+    "curl_cffi>=0.7",
 ]
 
 [project.optional-dependencies]

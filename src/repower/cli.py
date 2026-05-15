@@ -14,31 +14,88 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 
 @app.command()
 def scrape(
-    months_back: int = typer.Option(1, help="TEPCO months to re-fetch (current + N previous)"),
+    months_back: int = typer.Option(1, help="TSO months to re-fetch (current + N previous)"),
+    area: str = typer.Option("all", help="Area slug (e.g. tepco, kansai) or 'all'"),
+    skip_jepx: bool = typer.Option(False, help="Skip JEPX spot prices"),
+    skip_fuels: bool = typer.Option(False, help="Skip fuel futures"),
+    skip_news: bool = typer.Option(False, help="Skip news RSS"),
     jepx_year: Optional[int] = typer.Option(None, help="JEPX year to fetch (default: current)"),
     fuel_days: int = typer.Option(7, help="Days of fuel data to fetch"),
 ):
-    """Scrape all data sources."""
-    from repower.scrapers.tepco_area import scrape_tepco
+    """Scrape TSO area data + market sources (recent months only)."""
+    from repower.scrapers.areas import scrape_all_areas, scrape_area, AREA_NAMES
     from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.fuels_futures import scrape_fuels
     from repower.scrapers.news_rss import scrape_news
 
-    typer.echo("── TEPCO area supply/demand ──")
-    n = scrape_tepco(months_back=months_back)
-    typer.echo(f"   {n} rows upserted")
+    typer.echo("\u2500\u2500 TSO area supply/demand \u2500\u2500")
+    if area == "all":
+        results = scrape_all_areas(months_back=months_back)
+        for a, n in results.items():
+            typer.echo(f"   {AREA_NAMES.get(a, a):<25} {n:>6} rows")
+    else:
+        n = scrape_area(area, months_back=months_back)
+        typer.echo(f"   {AREA_NAMES.get(area, area):<25} {n:>6} rows")
 
-    typer.echo("── JEPX spot prices ──")
-    n = scrape_jepx(year=jepx_year)
-    typer.echo(f"   {n} rows upserted")
+    if not skip_jepx:
+        typer.echo("\u2500\u2500 JEPX spot prices \u2500\u2500")
+        n = scrape_jepx(year=jepx_year)
+        typer.echo(f"   {n} rows upserted")
 
-    typer.echo("── Fuel prices ──")
-    n = scrape_fuels(days_back=fuel_days)
-    typer.echo(f"   {n} rows upserted")
+    if not skip_fuels:
+        typer.echo("\u2500\u2500 Fuel prices \u2500\u2500")
+        n = scrape_fuels(days_back=fuel_days)
+        typer.echo(f"   {n} rows upserted")
 
-    typer.echo("── News RSS ──")
-    n = scrape_news()
-    typer.echo(f"   {n} new items")
+    if not skip_news:
+        typer.echo("\u2500\u2500 News RSS \u2500\u2500")
+        n = scrape_news()
+        typer.echo(f"   {n} new items")
+
+
+@app.command()
+def backfill(
+    since: str = typer.Option(
+        "2024-04",
+        help="Earliest YYYY-MM month to fetch (default 2024-04, the start of the standardised TSO publication format)",
+    ),
+    area: str = typer.Option("all", help="Area slug or 'all'"),
+):
+    """One-shot historical backfill of every month from --since to today.
+
+    Idempotent: existing rows are upserted in place via (area, date, time) PK,
+    so this is safe to re-run. Designed to be invoked once locally or via
+    workflow_dispatch, then `scrape` handles incremental daily updates.
+    """
+    from datetime import date as _date
+    from repower.scrapers.areas import ALL_SCRAPERS, AREA_NAMES
+
+    try:
+        sy, sm = [int(x) for x in since.split("-")]
+    except Exception as e:
+        raise typer.BadParameter(f"--since must be YYYY-MM, got {since!r}") from e
+
+    today = _date.today()
+    months = (today.year - sy) * 12 + (today.month - sm)
+    if months < 0:
+        raise typer.BadParameter(f"--since {since} is in the future")
+
+    typer.echo(f"\u2550\u2550\u2550 BACKFILL  {since} \u2192 {today:%Y-%m}  ({months + 1} months) \u2550\u2550\u2550")
+    targets = [cls for cls in ALL_SCRAPERS if area in ("all", cls.AREA)]
+    if not targets:
+        raise typer.BadParameter(f"Unknown area: {area}")
+
+    grand = 0
+    for cls in targets:
+        s = cls()
+        try:
+            n = s.scrape(months_back=months)
+        except Exception as e:  # noqa: BLE001
+            typer.echo(f"   {AREA_NAMES.get(s.AREA, s.AREA):<25} CRASHED: {e}", err=True)
+            n = 0
+        typer.echo(f"   {AREA_NAMES.get(s.AREA, s.AREA):<25} {n:>7} rows upserted")
+        grand += n
+    typer.echo(f"\u2550\u2550\u2550 TOTAL {grand} rows \u2550\u2550\u2550")
 
 
 @app.command()

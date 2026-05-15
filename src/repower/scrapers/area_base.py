@@ -71,14 +71,20 @@ class BaseAreaScraper:
 
     def fetch_csv(self, year: int, month: int) -> Optional[pd.DataFrame]:
         last_err: Exception | None = None
+        # Some TSO sites (e.g. Kyuden) reject requests without a browser UA.
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
+        }
         for url in self.csv_urls(year, month):
             try:
-                resp = httpx.get(url, timeout=30, follow_redirects=True)
-                if resp.status_code == 404:
+                raw = _http_get(url, headers=headers)
+                if raw is None:  # 404 → try next URL
                     continue
-                resp.raise_for_status()
                 logger.info("[%s] fetched %s", self.AREA, url)
-                raw = resp.content
                 # Strip BOM if present even when encoding declared utf-8-sig
                 if raw[:3] == b"\xef\xbb\xbf":
                     raw = raw[3:]
@@ -118,8 +124,13 @@ class BaseAreaScraper:
         keep = [c for c in df.columns if c in {"date", "time", *SUPPLY_FIELDS}]
         df = df[keep].copy()
 
-        # Parse date — accept YYYY/M/D, YYYY-MM-DD, etc.
-        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+        # Parse date — accept YYYY/M/D, YYYY-MM-DD, YYYYMMDD (e.g. Kyuden), etc.
+        date_str = df["date"].astype(str).str.strip()
+        # If everything looks like 8-digit YYYYMMDD, parse with explicit format.
+        if date_str.str.fullmatch(r"\d{8}").all():
+            df["date"] = pd.to_datetime(date_str, format="%Y%m%d", errors="coerce").dt.date
+        else:
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
 
         # Normalize time strings to "HH:MM"
         df["time"] = df["time"].astype(str).str.strip()
@@ -187,6 +198,56 @@ class BaseAreaScraper:
             except Exception as e:  # noqa: BLE001
                 logger.error("[%s] %04d-%02d parse/upsert failed: %s", self.AREA, y, m, e)
         return total
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# HTTP layer with anti-bot fallback
+#
+# Some TSO sites (notably Kyuden via Akamai) reject plain Python TLS
+# fingerprints with HTTP 403. We try fast `httpx` first; on 403 we retry
+# with `curl_cffi` which impersonates a real Chrome TLS+JA3 fingerprint.
+# `curl_cffi` is an optional dependency — we degrade gracefully if absent.
+# ─────────────────────────────────────────────────────────────────────────
+
+def _http_get(url: str, headers: dict | None = None) -> Optional[bytes]:
+    """Return response bytes, or None on 404. Raises on other errors."""
+    try:
+        resp = httpx.get(url, timeout=30, follow_redirects=True, headers=headers)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code == 403:
+            # Try anti-bot fallback
+            blob = _http_get_curl_cffi(url, headers)
+            if blob is not None:
+                return blob
+        resp.raise_for_status()
+        return resp.content
+    except httpx.HTTPStatusError:
+        raise
+    except Exception:
+        # Network glitch — try curl_cffi once before giving up
+        blob = _http_get_curl_cffi(url, headers)
+        if blob is not None:
+            return blob
+        raise
+
+
+def _http_get_curl_cffi(url: str, headers: dict | None = None) -> Optional[bytes]:
+    """Fetch via curl_cffi with Chrome impersonation. Returns None if unavailable."""
+    try:
+        from curl_cffi import requests as cr  # type: ignore
+    except Exception:
+        return None
+    try:
+        r = cr.get(url, impersonate="chrome", timeout=30, headers=headers or {})
+        if r.status_code == 404:
+            return None
+        if 200 <= r.status_code < 300:
+            logger.info("curl_cffi succeeded for %s", url)
+            return r.content
+    except Exception as e:  # noqa: BLE001
+        logger.debug("curl_cffi fallback failed for %s: %s", url, e)
+    return None
 
 
 def _normalize_hhmm(s: str) -> str | None:
