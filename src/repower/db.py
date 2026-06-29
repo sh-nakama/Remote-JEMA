@@ -88,6 +88,22 @@ class FuelDaily(Base):
     __table_args__ = (UniqueConstraint("date", "ticker", name="uq_fuel_date_ticker"),)
 
 
+# EPRX balancing + tieline *data* live in compressed Parquet (see
+# repower.config.EPRX_BALANCING_PARQUET / EPRX_TIELINE_PARQUET), not SQLite —
+# the long format compresses ~200x better as columnar Parquet (≈7 MB vs ≈1.4 GB)
+# and keeps the HF-synced DB small. Only the conditional-GET cache stays in SQLite.
+
+
+# ── EPRX conditional-GET cache (shared via HF-synced DB) ───────────────────
+class EprxHttpCache(Base):
+    __tablename__ = "eprx_http_cache"
+    url = Column(String(256), primary_key=True)
+    etag = Column(String(256))
+    last_modified = Column(String(64))
+    last_status = Column(Integer)
+    last_checked = Column(DateTime)
+
+
 # ── News items ─────────────────────────────────────────────────────────────
 class NewsItem(Base):
     __tablename__ = "news_items"

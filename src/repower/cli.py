@@ -21,6 +21,7 @@ def scrape(
     skip_jepx: bool = typer.Option(False, help="Skip JEPX spot prices"),
     skip_fuels: bool = typer.Option(False, help="Skip fuel futures"),
     skip_news: bool = typer.Option(False, help="Skip news RSS"),
+    skip_eprx: bool = typer.Option(False, help="Skip EPRX balancing + tieline data"),
     jepx_year: Optional[int] = typer.Option(None, help="JEPX year to fetch (default: current)"),
     fuel_days: int = typer.Option(7, help="Days of fuel data to fetch"),
 ):
@@ -54,6 +55,15 @@ def scrape(
         n = scrape_news()
         typer.echo(f"   {n} new items")
 
+    if not skip_eprx:
+        from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
+        typer.echo("\u2500\u2500 EPRX balancing \u2500\u2500")
+        n = scrape_eprx()
+        typer.echo(f"   {n} rows upserted")
+        typer.echo("\u2500\u2500 EPRX tieline \u2500\u2500")
+        n = scrape_eprx_tieline()
+        typer.echo(f"   {n} rows upserted")
+
 
 @app.command()
 def backfill(
@@ -65,6 +75,10 @@ def backfill(
     jepx_since: int = typer.Option(
         2024,
         help="Earliest JEPX year to backfill (one CSV per year). Set to 0 to skip JEPX.",
+    ),
+    eprx_since: int = typer.Option(
+        2025,
+        help="Earliest JFY to backfill EPRX balancing + tieline. Set to 0 to skip EPRX.",
     ),
 ):
     """One-shot historical backfill of every month from --since to today.
@@ -114,6 +128,12 @@ def backfill(
             typer.echo(f"   JEPX {y}                  {n:>7} rows upserted")
         typer.echo(f"\u2550\u2550\u2550 JEPX TOTAL {sum(results.values())} rows \u2550\u2550\u2550")
 
+    if eprx_since and eprx_since > 0:
+        from repower.scrapers.eprx import _current_jfy, scrape_eprx_range
+        typer.echo(f"\u2550\u2550\u2550 EPRX BACKFILL  JFY {eprx_since} \u2192 {_current_jfy()} \u2550\u2550\u2550")
+        n = scrape_eprx_range(eprx_since)
+        typer.echo(f"   EPRX TOTAL {n} rows upserted")
+
 
 @app.command()
 def analyze(
@@ -154,6 +174,7 @@ def run_all(
     from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.fuels_futures import scrape_fuels
     from repower.scrapers.news_rss import scrape_news
+    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
     from repower.analysis.features import run_analysis
     from repower.notify.webhook import notify as do_notify
 
@@ -164,6 +185,8 @@ def run_all(
     scrape_jepx()
     scrape_fuels()
     scrape_news()
+    scrape_eprx()
+    scrape_eprx_tieline()
 
     typer.echo("═══ ANALYZE ═══")
     yesterday = yesterday_jst()
