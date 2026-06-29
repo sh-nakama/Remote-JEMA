@@ -6,6 +6,7 @@ build/
 .venv/
 .env
 data/*.db
+data/*.parquet
 *.db-journal
 .ruff_cache/
 .pytest_cache/

@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import json
 from datetime import date, timedelta
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 from sqlalchemy import func, select
 
-from repower.config import DB_PATH
-from repower.db import DemandSupply30m, EprxBalancing
+from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
+from repower.db import DemandSupply30m
 from repower.scrapers.areas import AREA_NAMES
 
 import repower.dashboard.theme as theme
@@ -76,17 +77,27 @@ TIELINE_MARKETS = ["DCM", "DAM"]
 
 @st.cache_data(show_spinner=False)
 def _overall_date_bounds(_cache_buster: int = 0) -> tuple[date, date] | None:
-    """Overall (min, max) date across DemandSupply30m and EprxBalancing."""
-    session = _db_session()
+    """Overall (min, max) date across supply/demand (SQLite) and EPRX (Parquet)."""
     mins: list[date] = []
     maxs: list[date] = []
-    for model in (DemandSupply30m, EprxBalancing):
-        row = session.execute(
-            select(func.min(model.date), func.max(model.date))
-        ).one_or_none()
-        if row and row[0] is not None:
-            mins.append(row[0])
-            maxs.append(row[1])
+
+    # Supply/demand lives in SQLite.
+    session = _db_session()
+    row = session.execute(
+        select(func.min(DemandSupply30m.date), func.max(DemandSupply30m.date))
+    ).one_or_none()
+    if row and row[0] is not None:
+        mins.append(row[0])
+        maxs.append(row[1])
+
+    # EPRX balancing lives in Parquet (date stored as ISO 'YYYY-MM-DD' string).
+    p = Path(EPRX_BALANCING_PARQUET)
+    if p.exists():
+        dser = pd.read_parquet(p, columns=["date"])["date"]
+        if not dser.empty:
+            mins.append(date.fromisoformat(str(dser.min())))
+            maxs.append(date.fromisoformat(str(dser.max())))
+
     if not mins:
         return None
     return min(mins), max(maxs)

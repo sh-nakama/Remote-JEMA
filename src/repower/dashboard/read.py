@@ -13,21 +13,20 @@ Output frames always carry a ``datetime`` column equal to the bucket start
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from typing import Callable, Mapping
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 
+from repower.config import EPRX_BALANCING_PARQUET, EPRX_TIELINE_PARQUET
 from repower.db import (
     DemandSupply30m,
-    EprxBalancing,
-    EprxTieline,
     JepxAreaPrice30m,
     get_session,
     init_db,
 )
-from sqlalchemy import func
 
 
 # ── Reducer inference ──────────────────────────────────────────────────────
@@ -283,6 +282,36 @@ def load_wholesale_grid(
     }
 
 
+# ── EPRX Parquet readers ───────────────────────────────────────────────────
+# Balancing/tieline data lives in compressed Parquet (see config). We read only
+# the needed slice via pyarrow predicate pushdown (filters=) so the full file is
+# never materialised. ``date`` is an ISO string column, so range filters use
+# ISO-string bounds (lexicographic order == chronological).
+
+def _read_balancing(product: str, area: str, start: date, end: date,
+                    path=None) -> pd.DataFrame:
+    p = Path(path or EPRX_BALANCING_PARQUET)
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p, filters=[
+        ("product", "==", product),
+        ("area", "==", area),
+        ("date", ">=", start.isoformat()),
+        ("date", "<=", end.isoformat()),
+    ])
+
+
+def _read_tieline(market: str, start: date, end: date, path=None) -> pd.DataFrame:
+    p = Path(path or EPRX_TIELINE_PARQUET)
+    if not p.exists():
+        return pd.DataFrame()
+    return pd.read_parquet(p, filters=[
+        ("market", "==", market),
+        ("date", ">=", start.isoformat()),
+        ("date", "<=", end.isoformat()),
+    ])
+
+
 # ── Balancing (EPRX) ───────────────────────────────────────────────────────
 
 @st.cache_data(show_spinner=False)
@@ -299,24 +328,9 @@ def load_balancing_grid(
     ``missing_mw`` is derived **after** aggregation as agg(demand) - agg(contracted).
     Returns ``{"volume": [...], "price": [...]}``.
     """
-    session = _db_session()
-    rows = session.execute(
-        select(EprxBalancing).where(
-            and_(
-                EprxBalancing.product == product,
-                EprxBalancing.area == area,
-                EprxBalancing.date >= start,
-                EprxBalancing.date <= end,
-            )
-        )
-    ).scalars().all()
-    if not rows:
+    long_df = _read_balancing(product, area, start, end)
+    if long_df.empty:
         return {"volume": [], "price": []}
-
-    long_df = pd.DataFrame(
-        [{c.name: getattr(r, c.name) for c in EprxBalancing.__table__.columns}
-         for r in rows]
-    )
     long_df = _rollover_datetime(long_df)
 
     wide = long_df.pivot_table(
@@ -409,23 +423,9 @@ def load_tieline(
     Pivots metric->columns, applies the Mar-14 combined-zone merge on read,
     then aggregates per pair. Returns a list of records (one per pair/bucket).
     """
-    session = _db_session()
-    rows = session.execute(
-        select(EprxTieline).where(
-            and_(
-                EprxTieline.market == market,
-                EprxTieline.date >= start,
-                EprxTieline.date <= end,
-            )
-        )
-    ).scalars().all()
-    if not rows:
+    long_df = _read_tieline(market, start, end)
+    if long_df.empty:
         return []
-
-    long_df = pd.DataFrame(
-        [{c.name: getattr(r, c.name) for c in EprxTieline.__table__.columns}
-         for r in rows]
-    )
     long_df = _rollover_datetime(long_df)
 
     wide = long_df.pivot_table(
@@ -511,39 +511,20 @@ def balancing_period_stats(
     area: str,
     start: date,
     end: date,
-    db_path: str | None = None,
+    path: str | None = None,
 ) -> dict[str, float | None]:
     """Mean balancing stats for *product* / *area* over ``[start, end]``.
 
-    Computed over the raw block rows in the window — NOT the aggregation level.
-    EprxBalancing is long-format (one row per metric), so each metric is reduced
-    independently and ``avg_unprocured_mw`` is derived as
+    Computed over the raw block rows (from the balancing Parquet) in the window —
+    NOT the aggregation level. The long format (one row per metric) is reduced
+    per metric and ``avg_unprocured_mw`` is derived as
     ``avg_demand_mw - avg_contracted_mw``.
 
     Returns ``{"avg_demand_mw", "avg_contracted_mw", "avg_unprocured_mw",
     "avg_price", "avg_max_price"}`` (floats, or ``None`` where no data).
     """
-    session = get_session(db_path)
-    try:
-        rows = session.execute(
-            select(
-                EprxBalancing.metric,
-                func.avg(EprxBalancing.value),
-            )
-            .where(
-                and_(
-                    EprxBalancing.product == product,
-                    EprxBalancing.area == area,
-                    EprxBalancing.date >= start,
-                    EprxBalancing.date <= end,
-                )
-            )
-            .group_by(EprxBalancing.metric)
-        ).all()
-    finally:
-        session.close()
-
-    means = {metric: _mean(avg) for metric, avg in rows}
+    df = _read_balancing(product, area, start, end, path)
+    means = {} if df.empty else df.groupby("metric")["value"].mean().to_dict()
 
     avg_demand = means.get("demand_mw")
     avg_contracted = means.get("contracted_mw")
@@ -667,35 +648,16 @@ def balancing_export_frame(
     area: str,
     start: date,
     end: date,
-    db_path: str | None = None,
+    path: str | None = None,
 ) -> pd.DataFrame:
     """Merged balancing volume + price frame for *product*/*area* (datetime-keyed).
 
-    Pivots the long EprxBalancing rows to wide, derives ``missing_mw`` and keeps
-    the volume + price columns. Empty frame if no data.
+    Pivots the long balancing-Parquet rows to wide, derives ``missing_mw`` and
+    keeps the volume + price columns. Empty frame if no data.
     """
-    session = get_session(db_path)
-    try:
-        rows = session.execute(
-            select(EprxBalancing).where(
-                and_(
-                    EprxBalancing.product == product,
-                    EprxBalancing.area == area,
-                    EprxBalancing.date >= start,
-                    EprxBalancing.date <= end,
-                )
-            )
-        ).scalars().all()
-    finally:
-        session.close()
-
-    if not rows:
+    long_df = _read_balancing(product, area, start, end, path)
+    if long_df.empty:
         return pd.DataFrame()
-
-    long_df = pd.DataFrame(
-        [{c.name: getattr(r, c.name) for c in EprxBalancing.__table__.columns}
-         for r in rows]
-    )
     long_df = _rollover_datetime(long_df)
 
     wide = long_df.pivot_table(

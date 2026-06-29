@@ -13,7 +13,16 @@ Restyle the Streamlit dashboard into a **9-area × 2-column grid** (supply/deman
 
 ---
 
-## A. Data model (`src/repower/db.py`)
+## A. Data model
+
+> **Update (storage):** EPRX balancing/tieline **data** is stored as compressed
+> **Parquet** (`data/eprx_balancing.parquet`, `data/eprx_tieline.parquet`), not
+> SQLite — the long format is ~200× smaller as columnar Parquet (≈7 MB vs ≈1.4 GB),
+> keeping the HF-synced artifacts small. Only the conditional-GET cache
+> (`EprxHttpCache`) stays in SQLite. Paths live in `repower.config`; the scraper
+> merge-writes Parquet (last write wins on the logical key) and the read layer
+> reads filtered slices via pyarrow predicate pushdown. The schema below describes
+> the columns (originally modeled as SQLite tables).
 
 Long format (one row per metric → new metrics need no migration). Matches existing idiom: autoincrement PK + named `UniqueConstraint`, `Date` date, `String(5)` "HH:MM" time, lowercase area slugs, `東京 → tepco`. Append after `FuelDaily`, before `NewsItem`. Add `Boolean` to the sqlalchemy import.
 

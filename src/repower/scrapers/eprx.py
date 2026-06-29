@@ -27,17 +27,13 @@ import logging
 import re
 import zipfile
 from datetime import date as _date, datetime, timezone
+from pathlib import Path
 
 import httpx
-from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
+import pandas as pd
 
-from repower.db import (
-    EprxBalancing,
-    EprxHttpCache,
-    EprxTieline,
-    get_session,
-    init_db,
-)
+from repower.config import EPRX_BALANCING_PARQUET, EPRX_TIELINE_PARQUET
+from repower.db import EprxHttpCache, get_session, init_db
 
 logger = logging.getLogger(__name__)
 
@@ -379,56 +375,43 @@ def parse_tieline_csv(
     return rows
 
 
-# ── Upserts ──────────────────────────────────────────────────────────────────
-# Chunked executemany: EPRX files carry up to ~100k long rows each and the daily
-# cron re-upserts the whole current fiscal year, so row-by-row execute is far too
-# slow. We build the upsert statement once and feed it chunks of param dicts.
-_UPSERT_CHUNK = 5000
+# ── Parquet merge (EPRX data lives in compressed Parquet, not SQLite) ─────────
+# The long format compresses ~200x better as columnar Parquet than as SQLite
+# rows+indexes, so balancing/tieline data is merged into Parquet files keyed on
+# the same logical unique columns (last write wins).
+_BAL_KEYS = ["product_code", "area", "date", "time", "metric"]
+_TIE_KEYS = ["market", "pair", "date", "time", "metric"]
 
 
-def _bulk_upsert(model, rows: list[dict], index_elements: list[str], db_path: str | None) -> int:
-    """Chunked on-conflict upsert via executemany. Returns rows processed."""
+def _merge_parquet(path, rows: list[dict], keys: list[str]) -> int:
+    """Merge *rows* into the Parquet at *path*, de-duplicating on *keys* (last
+    write wins). ``date`` is stored as an ISO ``YYYY-MM-DD`` string so date-range
+    filters and the downstream datetime construction work uniformly. Returns the
+    number of rows processed."""
     if not rows:
         return 0
-
-    init_db(db_path)
-    session = get_session(db_path)
-    now = datetime.now(timezone.utc)
-    base = sqlite_upsert(model)
-    stmt = base.on_conflict_do_update(
-        index_elements=index_elements,
-        set_={
-            "value": base.excluded.value,
-            "source_file": base.excluded.source_file,
-            "ingested_at": now,
-        },
-    )
-    affected = 0
-    try:
-        for i in range(0, len(rows), _UPSERT_CHUNK):
-            chunk = rows[i:i + _UPSERT_CHUNK]
-            session.execute(stmt, chunk)  # list param -> executemany
-            affected += len(chunk)
-        session.commit()
-    finally:
-        session.close()
-    return affected
+    new = pd.DataFrame(rows)
+    new["date"] = new["date"].astype(str)
+    path = Path(path)
+    if path.exists():
+        existing = pd.read_parquet(path)
+        combined = pd.concat([existing, new], ignore_index=True)
+    else:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        combined = new
+    combined = combined.drop_duplicates(subset=keys, keep="last").reset_index(drop=True)
+    combined.to_parquet(path, compression="zstd", index=False)
+    return len(new)
 
 
-def upsert_eprx(rows: list[dict], db_path: str | None = None) -> int:
-    """Upsert balancing rows keyed on uq_eprx_bal. Returns rows processed."""
-    return _bulk_upsert(
-        EprxBalancing, rows,
-        ["product_code", "area", "date", "time", "metric"], db_path,
-    )
+def upsert_eprx(rows: list[dict], path=None) -> int:
+    """Merge balancing rows into the balancing Parquet. Returns rows processed."""
+    return _merge_parquet(path or EPRX_BALANCING_PARQUET, rows, _BAL_KEYS)
 
 
-def upsert_eprx_tieline(rows: list[dict], db_path: str | None = None) -> int:
-    """Upsert tieline rows keyed on uq_eprx_tie. Returns rows processed."""
-    return _bulk_upsert(
-        EprxTieline, rows,
-        ["market", "pair", "date", "time", "metric"], db_path,
-    )
+def upsert_eprx_tieline(rows: list[dict], path=None) -> int:
+    """Merge tieline rows into the tieline Parquet. Returns rows processed."""
+    return _merge_parquet(path or EPRX_TIELINE_PARQUET, rows, _TIE_KEYS)
 
 
 # ── Fetch (network) with DB-backed conditional GET ───────────────────────────
@@ -548,7 +531,7 @@ def _scrape_products(
                             logger.warning("EPRX %s %s: 0 rows parsed from %s",
                                            product, jfy, name)
                             continue
-                        total += upsert_eprx(rows, db_path=db_path)
+                        total += upsert_eprx(rows)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("EPRX parse %s (%s): %s", name, product, e)
             except Exception as e:  # noqa: BLE001
@@ -575,7 +558,7 @@ def _scrape_tieline(
                             logger.warning("EPRX tieline %s %s: 0 rows parsed from %s",
                                            market, jfy, name)
                             continue
-                        total += upsert_eprx_tieline(rows, db_path=db_path)
+                        total += upsert_eprx_tieline(rows)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("EPRX tieline parse %s (%s): %s", name, market, e)
             except Exception as e:  # noqa: BLE001
