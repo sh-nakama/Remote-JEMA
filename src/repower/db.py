@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column,
@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
 )
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from repower.config import DB_PATH
@@ -95,7 +96,7 @@ class NewsItem(Base):
     title = Column(Text)
     summary = Column(Text)
     published_at = Column(DateTime)
-    fetched_at = Column(DateTime, default=datetime.utcnow)
+    fetched_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ── Analysis outputs ──────────────────────────────────────────────────────
@@ -109,19 +110,31 @@ class AnalysisRecord(Base):
     tokens_in = Column(Integer)
     tokens_out = Column(Integer)
     cost_usd = Column(Float)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ── Engine / session ──────────────────────────────────────────────────────
-def get_engine(db_path: str | None = None):
+_ENGINES: dict[str, Engine] = {}
+_INITIALIZED: set[str] = set()
+
+
+def get_engine(db_path: str | None = None) -> Engine:
     path = db_path or str(DB_PATH)
-    return create_engine(f"sqlite:///{path}", echo=False)
+    engine = _ENGINES.get(path)
+    if engine is None:
+        engine = create_engine(f"sqlite:///{path}", echo=False)
+        _ENGINES[path] = engine
+    return engine
 
 
-def init_db(db_path: str | None = None):
+def init_db(db_path: str | None = None) -> Engine:
     engine = get_engine(db_path)
+    path = db_path or str(DB_PATH)
+    if path in _INITIALIZED:
+        return engine
     Base.metadata.create_all(engine)
     _migrate_add_area_column(engine)
+    _INITIALIZED.add(path)
     return engine
 
 

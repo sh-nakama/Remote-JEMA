@@ -2,7 +2,7 @@
 name = "repower"
 version = "0.1.0"
 description = "Tokyo power market analysis bot – TEPCO supply/demand, JEPX spot prices, fuel drivers, news sentiment"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
     "pandas>=2.2",

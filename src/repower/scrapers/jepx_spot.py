@@ -19,7 +19,6 @@ import httpx
 import pandas as pd
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
-from repower.config import JEPX_BASE_URL
 from repower.db import JepxAreaPrice30m, JepxSpot30m, get_session, init_db
 
 logger = logging.getLogger(__name__)
@@ -63,10 +62,12 @@ def fetch_jepx_csv(year: int) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(text_data), header=0)
     cols = df.columns.tolist()
 
-    def _find_col(keyword: str, fallback: int) -> str:
+    def _find_col(keyword: str, fallback: int | None = None) -> str | None:
         for i, c in enumerate(cols):
             if keyword in str(c):
                 return cols[i]
+        if fallback is None:
+            return None
         return cols[fallback] if fallback < len(cols) else cols[0]
 
     date_col = cols[0]
@@ -80,8 +81,8 @@ def fetch_jepx_csv(year: int) -> pd.DataFrame:
 
     # Pull every area price column we can find, by Japanese keyword.
     for slug, kw in JEPX_AREA_KEYWORDS.items():
-        col = _find_col(kw, -1)
-        if col in df.columns:
+        col = _find_col(kw)
+        if col is not None and col in df.columns:
             result[f"{slug}_price"] = pd.to_numeric(df[col], errors="coerce")
         else:
             result[f"{slug}_price"] = pd.NA

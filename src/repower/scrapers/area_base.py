@@ -282,11 +282,13 @@ class BaseAreaScraper:
             df: pd.DataFrame | None = None
             if (y, m) in live_months:
                 df = self.fetch_csv(y, m)
-            if df is None and (y, m) in archive_dfs:
-                df = archive_dfs[(y, m)]
-                logger.info("[%s] %04d-%02d: using archive copy", self.AREA, y, m)
-            if df is None:
-                df = self.fetch_csv(y, m)
+                if df is None and (y, m) in archive_dfs:
+                    df = archive_dfs[(y, m)]
+                    logger.info("[%s] %04d-%02d: using archive copy", self.AREA, y, m)
+            else:
+                df = archive_dfs.get((y, m))
+                if df is None:
+                    df = self.fetch_csv(y, m)
             if df is None:
                 continue
             try:
