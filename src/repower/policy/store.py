@@ -311,12 +311,10 @@ def build_running_doc(key: str, db_path: str | None = None) -> str:
             f"_Generated: {_now():%Y-%m-%d %H:%M UTC}_",
             "",
         ]
+        if committee and committee.running_summary_md:
+            lines += ["## 議論の総括（会合横断シンセシス）", "", committee.running_summary_md, ""]
         if committee and committee.running_digest_en_md:
-            lines += ["## Overview (English)", "", committee.running_digest_en_md, ""]
-        if committee and committee.running_summary_md and committee.running_summary_md != "__doc__":
-            # running_summary_md holds the synthesis body; avoid recursion if it
-            # was previously set to the full doc.
-            pass
+            lines += ["## Synthesis overview (English)", "", committee.running_digest_en_md, ""]
         lines += ["## Meetings", ""]
         for m in meetings:
             date = f" — {m.meeting_date}" if m.meeting_date else ""
