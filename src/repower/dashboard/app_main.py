@@ -20,13 +20,14 @@ import streamlit as st
 from sqlalchemy import func, select
 
 from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
-from repower.db import DemandSupply30m
+from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
 from repower.scrapers.areas import AREA_NAMES
 
 import repower.dashboard.theme as theme
 from repower.dashboard.i18n import (
     DEFAULT_LANG,
     LANG_OPTIONS,
+    T,
     metric_labels,
 )
 from repower.dashboard.read import (
@@ -748,6 +749,133 @@ def render_analyses() -> None:
                     st.caption("Could not parse analysis features.")
 
 
+# ── Policy observer tab ──────────────────────────────────────────────────────
+
+@st.cache_data(show_spinner=False)
+def _policy_committees(_cache_buster: int) -> list[dict]:
+    session = _db_session()
+    try:
+        rows = (
+            session.query(PolicyCommittee)
+            .order_by(PolicyCommittee.source, PolicyCommittee.committee_key)
+            .all()
+        )
+        return [
+            {
+                "committee_key": r.committee_key,
+                "name_ja": r.name_ja or r.committee_key,
+                "name_en": r.name_en or r.committee_key,
+                "url": r.url,
+                "source": r.source,
+                "latest_meeting": r.latest_meeting,
+                "running_summary_md": r.running_summary_md,
+                "running_digest_en_md": r.running_digest_en_md,
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+@st.cache_data(show_spinner=False)
+def _policy_meetings(key: str, _cache_buster: int) -> list[dict]:
+    session = _db_session()
+    try:
+        rows = (
+            session.query(PolicyMeeting)
+            .filter_by(committee_key=key)
+            .order_by(PolicyMeeting.meeting_num.desc())
+            .all()
+        )
+        return [
+            {
+                "meeting_num": r.meeting_num,
+                "meeting_date": str(r.meeting_date) if r.meeting_date else None,
+                "state": r.state,
+                "has_torimatome": bool(r.has_torimatome),
+                "briefing_md": r.briefing_md,
+                "digest_en_json": r.digest_en_json,
+            }
+            for r in rows
+        ]
+    finally:
+        session.close()
+
+
+def _policy_digest_answer(blob: str | None) -> str | None:
+    if not blob:
+        return None
+    try:
+        return (json.loads(blob) or {}).get("answer")
+    except (ValueError, TypeError):
+        return None
+
+
+def render_policy(cfg: dict) -> None:
+    """Policy observer view: per-committee running document + per-meeting briefings."""
+    lang = cfg.get("lang", DEFAULT_LANG)
+    st.header(T("policy_header", lang))
+
+    committees = _policy_committees(cfg["cache_buster"])
+    if not committees:
+        st.info(T("policy_no_data", lang))
+        return
+
+    labels = {c["committee_key"]: f"{c['name_en']} — {c['name_ja']}" for c in committees}
+    key = st.selectbox(
+        T("policy_committee", lang),
+        options=[c["committee_key"] for c in committees],
+        format_func=lambda k: labels.get(k, k),
+    )
+    row = next(c for c in committees if c["committee_key"] == key)
+    latest = f"第{row['latest_meeting']}回" if row["latest_meeting"] else "—"
+    st.caption(f"{row['source']} · {T('policy_latest', lang)}: {latest} · {row['url']}")
+
+    # Download the full running document (regenerated from the DB).
+    try:
+        from repower.policy.store import build_running_doc
+
+        st.download_button(
+            T("policy_download_doc", lang),
+            data=build_running_doc(key),
+            file_name=f"{key}.md",
+            mime="text/markdown",
+        )
+    except Exception:  # noqa: BLE001 — download is a convenience, never block the view
+        pass
+
+    if row.get("running_digest_en_md"):
+        st.subheader(T("policy_overview_en", lang))
+        st.markdown(row["running_digest_en_md"])
+    if row.get("running_summary_md"):
+        with st.expander(T("policy_synthesis_ja", lang), expanded=False):
+            st.markdown(row["running_summary_md"])
+
+    meetings = _policy_meetings(key, cfg["cache_buster"])
+    if not meetings:
+        st.caption(T("policy_no_meetings", lang))
+        return
+
+    st.subheader(T("policy_meetings", lang))
+    for m in meetings:
+        title = f"第{m['meeting_num']}回"
+        if m["meeting_date"]:
+            title += f" — {m['meeting_date']}"
+        if m["has_torimatome"]:
+            title += " 🏁"
+        if m["state"] != "done":
+            title += f"  ·  {m['state']}"
+        with st.expander(title, expanded=False):
+            en = _policy_digest_answer(m["digest_en_json"])
+            if en:
+                st.markdown(f"**{T('policy_english_digest', lang)}**")
+                st.markdown(en)
+            if m["briefing_md"]:
+                st.markdown(m["briefing_md"])
+            elif not en:
+                st.caption(f"({m['state']}; not yet summarised)")
+
+
 # ── Main entry ───────────────────────────────────────────────────────────────
 
 def main(show_refresh: bool = False) -> None:
@@ -766,7 +894,7 @@ def main(show_refresh: bool = False) -> None:
     # selected view guarantees every chart draws at full width (and is faster).
     view = st.radio(
         "Market view",
-        ["Wholesale", "Balancing", "Drivers", "Analyses"],
+        ["Wholesale", "Balancing", "Drivers", "Analyses", "Policy"],
         horizontal=True,
         label_visibility="collapsed",
         key="top_view",
@@ -781,6 +909,8 @@ def main(show_refresh: bool = False) -> None:
             _render_balancing_tab(cfg)
         elif view == "Drivers":
             render_drivers(cfg)
+        elif view == "Policy":
+            render_policy(cfg)
         else:
             render_analyses()
     except Exception as exc:  # noqa: BLE001

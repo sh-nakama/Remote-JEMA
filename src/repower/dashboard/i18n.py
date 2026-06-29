@@ -53,6 +53,20 @@ _STRINGS: dict[str, dict[str, str]] = {
     "export_bm":                {"en": "Balancing Market",         "ja": "需給調整市場"},
     "export_ic":                {"en": "Interconnectors",          "ja": "連系線"},
 
+    # ── Policy observer ──────────────────────────────────────────────
+    "policy_header":            {"en": "Policy Observer",          "ja": "政策ウォッチャー"},
+    "policy_committee":         {"en": "Committee",                "ja": "委員会"},
+    "policy_latest":            {"en": "latest summarised",        "ja": "最新要約"},
+    "policy_overview_en":       {"en": "Overview (English)",       "ja": "概要（英語）"},
+    "policy_synthesis_ja":      {"en": "Discussion synthesis (Japanese)", "ja": "議論の総括（日本語）"},
+    "policy_meetings":          {"en": "Meetings",                 "ja": "会合一覧"},
+    "policy_english_digest":    {"en": "English digest",           "ja": "英語ダイジェスト"},
+    "policy_download_doc":      {"en": "📥 Download running document", "ja": "📥 ランニングドキュメントをダウンロード"},
+    "policy_no_data":           {"en": "No policy data yet. Run `repower policy detect` (and `repower policy run` to summarise).",
+                                 "ja": "政策データはまだありません。`repower policy detect`（要約は `repower policy run`）を実行してください。"},
+    "policy_no_meetings":       {"en": "No meetings recorded yet for this committee.",
+                                 "ja": "この委員会の会合はまだ記録されていません。"},
+
     # ── Main area ────────────────────────────────────────────────────
     "page_header":              {"en": "Half-Hourly Balancing Market Inspector",
                                  "ja": "30分単位 需給調整市場インスペクター"},

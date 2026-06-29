@@ -32,3 +32,16 @@ WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
 # ── LLM (deferred) ────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MONTHLY_CAP_USD: float = float(os.getenv("ANTHROPIC_MONTHLY_CAP_USD", "5.0"))
+
+# ── Policy observer ─────────────────────────────────────────────────────────
+# Per-committee running documents (regenerated from the DB). The committee/
+# meeting/material tables and their TEXT summary columns live in repower.db and
+# ride the existing Hugging Face sync, so no hf_sync change is needed.
+POLICY_DIR = DB_PATH.parent / "policy"
+
+# NotebookLM per-notebook source cap depends on the account plan tier. The CLI
+# does not enforce it; we read it here to size per-meeting ingestion and the
+# synthesis-notebook roll-up threshold. Architecture is cap-agnostic.
+NOTEBOOKLM_TIER: str = os.getenv("NOTEBOOKLM_TIER", "standard")
+_NOTEBOOKLM_TIER_CAPS = {"standard": 50, "plus": 100, "pro": 300, "ultra": 600}
+NOTEBOOKLM_SOURCE_CAP: int = _NOTEBOOKLM_TIER_CAPS.get(NOTEBOOKLM_TIER.lower(), 50)
