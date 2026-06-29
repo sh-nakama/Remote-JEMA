@@ -7,6 +7,7 @@ All tests use synthetic data and a temporary SQLite path via pytest's
 from __future__ import annotations
 
 import datetime as dt
+import threading
 
 from sqlalchemy import func, select
 
@@ -37,6 +38,31 @@ def test_get_engine_memoization(tmp_path):
     assert eng_a1 is eng_a2
     # Different path → different object.
     assert eng_a1 is not eng_b
+
+
+def test_get_engine_thread_safe(tmp_path):
+    """Concurrent get_engine() calls on an uncached path return one shared engine."""
+    path = str(tmp_path / "concurrent.db")
+    n_threads = 16
+    start = threading.Barrier(n_threads)
+    results: list = []
+    results_lock = threading.Lock()
+
+    def worker():
+        start.wait()  # maximize contention on the cache-population path
+        engine = get_engine(path)
+        with results_lock:
+            results.append(engine)
+
+    threads = [threading.Thread(target=worker) for _ in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(results) == n_threads
+    # The lock must guarantee every thread observes the same single engine.
+    assert all(e is results[0] for e in results)
 
 
 # ── Fuel upsert idempotency ────────────────────────────────────────────────

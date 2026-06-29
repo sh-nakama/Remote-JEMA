@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -114,17 +115,26 @@ class AnalysisRecord(Base):
 
 
 # ── Engine / session ──────────────────────────────────────────────────────
+# Engines are memoized per resolved path so we don't rebuild them (or re-run
+# create_all/migrate) on every upsert. Guarded by a lock so concurrent callers
+# (e.g. a threaded scrape, or Streamlit's worker threads) can't race on cache
+# population or run the migration twice.
 _ENGINES: dict[str, Engine] = {}
 _INITIALIZED: set[str] = set()
+_LOCK = threading.Lock()
 
 
 def get_engine(db_path: str | None = None) -> Engine:
     path = db_path or str(DB_PATH)
     engine = _ENGINES.get(path)
-    if engine is None:
-        engine = create_engine(f"sqlite:///{path}", echo=False)
-        _ENGINES[path] = engine
-    return engine
+    if engine is not None:
+        return engine
+    with _LOCK:
+        engine = _ENGINES.get(path)
+        if engine is None:
+            engine = create_engine(f"sqlite:///{path}", echo=False)
+            _ENGINES[path] = engine
+        return engine
 
 
 def init_db(db_path: str | None = None) -> Engine:
@@ -132,9 +142,11 @@ def init_db(db_path: str | None = None) -> Engine:
     path = db_path or str(DB_PATH)
     if path in _INITIALIZED:
         return engine
-    Base.metadata.create_all(engine)
-    _migrate_add_area_column(engine)
-    _INITIALIZED.add(path)
+    with _LOCK:
+        if path not in _INITIALIZED:
+            Base.metadata.create_all(engine)
+            _migrate_add_area_column(engine)
+            _INITIALIZED.add(path)
     return engine
 
 
