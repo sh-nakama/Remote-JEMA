@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Any
 
 import httpx
 
 from repower.config import WEBHOOK_URL
 from repower.db import AnalysisRecord, get_session, init_db
+from repower.timeutil import yesterday_jst
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +28,14 @@ def _format_discord_embed(features: dict[str, Any]) -> dict:
     if demand and demand.get("status") != "no_data":
         vs = demand.get("vs_30d_avg_pct", "N/A")
         vs_str = f"{vs:+.1f}%" if isinstance(vs, (int, float)) else vs
+        peak_mw = demand.get("peak_mw", "?")
+        avg_mw = demand.get("avg_mw", "?")
+        peak_str = f"{peak_mw:,}" if isinstance(peak_mw, (int, float)) else peak_mw
+        avg_str = f"{avg_mw:,}" if isinstance(avg_mw, (int, float)) else avg_mw
         sections.append(
             f"**⚡ Demand**\n"
-            f"Peak: {demand.get('peak_mw', '?'):,} MW @ {demand.get('peak_time', '?')}\n"
-            f"Avg: {demand.get('avg_mw', '?'):,} MW (vs 30d: {vs_str})"
+            f"Peak: {peak_str} MW @ {demand.get('peak_time', '?')}\n"
+            f"Avg: {avg_str} MW (vs 30d: {vs_str})"
         )
 
     # JEPX section
@@ -61,7 +66,7 @@ def _format_discord_embed(features: dict[str, Any]) -> dict:
         fuel_lines = []
         for ticker, info in fuels.items():
             fuel_lines.append(f"{ticker}: {info['close']} {info['currency']}")
-        sections.append(f"**🛢️ Fuels**\n" + " | ".join(fuel_lines))
+        sections.append("**🛢️ Fuels**\n" + " | ".join(fuel_lines))
 
     # News
     headlines = features.get("news_headlines", [])
@@ -129,7 +134,7 @@ def post_webhook(
 def notify(target_date: date | None = None, dry_run: bool = False, db_path: str | None = None) -> bool:
     """Load features for a date and post to webhook."""
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = yesterday_jst()
 
     init_db(db_path)
     session = get_session(db_path)

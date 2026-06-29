@@ -23,6 +23,7 @@ from repower.db import (
     get_session,
     init_db,
 )
+from repower.timeutil import yesterday_jst
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,6 @@ def compute_features(target_date: date, db_path: str | None = None) -> dict[str,
         # Date windows
         d7 = target_date - timedelta(days=7)
         d30 = target_date - timedelta(days=30)
-        d90 = target_date - timedelta(days=90)
 
         # ── Demand/Supply for target date ──────────────────────────────────
         ds_today = _query_demand_supply(session, target_date, target_date)
@@ -193,7 +193,7 @@ def save_features(target_date: date, features: dict, db_path: str | None = None)
 def run_analysis(target_date: date | None = None, db_path: str | None = None) -> dict[str, Any]:
     """Compute and persist features for a date (default: yesterday)."""
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = yesterday_jst()
 
     features = compute_features(target_date, db_path)
     save_features(target_date, features, db_path)

@@ -34,7 +34,7 @@ def push_db_to_hf() -> None:
         path_in_repo="repower.db",
         repo_id=HF_DATASET_REPO,
         repo_type="dataset",
-        commit_message=f"Update repower.db",
+        commit_message="Update repower.db",
     )
     logger.info("Pushed %s to %s", DB_PATH, HF_DATASET_REPO)
 

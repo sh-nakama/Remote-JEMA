@@ -16,18 +16,6 @@ _raw_db = os.getenv("REPOWER_DB_PATH", "data/repower.db")
 DB_PATH = Path(_raw_db) if Path(_raw_db).is_absolute() else Path.cwd() / _raw_db
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# ── TEPCO ──────────────────────────────────────────────────────────────────
-TEPCO_BASE_URL = os.getenv(
-    "TEPCO_BASE_URL",
-    "https://www.tepco.co.jp/forecast/html/images",
-)
-
-# ── JEPX ───────────────────────────────────────────────────────────────────
-JEPX_BASE_URL = os.getenv(
-    "JEPX_BASE_URL",
-    "http://www.jepx.org/market/excel",
-)
-
 # ── Hugging Face ───────────────────────────────────────────────────────────
 HF_TOKEN: str | None = os.getenv("HF_TOKEN")
 HF_DATASET_REPO: str = os.getenv("HF_DATASET_REPO", "")

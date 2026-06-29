@@ -10,6 +10,7 @@ Tickers:
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, timedelta
 
 import yfinance as yf
@@ -50,7 +51,7 @@ def fetch_fuels(days_back: int = 7) -> list[dict]:
                     continue
                 val = row["Close"]
                 close_val = float(val.iloc[0]) if hasattr(val, "iloc") else float(val)
-                if close_val is None:
+                if math.isnan(close_val):
                     continue
                 rows.append({
                     "date": idx.date(),

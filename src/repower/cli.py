@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, timedelta
+from datetime import date
 from typing import Optional
 
 import typer
+
+from repower.timeutil import yesterday_jst
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -120,7 +122,7 @@ def analyze(
     """Compute analysis features for a given date."""
     from repower.analysis.features import run_analysis
 
-    target_date = date.fromisoformat(target) if target else date.today() - timedelta(days=1)
+    target_date = date.fromisoformat(target) if target else yesterday_jst()
     features = run_analysis(target_date)
     typer.echo(f"Analysis for {target_date}: {len(features)} feature keys computed")
 
@@ -133,7 +135,7 @@ def notify(
     """Post analysis digest to webhook."""
     from repower.notify.webhook import notify as do_notify
 
-    target_date = date.fromisoformat(target) if target else date.today() - timedelta(days=1)
+    target_date = date.fromisoformat(target) if target else yesterday_jst()
     ok = do_notify(target_date, dry_run=dry_run)
     if ok:
         typer.echo("✓ Notification sent")
@@ -164,8 +166,8 @@ def run_all(
     scrape_news()
 
     typer.echo("═══ ANALYZE ═══")
-    yesterday = date.today() - timedelta(days=1)
-    features = run_analysis(yesterday)
+    yesterday = yesterday_jst()
+    run_analysis(yesterday)
 
     typer.echo("═══ NOTIFY ═══")
     do_notify(yesterday, dry_run=dry_run)

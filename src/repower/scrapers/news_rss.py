@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import feedparser
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
@@ -84,7 +84,7 @@ def fetch_news() -> list[dict]:
                     "title": title[:500],
                     "summary": summary[:1000],
                     "published_at": _parse_published(entry),
-                    "fetched_at": datetime.utcnow(),
+                    "fetched_at": datetime.now(timezone.utc),
                 })
         except Exception as e:
             logger.error("RSS %s: %s", feed_cfg["source"], e)
