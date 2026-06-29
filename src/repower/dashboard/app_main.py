@@ -3,12 +3,14 @@
 Entry points (``dashboard/app.py``, ``space/app.py``) call ``st.set_page_config``
 and then ``main()``; therefore ``main()`` must NOT call ``set_page_config``. It
 injects :data:`repower.dashboard.theme.GLOBAL_CSS` and renders four top-level
-tabs: Wholesale, Balancing, Drivers, Analyses.
+views (Wholesale, Balancing, Drivers, Analyses) selected via a radio — only the
+active view is rendered, so the D3 chart iframes always draw at full width.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -248,21 +250,28 @@ def _render_sidebar(show_refresh: bool) -> dict:
     st.sidebar.title("Japan Power Markets")
 
     if show_refresh:
-        if st.sidebar.button("Refresh data"):
-            try:
-                with st.spinner("Pulling latest database from Hugging Face…"):
-                    from repower.hf_sync import pull_db_from_hf
-
-                    pull_db_from_hf()
-                    st.cache_resource.clear()
-                    st.cache_data.clear()
-                    st.session_state["cache_buster"] = (
-                        st.session_state.get("cache_buster", 0) + 1
-                    )
-                    st.session_state.pop("db_ready", None)
-                    st.rerun()
-            except Exception as exc:  # noqa: BLE001
-                st.sidebar.error(f"Refresh failed: {exc}")
+        if st.sidebar.button(
+            "🔄 Refresh data",
+            help="Pull the latest DB + Parquet from Hugging Face (if configured), then reload.",
+        ):
+            from repower.config import HF_DATASET_REPO, HF_TOKEN
+            hf_ready = bool(HF_TOKEN and HF_DATASET_REPO)
+            if hf_ready:
+                try:
+                    with st.spinner("Pulling latest data from Hugging Face…"):
+                        from repower.hf_sync import pull_db_from_hf
+                        pull_db_from_hf()
+                except Exception as exc:  # noqa: BLE001
+                    st.sidebar.error(f"HF pull failed (reloading local data): {exc}")
+            # ALWAYS clear caches + reload, so a fresh local scrape is picked up
+            # even when Hugging Face is not configured.
+            st.cache_resource.clear()
+            st.cache_data.clear()
+            st.session_state["cache_buster"] = st.session_state.get("cache_buster", 0) + 1
+            st.session_state.pop("db_ready", None)
+            if not hf_ready:
+                st.sidebar.info("Hugging Face not configured — reloaded local data only.")
+            st.rerun()
 
     st.sidebar.markdown("---")
 
@@ -276,7 +285,9 @@ def _render_sidebar(show_refresh: bool) -> dict:
         key="lang_select",
     )
 
-    # Date range — default to the last 30 days of available data.
+    # Date range — default to the last 60 days of available data. 60 (not 30) so
+    # the window still overlaps a market whose latest data lags the others (e.g.
+    # JEPX publishing behind balancing), avoiding an empty default view.
     cache_buster = st.session_state.get("cache_buster", 0)
     bounds = _overall_date_bounds(cache_buster)
     if bounds:
@@ -284,7 +295,7 @@ def _render_sidebar(show_refresh: bool) -> dict:
     else:
         data_max = date.today()
         data_min = data_max - timedelta(days=365)
-    default_start = max(data_min, data_max - timedelta(days=30))
+    default_start = max(data_min, data_max - timedelta(days=60))
 
     picked = st.sidebar.date_input(
         "Date range",
@@ -749,15 +760,30 @@ def main(show_refresh: bool = False) -> None:
 
     cfg = _render_sidebar(show_refresh)
 
-    tab_wholesale, tab_balancing, tab_drivers, tab_analyses = st.tabs(
-        ["Wholesale", "Balancing", "Drivers", "Analyses"]
+    # Top-level navigation via a radio, NOT st.tabs. st.tabs renders every panel
+    # on every run; the D3 chart iframes inside hidden panels draw at width 0 and
+    # collapse to ~4px, so non-active tabs appear blank. Rendering ONLY the
+    # selected view guarantees every chart draws at full width (and is faster).
+    view = st.radio(
+        "Market view",
+        ["Wholesale", "Balancing", "Drivers", "Analyses"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="top_view",
     )
+    st.markdown("")
 
-    with tab_wholesale:
-        _render_wholesale_tab(cfg)
-    with tab_balancing:
-        _render_balancing_tab(cfg)
-    with tab_drivers:
-        render_drivers(cfg)
-    with tab_analyses:
-        render_analyses()
+    # One view's failure must never blank or crash the whole app.
+    try:
+        if view == "Wholesale":
+            _render_wholesale_tab(cfg)
+        elif view == "Balancing":
+            _render_balancing_tab(cfg)
+        elif view == "Drivers":
+            render_drivers(cfg)
+        else:
+            render_analyses()
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).exception("View %r failed to render", view)
+        st.error(f"⚠️ The **{view}** view hit an error and couldn't render: {exc}")
+        st.caption("This has been logged. Try a different date range, or use Refresh data in the sidebar.")
