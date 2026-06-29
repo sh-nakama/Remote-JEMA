@@ -14,10 +14,10 @@ product (and per tieline market). Each ZIP holds CP932-encoded CSVs with a
 is 8 or 48; ``time`` is derived as ``(block_num-1) * 24/blocks_per_day`` and we
 NEVER interpolate 8-block data up to 48.
 
-This module ports ``Reference/dashboard_hh/data_loader.py`` to the project idiom:
-httpx + ``sqlite_upsert`` + ``get_session``/``init_db`` + logging, with a
-DB-backed conditional GET cache (``EprxHttpCache``) instead of the in-process
-dict the reference used. Parse functions are pure (no network).
+Parsed data is merged into compressed Parquet (see :mod:`repower.config`), and
+downloads go through the shared persistent conditional-GET cache in
+:mod:`repower.scrapers.http_cache` (so unchanged fiscal-year ZIPs 304-skip).
+Parse functions are pure (no network).
 """
 
 from __future__ import annotations
@@ -26,14 +26,13 @@ import io
 import logging
 import re
 import zipfile
-from datetime import date as _date, datetime, timezone
+from datetime import date as _date
 from pathlib import Path
 
-import httpx
 import pandas as pd
 
 from repower.config import EPRX_BALANCING_PARQUET, EPRX_TIELINE_PARQUET
-from repower.db import EprxHttpCache, get_session, init_db
+from repower.scrapers.http_cache import conditional_get, invalidate
 
 logger = logging.getLogger(__name__)
 
@@ -414,78 +413,37 @@ def upsert_eprx_tieline(rows: list[dict], path=None) -> int:
     return _merge_parquet(path or EPRX_TIELINE_PARQUET, rows, _TIE_KEYS)
 
 
-# ── Fetch (network) with DB-backed conditional GET ───────────────────────────
-def _read_cache(session, url: str) -> EprxHttpCache | None:
-    return session.get(EprxHttpCache, url)
-
-
-def _write_cache(session, url: str, etag, last_modified, status: int) -> None:
-    entry = session.get(EprxHttpCache, url)
-    now = datetime.now(timezone.utc)
-    if entry is None:
-        entry = EprxHttpCache(url=url)
-        session.add(entry)
-    entry.etag = etag
-    entry.last_modified = last_modified
-    entry.last_status = status
-    entry.last_checked = now
-    session.commit()
-
-
+# ── Fetch (network) via the shared conditional-GET cache ─────────────────────
 def _fetch_zip_csvs(
     url: str,
     db_path: str | None = None,
     force: bool = False,
 ) -> list[tuple[str, bytes]] | None:
-    """Conditional GET *url*, extract CSVs from the ZIP.
+    """Conditional GET *url* and extract CSVs from the ZIP.
 
-    Returns ``[(filename, raw_bytes), ...]`` on a fresh 200, ``None`` on 304 / no
-    change / failure (caller treats None as "nothing to do, no error").
+    Returns ``[(filename, raw_bytes), ...]`` on a fresh 200, or ``None`` on 304 /
+    404 / error (caller treats None as "nothing to do, no error"). Caching is
+    handled by :func:`repower.scrapers.http_cache.conditional_get`.
     """
-    init_db(db_path)
-    session = get_session(db_path)
     try:
-        headers: dict[str, str] = {}
-        if not force:
-            cached = _read_cache(session, url)
-            if cached is not None:
-                if cached.etag:
-                    headers["If-None-Match"] = cached.etag
-                if cached.last_modified:
-                    headers["If-Modified-Since"] = cached.last_modified
-
-        try:
-            resp = httpx.get(url, headers=headers, timeout=60, follow_redirects=True)
-        except httpx.HTTPError as e:
-            logger.warning("EPRX fetch %s: %s", url, e)
-            return None
-
-        if resp.status_code == 304:
-            logger.info("EPRX %s: 304 not modified", url)
-            _write_cache(session, url, resp.headers.get("ETag"),
-                         resp.headers.get("Last-Modified"), 304)
-            return None
-        if resp.status_code != 200:
-            logger.warning("EPRX %s: HTTP %s", url, resp.status_code)
-            _write_cache(session, url, None, None, resp.status_code)
-            return None
-
-        try:
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                csvs = [
-                    (name, zf.read(name))
-                    for name in zf.namelist()
-                    if name.lower().endswith(".csv")
-                ]
-        except zipfile.BadZipFile:
-            logger.warning("EPRX %s: bad zip", url)
-            return None
-
-        _write_cache(session, url, resp.headers.get("ETag"),
-                     resp.headers.get("Last-Modified"), 200)
-        return csvs
-    finally:
-        session.close()
+        status, content = conditional_get(url, db_path=db_path, force=force, timeout=60)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("EPRX fetch %s: %s", url, e)
+        return None
+    if status != "ok" or content is None:
+        logger.info("EPRX %s: %s", url, status)
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            return [
+                (name, zf.read(name))
+                for name in zf.namelist()
+                if name.lower().endswith(".csv")
+            ]
+    except zipfile.BadZipFile:
+        logger.warning("EPRX %s: bad zip", url)
+        invalidate(url, db_path)  # corrupt 200 — don't let it 304-skip next run
+        return None
 
 
 def _select_csvs(csvs: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
@@ -567,15 +525,22 @@ def _scrape_tieline(
 
 
 def scrape_eprx(db_path: str | None = None, force: bool = False) -> int:
-    """Scrape all EPRX products for the current JFY range. Returns rows upserted."""
-    n = _scrape_products(jfy_since=None, db_path=db_path, force=force)
+    """Scrape all EPRX products for the **current** fiscal year. Returns rows
+    upserted.
+
+    Only the current JFY is fetched: prior fiscal years are static, so re-checking
+    them daily is wasted work. Use ``scrape_eprx_range`` (e.g. via the weekly
+    backfill) to (re)validate earlier years.
+    """
+    n = _scrape_products(jfy_since=_current_jfy(), db_path=db_path, force=force)
     logger.info("EPRX balancing: upserted %d rows", n)
     return n
 
 
 def scrape_eprx_tieline(db_path: str | None = None, force: bool = False) -> int:
-    """Scrape EPRX tieline (DCM + DAM) for the current JFY range. Returns rows upserted."""
-    n = _scrape_tieline(jfy_since=None, db_path=db_path, force=force)
+    """Scrape EPRX tieline (DCM + DAM) for the **current** fiscal year. Returns
+    rows upserted. Prior years via ``scrape_eprx_range`` (weekly backfill)."""
+    n = _scrape_tieline(jfy_since=_current_jfy(), db_path=db_path, force=force)
     logger.info("EPRX tieline: upserted %d rows", n)
     return n
 

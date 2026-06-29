@@ -1,0 +1,54 @@
+name: Weekly Deep Re-validation
+
+# The daily job only fetches the current + previous month (months-back 1). TSOs
+# (and JEPX) sometimes finalize/revise older months after first publishing them.
+# This weekly job re-validates a deeper window so those late revisions are
+# picked up. Thanks to conditional-GET caching (ETag/Last-Modified persisted in
+# the synced DB), unchanged files 304-skip — so this stays cheap.
+
+on:
+  schedule:
+    # Sundays 19:30 UTC = Mondays 04:30 JST (an hour before the daily run)
+    - cron: "30 19 * * 0"
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90  # first run warms the cache (cold); later runs 304-skip
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Pull latest DB from Hugging Face
+        run: python -m repower.cli pull-hf
+        continue-on-error: true
+
+      - name: Compute backfill window
+        id: window
+        run: |
+          echo "since=$(date -u -d '6 months ago' +%Y-%m)" >> "$GITHUB_OUTPUT"
+          echo "jepx_since=$(date -u -d '1 year ago' +%Y)" >> "$GITHUB_OUTPUT"
+
+      - name: Deep re-validation backfill
+        # Re-fetch the last ~6 months of TSO data, the last ~2 years of JEPX, and
+        # all EPRX fiscal years. Conditional-GET caching means unchanged files
+        # are 304-skipped; only late-revised data is re-downloaded + re-upserted.
+        run: >
+          python -m repower.cli backfill
+          --since ${{ steps.window.outputs.since }}
+          --jepx-since ${{ steps.window.outputs.jepx_since }}
+          --eprx-since 2025
+
+      - name: Push updated DB to Hugging Face
+        run: python -m repower.cli push-hf

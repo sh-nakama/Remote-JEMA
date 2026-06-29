@@ -94,10 +94,12 @@ class FuelDaily(Base):
 # and keeps the HF-synced DB small. Only the conditional-GET cache stays in SQLite.
 
 
-# ── EPRX conditional-GET cache (shared via HF-synced DB) ───────────────────
-class EprxHttpCache(Base):
-    __tablename__ = "eprx_http_cache"
-    url = Column(String(256), primary_key=True)
+# ── HTTP conditional-GET cache (ETag / Last-Modified), shared via HF-synced DB ──
+# Used by the TSO area, JEPX, and EPRX scrapers so re-runs (including across the
+# ephemeral daily CI runs) skip downloading + re-parsing unchanged files.
+class HttpCache(Base):
+    __tablename__ = "http_cache"
+    url = Column(String(512), primary_key=True)
     etag = Column(String(256))
     last_modified = Column(String(64))
     last_status = Column(Integer)
