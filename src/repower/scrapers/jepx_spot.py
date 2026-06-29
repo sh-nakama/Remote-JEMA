@@ -20,6 +20,7 @@ import pandas as pd
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.db import JepxAreaPrice30m, JepxSpot30m, get_session, init_db
+from repower.scrapers.http_cache import conditional_get, invalidate
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +44,12 @@ def _csv_url(year: int) -> str:
     return f"https://www.jepx.jp/market/excel/spot_{year}.csv"
 
 
-def fetch_jepx_csv(year: int) -> pd.DataFrame:
-    """Download and parse one year's JEPX spot CSV.
-
-    Returns a long-format DataFrame with columns:
-        date, time, system_price, tokyo_area_price,
-        and one column per area slug in JEPX_AREA_KEYWORDS (e.g. ``hokkaido_price``).
-    """
-    url = _csv_url(year)
-    logger.info("Fetching %s", url)
-
-    resp = httpx.get(url, timeout=60, follow_redirects=True)
-    resp.raise_for_status()
-
+def parse_jepx_csv(content: bytes) -> pd.DataFrame:
+    """Parse the raw bytes of one year's JEPX spot CSV (cp932) into a long-format
+    DataFrame: ``date, time, system_price, tokyo_area_price`` plus one column per
+    area slug in JEPX_AREA_KEYWORDS (e.g. ``hokkaido_price``). Pure, no network."""
     # cp932 encoding confirmed for jepx.jp CSVs
-    text_data = resp.content.decode("cp932")
+    text_data = content.decode("cp932")
 
     df = pd.read_csv(io.StringIO(text_data), header=0)
     cols = df.columns.tolist()
@@ -110,6 +102,27 @@ def fetch_jepx_csv(year: int) -> pd.DataFrame:
         f"{slug}_price" for slug in JEPX_AREA_KEYWORDS
     ]
     return result[keep]
+
+
+def fetch_jepx_csv(year: int, db_path: str | None = None) -> pd.DataFrame | None:
+    """Download one year's JEPX spot CSV via the conditional-GET cache and parse it.
+
+    Returns the parsed DataFrame, or ``None`` if the file is unchanged since the
+    last run (304) or missing (404) — the caller then skips the upsert. The
+    current-year file changes daily so it is re-fetched; past years 304-skip.
+    """
+    url = _csv_url(year)
+    status, content = conditional_get(url, db_path=db_path, timeout=60)
+    if status != "ok" or content is None:
+        logger.info("JEPX %d: %s (%s) — skipping", year, status, url)
+        return None
+    logger.info("JEPX %d: fetched %s", year, url)
+    try:
+        return parse_jepx_csv(content)
+    except Exception:
+        # Unusable 200 body — drop the cache entry so the next run re-fetches.
+        invalidate(url, db_path=db_path)
+        raise
 
 
 def upsert_jepx(df: pd.DataFrame, db_path: str | None = None) -> int:
@@ -170,7 +183,9 @@ def scrape_jepx(year: int | None = None, db_path: str | None = None) -> int:
         year = date.today().year
 
     try:
-        df = fetch_jepx_csv(year)
+        df = fetch_jepx_csv(year, db_path)
+        if df is None:  # 304 unchanged or 404 — nothing to upsert
+            return 0
         n = upsert_jepx(df, db_path)
         logger.info("JEPX %d: upserted %d rows", year, n)
         return n

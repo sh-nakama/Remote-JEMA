@@ -1,11 +1,11 @@
-"""Tests for repower.scrapers.jepx_spot.
+"""Tests for repower.scrapers.jepx_spot CSV parsing.
 
-Network-free: httpx.get is monkeypatched to return a synthetic cp932 CSV.
+Network-free: exercises the pure ``parse_jepx_csv`` on synthetic cp932 bytes.
 """
 
 from __future__ import annotations
 
-from repower.scrapers import jepx_spot
+from repower.scrapers.jepx_spot import parse_jepx_csv
 
 
 # JEPX CSV header. We deliberately include エリアプライス東京 (tepco) and
@@ -20,41 +20,18 @@ _ROWS = [
     "2025/01/01,48,x,x,x,30.0,31.5,32.5",
 ]
 
-_FAKE_CSV = _HEADER + "\n" + "\n".join(_ROWS) + "\n"
+_CONTENT = (_HEADER + "\n" + "\n".join(_ROWS) + "\n").encode("cp932")
 
 
-class _FakeResponse:
-    def __init__(self, content: bytes) -> None:
-        self.content = content
-
-    def raise_for_status(self) -> None:  # no-op
-        return None
+def test_period_to_time_mapping():
+    """period 1 -> 00:00, 2 -> 00:30, 48 -> 23:30 (via parse_jepx_csv output)."""
+    df = parse_jepx_csv(_CONTENT)
+    assert df["time"].tolist() == ["00:00", "00:30", "23:30"]
 
 
-def _make_fake_get(csv_text: str):
-    encoded = csv_text.encode("cp932")
-
-    def _fake_get(url, *args, **kwargs):
-        return _FakeResponse(encoded)
-
-    return _fake_get
-
-
-def test_period_to_time_mapping(monkeypatch):
-    """period 1 -> 00:00, 2 -> 00:30, 48 -> 23:30 (via fetch_jepx_csv output)."""
-    monkeypatch.setattr(jepx_spot.httpx, "get", _make_fake_get(_FAKE_CSV))
-
-    df = jepx_spot.fetch_jepx_csv(2025)
-    times = df["time"].tolist()
-
-    assert times == ["00:00", "00:30", "23:30"]
-
-
-def test_present_areas_populated_correctly(monkeypatch):
+def test_present_areas_populated_correctly():
     """tepco_price and kansai_price carry the right numbers; tokyo alias matches."""
-    monkeypatch.setattr(jepx_spot.httpx, "get", _make_fake_get(_FAKE_CSV))
-
-    df = jepx_spot.fetch_jepx_csv(2025)
+    df = parse_jepx_csv(_CONTENT)
 
     assert df["tepco_price"].tolist() == [11.5, 21.5, 31.5]
     assert df["kansai_price"].tolist() == [12.5, 22.5, 32.5]
@@ -64,11 +41,9 @@ def test_present_areas_populated_correctly(monkeypatch):
     assert df["tokyo_area_price"].tolist() == df["tepco_price"].tolist()
 
 
-def test_missing_area_is_all_na_not_filled(monkeypatch):
+def test_missing_area_is_all_na_not_filled():
     """The #1 fix: a missing area column must NOT be silently filled from another."""
-    monkeypatch.setattr(jepx_spot.httpx, "get", _make_fake_get(_FAKE_CSV))
-
-    df = jepx_spot.fetch_jepx_csv(2025)
+    df = parse_jepx_csv(_CONTENT)
 
     assert "hokkaido_price" in df.columns
     # Every value for the absent area column must be NA/NaN.

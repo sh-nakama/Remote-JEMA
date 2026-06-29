@@ -108,9 +108,25 @@ deltas), and Excel/PDF export.
 
 - **`daily.yml`** — scheduled run of the full pipeline (scrape → analyze →
   notify) at 05:30 JST (20:30 UTC). Pulls the DB from Hugging Face, runs
-  `run-all`, then pushes the updated DB back.
+  `run-all --months-back 1` (current + previous month only), then pushes back.
+- **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
+  over a wider window (last ~6 months of TSO, ~2 years of JEPX, all EPRX years)
+  to pick up late upstream revisions the daily window misses.
 - **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
   `since` and `area` inputs.
 - **`sync-space.yml`** — on push to `main` (code/config paths), uploads the
   Space deployment (`space/`, `src/`, `Dockerfile`, `pyproject.toml`) to the
   Hugging Face Space.
+
+### Incremental scraping & caching
+
+Sources publish whole files (TSO: monthly CSVs; JEPX: a yearly CSV; EPRX:
+fiscal-year ZIPs), so the smallest fetchable unit is a file, not a day. All
+scrapers share a persistent **conditional-GET cache** (`http_cache` table,
+synced to Hugging Face): ETag / Last-Modified validators are stored per URL, so
+re-runs send `If-None-Match` / `If-Modified-Since` and the server returns **304
+Not Modified** for unchanged files — which are then skipped (no download, no
+re-parse). The result is that the daily job effectively re-fetches only the
+files that actually changed (the current month/year). All writes are idempotent
+upserts, so any overlap is deduplicated. The daily EPRX scrape covers only the
+current fiscal year; the weekly job re-validates earlier years.
