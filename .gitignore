@@ -9,3 +9,9 @@ data/*.db
 *.db-journal
 .ruff_cache/
 .pytest_cache/
+
+# Local-only reference scaffolding (Aurora-branded; never commit — see CLAUDE.md)
+Reference/
+
+# Local Claude Code dev-server config (machine-specific absolute paths)
+.claude/launch.json

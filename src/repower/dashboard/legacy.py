@@ -289,7 +289,7 @@ def main(show_refresh: bool = False) -> None:
 
             fig = px.line(df, x="datetime", y="area_demand_mw", title="Area Demand (MW)")
             fig.update_layout(height=300, margin=dict(t=40, b=20))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             gen_cols = [
                 "nuclear", "lng", "coal", "oil", "thermal_other",
@@ -306,7 +306,7 @@ def main(show_refresh: bool = False) -> None:
                     name=col.replace("_", " ").title(),
                 ))
             fig2.update_layout(title="Generation Stack (MW)", height=400, margin=dict(t=40, b=20))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
             totals = {col: df[col].sum() for col in available}
             fig3 = px.pie(
@@ -316,7 +316,7 @@ def main(show_refresh: bool = False) -> None:
                 hole=0.4,
             )
             fig3.update_layout(height=350)
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
 
         if not jepx_df.empty:
             st.subheader(f"JEPX Spot Price — {AREA_NAMES[area]}")
@@ -325,7 +325,7 @@ def main(show_refresh: bool = False) -> None:
             col2.metric("Peak Price", f"¥{jepx_df['price'].max():.2f}/kWh")
             fig4 = px.line(jepx_df, x="datetime", y="price", title="Spot Price (¥/kWh)")
             fig4.update_layout(height=300, margin=dict(t=40, b=20))
-            st.plotly_chart(fig4, use_container_width=True)
+            st.plotly_chart(fig4, width="stretch")
 
     # ── COMPARE ───────────────────────────────────────────────────────────
     elif tab_choice == "Compare":
@@ -376,7 +376,7 @@ def main(show_refresh: bool = False) -> None:
             fig.update_layout(
                 title="Demand Comparison (MW)", height=400, xaxis_tickformat="%H:%M"
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     # ── TRENDS ────────────────────────────────────────────────────────────
     elif tab_choice == "Trends":
@@ -396,7 +396,7 @@ def main(show_refresh: bool = False) -> None:
             fig = px.line(daily, x="date", y=["peak", "avg"],
                           title="Daily Peak & Average Demand (MW)")
             fig.update_layout(height=350)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
             re_cols = ["hydro", "geothermal", "biomass", "solar_actual", "wind_actual"]
             df["re_total"] = df[re_cols].sum(axis=1)
@@ -409,7 +409,7 @@ def main(show_refresh: bool = False) -> None:
             fig2 = px.line(daily_re, x="date", y="re_pct",
                            title="Daily Renewable Share (%)")
             fig2.update_layout(height=300)
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width="stretch")
 
         if not jepx_df.empty:
             daily_price = jepx_df.groupby("date").agg(
@@ -420,7 +420,7 @@ def main(show_refresh: bool = False) -> None:
             fig3 = px.line(daily_price, x="date", y=["avg_price", "max_price"],
                            title=f"JEPX {AREA_NAMES[area]} Daily Avg & Peak (¥/kWh)")
             fig3.update_layout(height=350)
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width="stretch")
 
         # Demand vs price overlay (dual y-axis) when both signals are present
         if not df.empty and not jepx_df.empty:
@@ -449,7 +449,7 @@ def main(show_refresh: bool = False) -> None:
                     yaxis2=dict(title="Price (¥/kWh)", overlaying="y", side="right"),
                     legend=dict(orientation="h", y=-0.2),
                 )
-                st.plotly_chart(fig_dp, use_container_width=True)
+                st.plotly_chart(fig_dp, width="stretch")
 
                 # Scatter (demand vs price) with simple correlation
                 corr = merged["avg_demand"].corr(merged["price"])
@@ -459,7 +459,7 @@ def main(show_refresh: bool = False) -> None:
                     labels={"avg_demand": "Avg Demand (MW)", "price": "Avg Price (¥/kWh)"},
                 )
                 fig_sc.update_layout(height=340)
-                st.plotly_chart(fig_sc, use_container_width=True)
+                st.plotly_chart(fig_sc, width="stretch")
 
     # ── DRIVERS ───────────────────────────────────────────────────────────
     elif tab_choice == "Drivers":
@@ -475,7 +475,7 @@ def main(show_refresh: bool = False) -> None:
             fig = px.line(fuels_df, x="date", y="close", color="ticker",
                           title="Commodity Prices (Daily Close)")
             fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
         if not jepx_df.empty and not fuels_df.empty:
             daily_price = jepx_df.groupby("date")["price"].mean().reset_index()
@@ -493,7 +493,7 @@ def main(show_refresh: bool = False) -> None:
                     labels={"brent": "Brent (USD/bbl)", "jepx_avg": "JEPX Avg (¥/kWh)"},
                 )
                 fig2.update_layout(height=350)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
 
     # ── AREAS COMPARE ─────────────────────────────────────────────────────
     elif tab_choice == "Areas Compare":
@@ -528,12 +528,12 @@ def main(show_refresh: bool = False) -> None:
                 fig = px.line(combo, x="date", y="peak", color="area",
                               title="Daily Peak Demand by Area (MW)")
                 fig.update_layout(height=400)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 fig2 = px.line(combo, x="date", y="avg", color="area",
                                title="Daily Average Demand by Area (MW)")
                 fig2.update_layout(height=350)
-                st.plotly_chart(fig2, use_container_width=True)
+                st.plotly_chart(fig2, width="stretch")
 
             # Renewable share comparison
             re_frames = []
@@ -557,7 +557,7 @@ def main(show_refresh: bool = False) -> None:
                 fig3 = px.line(rcombo, x="date", y="re_pct", color="area",
                                title="Daily Renewable Share by Area (%)")
                 fig3.update_layout(height=350)
-                st.plotly_chart(fig3, use_container_width=True)
+                st.plotly_chart(fig3, width="stretch")
 
             # JEPX per-area price comparison
             price_frames = []
@@ -574,7 +574,7 @@ def main(show_refresh: bool = False) -> None:
                 fig4 = px.line(pcombo, x="date", y="price", color="area",
                                title="Daily Avg JEPX Spot Price by Area (¥/kWh)")
                 fig4.update_layout(height=350)
-                st.plotly_chart(fig4, use_container_width=True)
+                st.plotly_chart(fig4, width="stretch")
 
             # Data freshness table
             st.subheader("Data freshness")
@@ -587,7 +587,7 @@ def main(show_refresh: bool = False) -> None:
                     "Latest": b[1] if b else "—",
                     "Days": (b[1] - b[0]).days if b else 0,
                 })
-            st.dataframe(pd.DataFrame(freshness), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(freshness), width="stretch", hide_index=True)
 
     # ── ANALYSES ──────────────────────────────────────────────────────────
     elif tab_choice == "Analyses":

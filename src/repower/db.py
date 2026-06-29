@@ -6,10 +6,12 @@ import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     DateTime,
     Float,
+    Index,
     Integer,
     String,
     Text,
@@ -86,6 +88,60 @@ class FuelDaily(Base):
     close = Column(Float)
     currency = Column(String(5))
     __table_args__ = (UniqueConstraint("date", "ticker", name="uq_fuel_date_ticker"),)
+
+
+# ── EPRX balancing market (per product, per area, per block, per metric) ──
+class EprxBalancing(Base):
+    __tablename__ = "eprx_balancing"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    product_code = Column(String(8))
+    product = Column(String(32))
+    area = Column(String(16))
+    date = Column(Date)
+    time = Column(String(5))  # "HH:MM"
+    block_num = Column(Integer)
+    blocks_per_day = Column(Integer)  # 8 | 48
+    metric = Column(String(24))
+    value = Column(Float)
+    jfy = Column(Integer)
+    source_file = Column(String(128))
+    ingested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("product_code", "area", "date", "time", "metric", name="uq_eprx_bal"),
+        Index("ix_eprx_bal_pad", "product", "area", "date"),
+    )
+
+
+# ── EPRX tieline (per market DCM/DAM, per interconnector pair) ─────────────
+class EprxTieline(Base):
+    __tablename__ = "eprx_tieline"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    market = Column(String(8))
+    pair = Column(String(48))
+    date = Column(Date)
+    time = Column(String(5))  # "HH:MM"
+    block_num = Column(Integer)
+    blocks_per_day = Column(Integer)
+    metric = Column(String(24))
+    value = Column(Float)
+    is_combined = Column(Boolean, default=False)
+    jfy = Column(Integer)
+    source_file = Column(String(128))
+    ingested_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("market", "pair", "date", "time", "metric", name="uq_eprx_tie"),
+        Index("ix_eprx_tie_mpd", "market", "pair", "date"),
+    )
+
+
+# ── EPRX conditional-GET cache (shared via HF-synced DB) ───────────────────
+class EprxHttpCache(Base):
+    __tablename__ = "eprx_http_cache"
+    url = Column(String(256), primary_key=True)
+    etag = Column(String(256))
+    last_modified = Column(String(64))
+    last_status = Column(Integer)
+    last_checked = Column(DateTime)
 
 
 # ── News items ─────────────────────────────────────────────────────────────
