@@ -236,6 +236,19 @@ policy_app = typer.Typer(name="policy", help="Japanese energy-policy committee o
 app.add_typer(policy_app, name="policy")
 
 
+def _require_auth_or_exit() -> None:
+    """Clean pre-check for NotebookLM auth: print a plain message and exit (no
+    traceback) when the session is missing/stale, so operators and the catch-up
+    loop get an actionable line instead of a stack trace."""
+    from repower.policy.notebook import auth_ok
+
+    if not auth_ok():
+        typer.echo("NotebookLM auth is missing/stale.", err=True)
+        typer.echo("Run `notebooklm login` locally (or refresh the NOTEBOOKLM_AUTH_JSON "
+                   "secret), then retry.", err=True)
+        raise typer.Exit(code=2)
+
+
 @policy_app.command("detect")
 def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
@@ -264,6 +277,7 @@ def policy_run(
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
     from repower.policy.pipeline import run
 
+    _require_auth_or_exit()
     keys = None if committee == "all" else [committee]
     summary = run(keys, max_per_run=max_per_run)
     typer.echo(
@@ -285,7 +299,8 @@ def policy_backfill(
     from repower.policy.detect import detect
     from repower.policy.pipeline import run
 
-    detect([committee], backfill_to=since_meeting)
+    detect([committee], backfill_to=since_meeting)  # auth-free; prime the worklist first
+    _require_auth_or_exit()
     summary = run([committee], max_per_run=max_per_run)
     typer.echo(
         f"backfilled {committee}: done={summary['done']} errored={summary['errored']} "
@@ -301,6 +316,7 @@ def policy_resume():
     """Finish meetings left mid-flight after a partial failure (requires auth)."""
     from repower.policy.pipeline import resume
 
+    _require_auth_or_exit()
     summary = resume()
     typer.echo(f"resumed: done={summary['done']} errored={summary['errored']}")
     if summary.get("rate_limited"):
