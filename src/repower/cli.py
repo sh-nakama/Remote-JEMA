@@ -158,9 +158,9 @@ def notify(
     target_date = date.fromisoformat(target) if target else yesterday_jst()
     ok = do_notify(target_date, dry_run=dry_run)
     if ok:
-        typer.echo("✓ Notification sent")
+        typer.echo("Notification sent")
     else:
-        typer.echo("✗ Notification failed", err=True)
+        typer.echo("Notification failed", err=True)
         raise typer.Exit(code=1)
 
 
@@ -212,7 +212,7 @@ def push_hf():
     """Push the local database to Hugging Face Dataset."""
     from repower.hf_sync import push_db_to_hf
     push_db_to_hf()
-    typer.echo("✓ Database pushed to Hugging Face")
+    typer.echo("Database pushed to Hugging Face")
 
 
 @app.command()
@@ -220,7 +220,7 @@ def pull_hf():
     """Pull the database from Hugging Face Dataset."""
     from repower.hf_sync import pull_db_from_hf
     pull_db_from_hf()
-    typer.echo("✓ Database pulled from Hugging Face")
+    typer.echo("Database pulled from Hugging Face")
 
 
 @app.command()
@@ -228,7 +228,7 @@ def init_db_cmd():
     """Initialize the database (create tables)."""
     from repower.db import init_db
     init_db()
-    typer.echo("✓ Database initialized")
+    typer.echo("Database initialized")
 
 
 # ── Policy observer ──────────────────────────────────────────────────────────
@@ -352,7 +352,7 @@ def policy_digest(
     typer.echo(md)
     if not dry_run:
         ok = post_digest(md)
-        typer.echo("✓ Digest posted" if ok else "(no webhook configured / post failed)")
+        typer.echo("Digest posted" if ok else "(no webhook configured / post failed)")
 
 
 if __name__ == "__main__":
