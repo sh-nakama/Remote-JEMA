@@ -270,6 +270,9 @@ def policy_run(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} synthesized={summary['synthesized']}"
     )
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - run stopped early; remaining meetings "
+                   "stay pending (retry later; the cap resets over time).")
 
 
 @policy_app.command("backfill")
@@ -288,6 +291,9 @@ def policy_backfill(
         f"backfilled {committee}: done={summary['done']} errored={summary['errored']} "
         f"synthesized={summary['synthesized']}"
     )
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - re-run this backfill later to continue "
+                   "(meetings left are still pending; the cap resets over time).")
 
 
 @policy_app.command("resume")
@@ -297,6 +303,8 @@ def policy_resume():
 
     summary = resume()
     typer.echo(f"resumed: done={summary['done']} errored={summary['errored']}")
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - re-run `policy resume` later to finish.")
 
 
 @policy_app.command("status")

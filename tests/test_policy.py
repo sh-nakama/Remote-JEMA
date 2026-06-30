@@ -7,9 +7,13 @@ a temporary SQLite path holds the policy tables; POLICY_DIR is redirected to tmp
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
+import pytest
+
 from repower.policy import detect as detect_mod
+from repower.policy import notebook as nb_mod
 from repower.policy import pipeline, store
 from repower.policy.committees import COMMITTEES, committee_by_key
 from repower.policy.scraper import (
@@ -150,6 +154,29 @@ def test_select_materials_prefers_minutes_and_caps(monkeypatch):
     assert len(chosen) <= 4
 
 
+# ── NotebookLM error classification ──────────────────────────────────────────
+class _FakeProc:
+    def __init__(self, returncode: int, stderr: str = "", stdout: str = ""):
+        self.returncode, self.stderr, self.stdout = returncode, stderr, stdout
+
+
+def test_run_classifies_rate_limit_vs_generic_error(monkeypatch):
+    # A server-side rate limit surfaces as exit 1 with "RateLimitError" in stderr.
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: _FakeProc(1, "ERROR [notebooklm] RPC CREATE_ARTIFACT failed: RateLimitError"),
+    )
+    with pytest.raises(nb_mod.NotebookLMRateLimitError):
+        nb_mod._run(["generate", "report"], timeout=5)
+
+    # A different exit-1 failure must stay a plain NotebookLMError (not rate-limit),
+    # so it still counts against the per-meeting retry budget.
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(1, "boom: not found"))
+    with pytest.raises(nb_mod.NotebookLMError) as ei:
+        nb_mod._run(["create", "x"], timeout=5)
+    assert not isinstance(ei.value, nb_mod.NotebookLMRateLimitError)
+
+
 # ── Detection (network mocked) ───────────────────────────────────────────────
 def test_detect_dry_run_reports_new_without_writing(monkeypatch, tmp_path):
     db = str(tmp_path / "t.db")
@@ -243,6 +270,29 @@ def test_pending_retries_errors_under_cap(tmp_path):
     # Done → always excluded.
     store.update_meeting(mid, db_path=db, state="done", retry_count=0)
     assert not any(m["id"] == mid for m in store.pending_meetings("santeii", db_path=db))
+
+
+# ── Synthesis selection (flag-based, backfill-safe) ──────────────────────────
+def test_meetings_for_synthesis_uses_flag_not_watermark(tmp_path):
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    # Two done meetings recorded newest-first (5 then 3), each with a briefing.
+    for n in (5, 3):
+        store.record_meeting(key, n, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db) if m["meeting_num"] == n)
+        store.update_meeting(mid, db_path=db, state="done", briefing_md=f"briefing {n}")
+
+    # Both unsynthesised → returned oldest-first.
+    assert [m["meeting_num"] for m in store.meetings_for_synthesis(key, db_path=db)] == [3, 5]
+
+    # Synthesise the NEWER meeting first (the pilot/forward case)…
+    store.mark_synthesized(key, 5, db_path=db)
+    # …the older (backfilled) meeting must STILL be selected — the watermark bug.
+    assert [m["meeting_num"] for m in store.meetings_for_synthesis(key, db_path=db)] == [3]
+
+    store.mark_synthesized(key, 3, db_path=db)
+    assert store.meetings_for_synthesis(key, db_path=db) == []
 
 
 # ── No-Aurora gate ───────────────────────────────────────────────────────────

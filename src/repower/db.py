@@ -178,6 +178,10 @@ class PolicyMeeting(Base):
     quality_flag = Column(String(32))  # e.g. ocr_suspect, short_output
     gen_seconds = Column(Float)
     retry_count = Column(Integer, default=0)
+    # True once this meeting's briefing has been folded into the committee synthesis
+    # notebook. Tracked per-meeting (not via a single high-water mark) so backfilled
+    # / out-of-order meetings are included rather than skipped.
+    synth_done = Column(Boolean, default=False)
     detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (
@@ -236,6 +240,7 @@ def init_db(db_path: str | None = None) -> Engine:
         if path not in _INITIALIZED:
             Base.metadata.create_all(engine)
             _migrate_add_area_column(engine)
+            _migrate_add_policy_synth_done(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -288,6 +293,30 @@ def _migrate_add_area_column(engine) -> None:
                 f"SELECT {col_list} FROM _ds_old"
             ))
             conn.execute(sql_text("DROP TABLE _ds_old"))
+
+
+def _migrate_add_policy_synth_done(engine) -> None:
+    """Add the per-meeting ``synth_done`` flag to ``policy_meeting`` (additive).
+
+    Seeds it from the legacy single high-water mark so existing summaries aren't
+    re-added to the synthesis: meetings at or below a committee's
+    ``last_synth_meeting`` were already folded in.
+    """
+    from sqlalchemy import inspect, text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("policy_meeting")}
+    if "synth_done" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN synth_done BOOLEAN DEFAULT 0"))
+        conn.execute(sql_text(
+            "UPDATE policy_meeting SET synth_done = 1 "
+            "WHERE state = 'done' AND meeting_num <= ("
+            "  SELECT COALESCE(c.last_synth_meeting, -1) FROM policy_committee c"
+            "  WHERE c.committee_key = policy_meeting.committee_key)"
+        ))
 
 
 def get_session(db_path: str | None = None) -> Session:

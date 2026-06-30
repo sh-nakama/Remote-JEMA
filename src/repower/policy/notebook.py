@@ -40,6 +40,13 @@ class NotebookLMTimeout(NotebookLMError):
     """A ``wait``/long-running command hit its timeout (exit code 2)."""
 
 
+class NotebookLMRateLimitError(NotebookLMError):
+    """NotebookLM rejected the request with a rate limit (e.g. ``CREATE_ARTIFACT``
+    ``RateLimitError``). This is an account-wide, transient condition — not a bad
+    meeting — so callers should back off and retry the *same* work later rather
+    than counting it against a per-meeting retry budget."""
+
+
 def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXIT_OK,)) -> str:
     """Run ``notebooklm <args>`` and return stdout. Raise on disallowed exit codes."""
     cmd = [NOTEBOOKLM_BIN, *args]
@@ -55,9 +62,13 @@ def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXI
     if proc.returncode == EXIT_TIMEOUT and EXIT_TIMEOUT not in allow_codes:
         raise NotebookLMTimeout(proc.stderr.strip() or "notebooklm timed out")
     if proc.returncode not in allow_codes:
-        raise NotebookLMError(
-            f"notebooklm {' '.join(args)} -> exit {proc.returncode}: {proc.stderr.strip()}"
-        )
+        stderr = proc.stderr.strip()
+        # The CLI surfaces a server-side rate limit as exit 1 with a "RateLimitError"
+        # in stderr (e.g. RPC CREATE_ARTIFACT). Classify it so the pipeline can back
+        # off without burning a meeting's retry budget.
+        if "RateLimitError" in stderr or "RATE_LIMIT" in stderr.upper():
+            raise NotebookLMRateLimitError(f"notebooklm {' '.join(args)} rate-limited: {stderr[:300]}")
+        raise NotebookLMError(f"notebooklm {' '.join(args)} -> exit {proc.returncode}: {stderr}")
     return proc.stdout
 
 
@@ -136,8 +147,14 @@ def delete_source_by_title(notebook_id: str, title: str, *, timeout: float = 120
 
 # ── Generation ───────────────────────────────────────────────────────────────
 def generate_report(notebook_id: str, prompt: str, *, language: str = "ja",
-                    fmt: str = "custom", retry: int = 2, timeout: float = 120.0) -> str:
-    """Kick off a report generation; returns the task id (fire-and-forget)."""
+                    fmt: str = "custom", retry: int = 2, timeout: float = 300.0) -> str:
+    """Kick off a report generation; returns the task id (fire-and-forget).
+
+    The timeout covers *submission only* (the CLI returns a task id immediately on
+    success), but ``--retry`` adds exponential backoff when NotebookLM rate-limits
+    the submit RPC — common when many meetings generate back-to-back during a
+    backfill/scale run. 300s leaves headroom for that backoff so a busy submit
+    isn't killed mid-retry and dropped to ``error``."""
     with _prompt_file(prompt) as pf:
         data = _json(
             ["generate", "report", "--format", fmt, "--prompt-file", pf,

@@ -31,6 +31,7 @@ from repower.policy.committees import Committee, committee_by_key
 from repower.policy.scraper import _UA, list_materials
 from repower.policy.store import (
     get_committee,
+    mark_synthesized,
     meeting_materials,
     meetings_for_synthesis,
     pending_meetings,
@@ -214,6 +215,20 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         return "done"
     except nb.NotebookLMAuthError:
         raise  # bubble up — the whole run should stop and alert
+    except nb.NotebookLMRateLimitError:
+        # Transient, account-wide limit — not a bad meeting. Don't burn this
+        # meeting's retry budget or leak its ephemeral notebook: delete it and
+        # reset to 'detected' so a later run reprocesses cleanly, then bubble up
+        # so the whole run stops (continuing would only burn the next meetings).
+        logger.warning("summarize_meeting %s 第%d回 hit a NotebookLM rate limit — deferring",
+                       committee.key, meeting_num)
+        if notebook_id:
+            try:
+                nb.delete_notebook(notebook_id)
+            except nb.NotebookLMError:
+                pass
+        update_meeting(meeting_row, db_path=db_path, state="detected", notebook_id=None)
+        raise
     except nb.NotebookLMError as e:
         logger.error("summarize_meeting %s 第%d回 failed: %s", committee.key, meeting_num, e)
         update_meeting(meeting_row, db_path=db_path, state="error",
@@ -244,8 +259,7 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
     regenerates the committee-level synthesis. Returns True if it ran.
     """
     state = get_committee(committee.key, db_path=db_path)
-    last_synth = state.last_synth_meeting if state else None
-    new_meetings = meetings_for_synthesis(committee.key, last_synth, db_path=db_path)
+    new_meetings = meetings_for_synthesis(committee.key, db_path=db_path)
     if not new_meetings:
         regenerate_running_doc(committee.key, db_path=db_path)
         return False
@@ -267,15 +281,23 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
     work = _scratch() / committee.key / "synthesis"
     work.mkdir(parents=True, exist_ok=True)
     try:
+        added_nums: list[int] = []
         for m in new_meetings:
             md = work / f"meeting_{m['meeting_num']:03d}.md"
             md.write_text(m["briefing_md"], encoding="utf-8")
             try:
                 nb.add_source(nb_id, str(md))
-                src_count += 1
+            except nb.NotebookLMRateLimitError:
+                raise  # bubble up: stop synthesis, leave the rest for a later run
             except nb.NotebookLMError as e:
                 logger.warning("synthesis add_source failed (%s 第%d回): %s",
                                committee.key, m["meeting_num"], e)
+                continue
+            # Mark as folded in as soon as the source lands, so a later failure
+            # (e.g. a rate-limited report) doesn't re-add it as a duplicate.
+            mark_synthesized(committee.key, m["meeting_num"], db_path=db_path)
+            src_count += 1
+            added_nums.append(m["meeting_num"])
 
         task_id = nb.generate_report(nb_id, _SYNTHESIS_PROMPT, language="ja", fmt="custom")
         if not nb.wait_artifact(nb_id, task_id):
@@ -291,7 +313,10 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         except nb.NotebookLMError:
             pass
 
-        latest_num = max(m["meeting_num"] for m in new_meetings)
+        # last_synth_meeting is now informational (the highest meeting in the synthesis);
+        # selection is driven by the per-meeting synth_done flag, not this value.
+        prior = state.last_synth_meeting if state and state.last_synth_meeting else 0
+        latest_num = max([prior, *added_nums]) if added_nums else prior
         update_committee(
             committee.key, db_path=db_path,
             running_summary_md=synthesis_md, running_digest_en_md=digest_md,
@@ -321,22 +346,36 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         work = work[:max_per_run]
 
     done = errored = 0
+    rate_limited = False
     touched_committees: set[str] = set()
     for item in work:
         committee = committee_by_key(item["committee_key"])
-        state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
+        try:
+            state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
+        except nb.NotebookLMRateLimitError:
+            logger.warning("NotebookLM rate limit reached — stopping run; remaining meetings stay pending")
+            rate_limited = True
+            break
         touched_committees.add(item["committee_key"])
         if state == "done":
             done += 1
         elif state == "error":
             errored += 1
 
+    # Skip synthesis once rate-limited (it also generates a report and would just fail).
     synthesized = 0
-    for key in sorted(touched_committees):
-        if synthesize_committee(committee_by_key(key), db_path=db_path):
-            synthesized += 1
+    if not rate_limited:
+        for key in sorted(touched_committees):
+            try:
+                if synthesize_committee(committee_by_key(key), db_path=db_path):
+                    synthesized += 1
+            except nb.NotebookLMRateLimitError:
+                logger.warning("NotebookLM rate limit during synthesis of %s — deferring", key)
+                rate_limited = True
+                break
 
-    return {"processed": len(work), "done": done, "errored": errored, "synthesized": synthesized}
+    return {"processed": len(work), "done": done, "errored": errored,
+            "synthesized": synthesized, "rate_limited": rate_limited}
 
 
 def resume(*, db_path: str | None = None) -> dict:

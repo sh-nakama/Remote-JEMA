@@ -203,8 +203,14 @@ def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) ->
         session.close()
 
 
-def meetings_for_synthesis(key: str, since_meeting: int | None, db_path: str | None = None) -> list[dict]:
-    """Done meetings with a briefing, numbered above ``since_meeting`` (oldest first)."""
+def meetings_for_synthesis(key: str, db_path: str | None = None) -> list[dict]:
+    """Done meetings with a briefing not yet folded into the committee synthesis
+    (oldest first).
+
+    Selection is by the per-meeting ``synth_done`` flag rather than a single
+    high-water mark, so backfilled / out-of-order meetings (summarised after a
+    newer one) are still added to the synthesis instead of being skipped.
+    """
     init_db(db_path)
     session = get_session(db_path)
     try:
@@ -212,11 +218,27 @@ def meetings_for_synthesis(key: str, since_meeting: int | None, db_path: str | N
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, state="done")
             .filter(PolicyMeeting.briefing_md.isnot(None))
+            .filter(or_(PolicyMeeting.synth_done.is_(None), PolicyMeeting.synth_done == False))  # noqa: E712
+            .order_by(PolicyMeeting.meeting_num.asc())
         )
-        if since_meeting is not None:
-            q = q.filter(PolicyMeeting.meeting_num > since_meeting)
-        q = q.order_by(PolicyMeeting.meeting_num.asc())
         return [{"meeting_num": m.meeting_num, "briefing_md": m.briefing_md} for m in q.all()]
+    finally:
+        session.close()
+
+
+def mark_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> None:
+    """Flag a meeting's briefing as folded into the committee synthesis notebook."""
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        m = (
+            session.query(PolicyMeeting)
+            .filter_by(committee_key=key, meeting_num=meeting_num)
+            .one_or_none()
+        )
+        if m is not None:
+            m.synth_done = True
+            session.commit()
     finally:
         session.close()
 
