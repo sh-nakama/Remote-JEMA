@@ -821,7 +821,17 @@ def render_policy(cfg: dict) -> None:
         st.info(T("policy_no_data", lang))
         return
 
-    labels = {c["committee_key"]: f"{c['name_en']} — {c['name_ja']}" for c in committees}
+    # Surface committees that actually have summaries first, so the default
+    # selection lands on real content rather than an as-yet-unsummarised committee.
+    committees = sorted(
+        committees, key=lambda c: (c["latest_meeting"] is None, c["source"], c["committee_key"])
+    )
+
+    def _committee_label(c: dict) -> str:
+        base = f"{c['name_en']} — {c['name_ja']}"
+        return base if c["latest_meeting"] else f"{base}  ({T('policy_unsummarised', lang)})"
+
+    labels = {c["committee_key"]: _committee_label(c) for c in committees}
     key = st.selectbox(
         T("policy_committee", lang),
         options=[c["committee_key"] for c in committees],

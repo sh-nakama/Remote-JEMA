@@ -66,6 +66,7 @@ _STRINGS: dict[str, dict[str, str]] = {
                                  "ja": "政策データはまだありません。`repower policy detect`（要約は `repower policy run`）を実行してください。"},
     "policy_no_meetings":       {"en": "No meetings recorded yet for this committee.",
                                  "ja": "この委員会の会合はまだ記録されていません。"},
+    "policy_unsummarised":      {"en": "no summaries yet",         "ja": "要約未作成"},
 
     # ── Main area ────────────────────────────────────────────────────
     "page_header":              {"en": "Half-Hourly Balancing Market Inspector",
