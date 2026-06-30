@@ -8,6 +8,10 @@ build/
 data/*.db
 data/*.parquet
 *.db-journal
+
+# Policy observer generated artifacts: running docs are regenerated from the
+# (HF-synced) DB; raw committee PDFs are scratch-only and never committed.
+data/policy/
 .ruff_cache/
 .pytest_cache/
 

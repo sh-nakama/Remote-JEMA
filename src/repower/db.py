@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -130,6 +131,77 @@ class AnalysisRecord(Base):
     tokens_out = Column(Integer)
     cost_usd = Column(Float)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── Policy observer ─────────────────────────────────────────────────────────
+# Tracks Japanese energy-policy committees (METI/OCCTO/EGC), their meetings, and
+# the NotebookLM-generated summaries. Low-volume structured records, so SQLite
+# (like AnalysisRecord) rather than Parquet. The TEXT summary columns ride the
+# existing repower.db → Hugging Face sync, so no hf_sync change is needed.
+class PolicyCommittee(Base):
+    """One tracked committee + its rolled-up running document and synthesis state."""
+
+    __tablename__ = "policy_committee"
+    committee_key = Column(String(64), primary_key=True)
+    name_ja = Column(Text)
+    name_en = Column(Text)
+    url = Column(Text)
+    source = Column(String(8))  # METI | OCCTO | EGC
+    latest_meeting = Column(Integer)  # highest meeting reaching state='done'
+    synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
+    last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
+    archive_watermark_meeting = Column(Integer)  # summaries ≤ this rolled into an archive source
+    source_count = Column(Integer)  # live sources in the synthesis notebook
+    running_summary_md = Column(Text)  # Japanese running document (regenerated from DB)
+    running_digest_en_md = Column(Text)  # compact English running digest
+    last_checked = Column(DateTime)  # last detection run
+    last_refreshed_at = Column(DateTime)  # last summarisation run
+
+
+class PolicyMeeting(Base):
+    """One committee meeting and its per-meeting summary lifecycle."""
+
+    __tablename__ = "policy_meeting"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    committee_key = Column(String(64), nullable=False)
+    meeting_num = Column(Integer, nullable=False)
+    meeting_date = Column(Date)
+    title = Column(Text)
+    notebook_id = Column(String(64))  # ephemeral notebook (deleted after done)
+    report_task_id = Column(String(64))
+    briefing_md = Column(Text)  # detailed Japanese per-meeting briefing
+    digest_en_json = Column(Text)  # English ask --json (answer + references[])
+    has_minutes = Column(Boolean, default=False)  # 議事録 present
+    has_torimatome = Column(Boolean, default=False)  # とりまとめ present → milestone
+    # detected → downloading → ingesting → generating → done | error
+    state = Column(String(16), default="detected", nullable=False)
+    quality_flag = Column(String(32))  # e.g. ocr_suspect, short_output
+    gen_seconds = Column(Float)
+    retry_count = Column(Integer, default=0)
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
+    )
+
+
+class PolicyMaterial(Base):
+    """One source document (PDF) belonging to a meeting."""
+
+    __tablename__ = "policy_material"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    committee_key = Column(String(64), nullable=False)
+    meeting_num = Column(Integer, nullable=False)
+    pdf_id = Column(String(128), nullable=False)  # stable per-committee dedup key
+    kind = Column(String(16))  # minutes | brief | compilation | appendix | handout | agenda | other
+    url = Column(Text)
+    title = Column(Text)  # link text
+    nblm_source_id = Column(String(64))  # NotebookLM source id once ingested
+    sha256 = Column(String(64))
+    status = Column(String(16), default="detected")  # detected | downloaded | ingested | error
+    __table_args__ = (
+        UniqueConstraint("committee_key", "pdf_id", name="uq_policy_material"),
+    )
 
 
 # ── Engine / session ──────────────────────────────────────────────────────
