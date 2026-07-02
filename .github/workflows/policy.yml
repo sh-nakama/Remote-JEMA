@@ -1,0 +1,79 @@
+name: Weekly Policy Summaries
+
+# Detection runs daily (folded into the data pipeline's `run-all`). This separate
+# weekly job does the slow, *authenticated* NotebookLM summarisation and emits a
+# digest. NotebookLM cookies go stale and only a human can re-login, so the job
+# gates on `auth check --test`: if auth is stale it alerts and exits cleanly
+# (never fabricating summaries) until the NOTEBOOKLM_AUTH_JSON secret is refreshed.
+
+on:
+  schedule:
+    # 21:30 UTC Sun = 06:30 JST Mon — after the daily data cron + detection.
+    - cron: "30 21 * * 0"
+  workflow_dispatch:
+    inputs:
+      committee:
+        description: "Committee key or 'all'"
+        default: "all"
+      max_per_run:
+        description: "Max meetings to summarise this run"
+        default: "8"
+
+jobs:
+  summarise:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      # storage_state.json contents from a manual `notebooklm login` (see README).
+      NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
+      NOTEBOOKLM_TIER: ${{ vars.NOTEBOOKLM_TIER || 'standard' }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install "notebooklm-py[browser]"
+
+      - name: Pull latest DB from Hugging Face
+        run: python -m repower.cli pull-hf
+        continue-on-error: true
+
+      - name: Detect new meetings (no auth required)
+        run: python -m repower.cli policy detect
+
+      - name: Check NotebookLM auth
+        id: auth
+        run: |
+          set +e
+          notebooklm auth check --test --json > auth.json 2>/dev/null
+          ok=$(python -c "import json; d=json.load(open('auth.json')); print('true' if d.get('status')=='ok' and d.get('checks',{}).get('token_fetch') else 'false')" 2>/dev/null || echo false)
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Summarise pending meetings + emit digest
+        if: steps.auth.outputs.ok == 'true'
+        run: |
+          python -m repower.cli policy resume
+          python -m repower.cli policy run --committee "${{ github.event.inputs.committee || 'all' }}" --max-per-run "${{ github.event.inputs.max_per_run || '8' }}"
+          python -m repower.cli policy digest --since-days 7
+
+      - name: Alert when auth is stale (manual re-login needed)
+        if: steps.auth.outputs.ok != 'true'
+        run: |
+          echo "::warning::NotebookLM auth missing/stale — run 'notebooklm login' locally and update the NOTEBOOKLM_AUTH_JSON secret, then re-run this workflow."
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d '{"content":"⚠️ Policy summariser skipped this week: NotebookLM auth is stale. Run `notebooklm login` and update the NOTEBOOKLM_AUTH_JSON secret."}' || true
+          fi
+
+      - name: Push updated DB to Hugging Face
+        if: always()
+        run: python -m repower.cli push-hf

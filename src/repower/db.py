@@ -6,6 +6,7 @@ import threading
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    Boolean,
     Column,
     Date,
     DateTime,
@@ -94,10 +95,12 @@ class FuelDaily(Base):
 # and keeps the HF-synced DB small. Only the conditional-GET cache stays in SQLite.
 
 
-# ── EPRX conditional-GET cache (shared via HF-synced DB) ───────────────────
-class EprxHttpCache(Base):
-    __tablename__ = "eprx_http_cache"
-    url = Column(String(256), primary_key=True)
+# ── HTTP conditional-GET cache (ETag / Last-Modified), shared via HF-synced DB ──
+# Used by the TSO area, JEPX, and EPRX scrapers so re-runs (including across the
+# ephemeral daily CI runs) skip downloading + re-parsing unchanged files.
+class HttpCache(Base):
+    __tablename__ = "http_cache"
+    url = Column(String(512), primary_key=True)
     etag = Column(String(256))
     last_modified = Column(String(64))
     last_status = Column(Integer)
@@ -128,6 +131,81 @@ class AnalysisRecord(Base):
     tokens_out = Column(Integer)
     cost_usd = Column(Float)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+
+# ── Policy observer ─────────────────────────────────────────────────────────
+# Tracks Japanese energy-policy committees (METI/OCCTO/EGC), their meetings, and
+# the NotebookLM-generated summaries. Low-volume structured records, so SQLite
+# (like AnalysisRecord) rather than Parquet. The TEXT summary columns ride the
+# existing repower.db → Hugging Face sync, so no hf_sync change is needed.
+class PolicyCommittee(Base):
+    """One tracked committee + its rolled-up running document and synthesis state."""
+
+    __tablename__ = "policy_committee"
+    committee_key = Column(String(64), primary_key=True)
+    name_ja = Column(Text)
+    name_en = Column(Text)
+    url = Column(Text)
+    source = Column(String(8))  # METI | OCCTO | EGC
+    latest_meeting = Column(Integer)  # highest meeting reaching state='done'
+    synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
+    last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
+    archive_watermark_meeting = Column(Integer)  # summaries ≤ this rolled into an archive source
+    source_count = Column(Integer)  # live sources in the synthesis notebook
+    running_summary_md = Column(Text)  # Japanese running document (regenerated from DB)
+    running_digest_en_md = Column(Text)  # compact English running digest
+    last_checked = Column(DateTime)  # last detection run
+    last_refreshed_at = Column(DateTime)  # last summarisation run
+
+
+class PolicyMeeting(Base):
+    """One committee meeting and its per-meeting summary lifecycle."""
+
+    __tablename__ = "policy_meeting"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    committee_key = Column(String(64), nullable=False)
+    meeting_num = Column(Integer, nullable=False)
+    meeting_date = Column(Date)
+    title = Column(Text)
+    notebook_id = Column(String(64))  # ephemeral notebook (deleted after done)
+    report_task_id = Column(String(64))
+    briefing_md = Column(Text)  # detailed Japanese per-meeting briefing
+    digest_en_json = Column(Text)  # English ask --json (answer + references[])
+    has_minutes = Column(Boolean, default=False)  # 議事録 present
+    has_torimatome = Column(Boolean, default=False)  # とりまとめ present → milestone
+    # detected → downloading → ingesting → generating → done | error
+    state = Column(String(16), default="detected", nullable=False)
+    quality_flag = Column(String(32))  # e.g. ocr_suspect, short_output
+    gen_seconds = Column(Float)
+    retry_count = Column(Integer, default=0)
+    # True once this meeting's briefing has been folded into the committee synthesis
+    # notebook. Tracked per-meeting (not via a single high-water mark) so backfilled
+    # / out-of-order meetings are included rather than skipped.
+    synth_done = Column(Boolean, default=False)
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
+    )
+
+
+class PolicyMaterial(Base):
+    """One source document (PDF) belonging to a meeting."""
+
+    __tablename__ = "policy_material"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    committee_key = Column(String(64), nullable=False)
+    meeting_num = Column(Integer, nullable=False)
+    pdf_id = Column(String(128), nullable=False)  # stable per-committee dedup key
+    kind = Column(String(16))  # minutes | brief | compilation | appendix | handout | agenda | other
+    url = Column(Text)
+    title = Column(Text)  # link text
+    nblm_source_id = Column(String(64))  # NotebookLM source id once ingested
+    sha256 = Column(String(64))
+    status = Column(String(16), default="detected")  # detected | downloaded | ingested | error
+    __table_args__ = (
+        UniqueConstraint("committee_key", "pdf_id", name="uq_policy_material"),
+    )
 
 
 # ── Engine / session ──────────────────────────────────────────────────────
@@ -162,6 +240,7 @@ def init_db(db_path: str | None = None) -> Engine:
         if path not in _INITIALIZED:
             Base.metadata.create_all(engine)
             _migrate_add_area_column(engine)
+            _migrate_add_policy_synth_done(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -214,6 +293,30 @@ def _migrate_add_area_column(engine) -> None:
                 f"SELECT {col_list} FROM _ds_old"
             ))
             conn.execute(sql_text("DROP TABLE _ds_old"))
+
+
+def _migrate_add_policy_synth_done(engine) -> None:
+    """Add the per-meeting ``synth_done`` flag to ``policy_meeting`` (additive).
+
+    Seeds it from the legacy single high-water mark so existing summaries aren't
+    re-added to the synthesis: meetings at or below a committee's
+    ``last_synth_meeting`` were already folded in.
+    """
+    from sqlalchemy import inspect, text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("policy_meeting")}
+    if "synth_done" in cols:
+        return
+    with engine.begin() as conn:
+        conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN synth_done BOOLEAN DEFAULT 0"))
+        conn.execute(sql_text(
+            "UPDATE policy_meeting SET synth_done = 1 "
+            "WHERE state = 'done' AND meeting_num <= ("
+            "  SELECT COALESCE(c.last_synth_meeting, -1) FROM policy_committee c"
+            "  WHERE c.committee_key = policy_meeting.committee_key)"
+        ))
 
 
 def get_session(db_path: str | None = None) -> Session:

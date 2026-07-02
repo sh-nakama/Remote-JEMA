@@ -24,15 +24,20 @@ import logging
 import re
 import zipfile
 from datetime import date
-from typing import ClassVar, Optional
+from typing import ClassVar
 
-import httpx
 import pandas as pd
 from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.db import DemandSupply30m, get_session, init_db
+from repower.scrapers.http_cache import conditional_get, invalidate
 
 logger = logging.getLogger(__name__)
+
+# Sentinel returned by fetch_csv / fetch_archive members when a file is unchanged
+# since the last run (HTTP 304). Distinct from None (fetch failed / not found) so
+# scrape() can skip re-parsing without falling back to the archive.
+_UNCHANGED = object()
 
 # Canonical numeric fields written to demand_supply_30m
 SUPPLY_FIELDS: list[str] = [
@@ -76,29 +81,40 @@ class BaseAreaScraper:
                 urls.append(tpl.format(**ym))
         return urls
 
-    def fetch_csv(self, year: int, month: int) -> Optional[pd.DataFrame]:
+    def fetch_csv(self, year: int, month: int, db_path: str | None = None):
+        """Fetch a month's CSV via the conditional-GET cache.
+
+        Returns a DataFrame on a fresh 200, the ``_UNCHANGED`` sentinel if the
+        winning URL is unchanged since last run (304), or None if no URL yields
+        data. Probes the version-suffixed URLs in order; the curl_cffi fallback
+        handles anti-bot 403s (e.g. Kyuden).
+        """
         last_err: Exception | None = None
-        # Some TSO sites (e.g. Kyuden) reject requests without a browser UA.
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
-        }
         for url in self.csv_urls(year, month):
             try:
-                raw = _http_get(url, headers=headers)
-                if raw is None:  # 404 → try next URL
-                    continue
-                logger.info("[%s] fetched %s", self.AREA, url)
-                df = self._bytes_to_df(raw)
-                if df.empty:
-                    raise ValueError("empty CSV")
-                return df
+                status, content = conditional_get(
+                    url, db_path=db_path, allow_curl_fallback=True
+                )
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 logger.warning("[%s] %s -> %s", self.AREA, url, e)
+                continue
+            if status == "not_found":  # 404 → try next URL
+                continue
+            if status == "not_modified":  # 304 → already in DB, skip the month
+                logger.info("[%s] %s: 304 unchanged", self.AREA, url)
+                return _UNCHANGED
+            try:
+                df = self._bytes_to_df(content)
+                if df.empty:
+                    raise ValueError("empty CSV")
+                logger.info("[%s] fetched %s", self.AREA, url)
+                return df
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                logger.warning("[%s] %s parse -> %s", self.AREA, url, e)
+                # Unusable 200 body — drop its cache entry so we don't 304-skip it.
+                invalidate(url, db_path=db_path)
         if last_err:
             logger.error("[%s] all URLs failed for %04d-%02d: %s", self.AREA, year, month, last_err)
         return None
@@ -123,29 +139,29 @@ class BaseAreaScraper:
         """
         return year
 
-    def fetch_archive_year(self, year: int) -> dict[tuple[int, int], pd.DataFrame]:
+    def fetch_archive_year(self, year: int, db_path: str | None = None) -> dict[tuple[int, int], pd.DataFrame]:
         """Download the yearly ZIP archive and return ``{(year, month): df}``.
 
-        Returns an empty dict if ``ARCHIVE_URL_TEMPLATE`` is unset or fetch fails.
-        Member CSVs are matched against ``eria_jukyu_(YYYY)(MM)_*.csv``.
+        Returns an empty dict if ``ARCHIVE_URL_TEMPLATE`` is unset, the archive
+        is unchanged since last run (304), or the fetch fails. Member CSVs are
+        matched against ``eria_jukyu_(YYYY)(MM)_*.csv``.
         """
         if not self.ARCHIVE_URL_TEMPLATE:
             return {}
         url = self.ARCHIVE_URL_TEMPLATE.format(YYYY=str(year))
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0 Safari/537.36"
-            ),
-        }
         try:
-            raw = _http_get(url, headers=headers)
+            status, raw = conditional_get(
+                url, db_path=db_path, allow_curl_fallback=True, timeout=60
+            )
         except Exception as e:  # noqa: BLE001
             logger.warning("[%s] archive %s -> %s", self.AREA, url, e)
             return {}
-        if raw is None or raw[:2] != b"PK":
-            logger.info("[%s] no archive at %s", self.AREA, url)
+        if status != "ok" or raw is None:
+            logger.info("[%s] archive %s: %s", self.AREA, url, status)
+            return {}
+        if raw[:2] != b"PK":
+            logger.info("[%s] not a zip at %s", self.AREA, url)
+            invalidate(url, db_path=db_path)  # 200 but not a ZIP — don't cache-skip it
             return {}
         logger.info("[%s] fetched archive %s (%d bytes)", self.AREA, url, len(raw))
         out: dict[tuple[int, int], pd.DataFrame] = {}
@@ -153,6 +169,7 @@ class BaseAreaScraper:
             zf = zipfile.ZipFile(io.BytesIO(raw))
         except zipfile.BadZipFile as e:
             logger.warning("[%s] bad zip from %s: %s", self.AREA, url, e)
+            invalidate(url, db_path=db_path)
             return {}
         pat = re.compile(r"eria_jukyu_(\d{4})(\d{2})", re.IGNORECASE)
         for name in zf.namelist():
@@ -272,23 +289,26 @@ class BaseAreaScraper:
         if self.ARCHIVE_URL_TEMPLATE and months_back >= 2:
             years_needed = sorted({self._archive_year_for(y, m) for y, m in targets})
             for yr in years_needed:
-                archive_dfs.update(self.fetch_archive_year(yr))
+                archive_dfs.update(self.fetch_archive_year(yr, db_path=db_path))
 
         # Live months override archive content for the trailing 2 months.
         live_months = set(targets[: min(2, len(targets))])
 
         total = 0
         for y, m in targets:
-            df: pd.DataFrame | None = None
+            df = None
             if (y, m) in live_months:
-                df = self.fetch_csv(y, m)
-                if df is None and (y, m) in archive_dfs:
+                df = self.fetch_csv(y, m, db_path=db_path)
+                if df is None and (y, m) in archive_dfs:  # fetch failed → archive
                     df = archive_dfs[(y, m)]
                     logger.info("[%s] %04d-%02d: using archive copy", self.AREA, y, m)
             else:
                 df = archive_dfs.get((y, m))
                 if df is None:
-                    df = self.fetch_csv(y, m)
+                    df = self.fetch_csv(y, m, db_path=db_path)
+            if df is _UNCHANGED:  # 304 — data already in DB, skip
+                logger.info("[%s] %04d-%02d: unchanged, skipped", self.AREA, y, m)
+                continue
             if df is None:
                 continue
             try:
@@ -299,56 +319,6 @@ class BaseAreaScraper:
             except Exception as e:  # noqa: BLE001
                 logger.error("[%s] %04d-%02d parse/upsert failed: %s", self.AREA, y, m, e)
         return total
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# HTTP layer with anti-bot fallback
-#
-# Some TSO sites (notably Kyuden via Akamai) reject plain Python TLS
-# fingerprints with HTTP 403. We try fast `httpx` first; on 403 we retry
-# with `curl_cffi` which impersonates a real Chrome TLS+JA3 fingerprint.
-# `curl_cffi` is an optional dependency — we degrade gracefully if absent.
-# ─────────────────────────────────────────────────────────────────────────
-
-def _http_get(url: str, headers: dict | None = None) -> Optional[bytes]:
-    """Return response bytes, or None on 404. Raises on other errors."""
-    try:
-        resp = httpx.get(url, timeout=30, follow_redirects=True, headers=headers)
-        if resp.status_code == 404:
-            return None
-        if resp.status_code == 403:
-            # Try anti-bot fallback
-            blob = _http_get_curl_cffi(url, headers)
-            if blob is not None:
-                return blob
-        resp.raise_for_status()
-        return resp.content
-    except httpx.HTTPStatusError:
-        raise
-    except Exception:
-        # Network glitch — try curl_cffi once before giving up
-        blob = _http_get_curl_cffi(url, headers)
-        if blob is not None:
-            return blob
-        raise
-
-
-def _http_get_curl_cffi(url: str, headers: dict | None = None) -> Optional[bytes]:
-    """Fetch via curl_cffi with Chrome impersonation. Returns None if unavailable."""
-    try:
-        from curl_cffi import requests as cr  # type: ignore
-    except Exception:
-        return None
-    try:
-        r = cr.get(url, impersonate="chrome", timeout=30, headers=headers or {})
-        if r.status_code == 404:
-            return None
-        if 200 <= r.status_code < 300:
-            logger.info("curl_cffi succeeded for %s", url)
-            return r.content
-    except Exception as e:  # noqa: BLE001
-        logger.debug("curl_cffi fallback failed for %s: %s", url, e)
-    return None
 
 
 def _normalize_hhmm(s: str) -> str | None:

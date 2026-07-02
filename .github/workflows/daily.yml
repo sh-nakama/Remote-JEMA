@@ -29,7 +29,11 @@ jobs:
         continue-on-error: true  # First run won't have a DB yet
 
       - name: Run full pipeline
-        run: python -m repower.cli run-all
+        # months-back 1 = current + previous month only. Conditional-GET caching
+        # (ETag/Last-Modified, persisted in the synced DB) means unchanged files
+        # 304-skip, so the daily run is incremental at the file level. The weekly
+        # workflow re-validates a deeper window to catch late upstream revisions.
+        run: python -m repower.cli run-all --months-back 1
 
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf

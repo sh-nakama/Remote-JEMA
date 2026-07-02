@@ -76,12 +76,20 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `push-hf` | Push the local database to the Hugging Face Dataset. |
 | `pull-hf` | Pull the database from the Hugging Face Dataset. |
 | `init-db-cmd` | Initialize the database (create tables). |
+| `policy detect` | Detect new committee meetings (**no NotebookLM auth**). Options: `--committee` (key or `all`), `--window` (enumerate materials for the newest N), `--dry-run`. |
+| `policy run` | Summarise pending meetings via NotebookLM (**requires auth**). Options: `--committee`, `--max-per-run`. |
+| `policy backfill` | Throttled historical backfill for one committee, newest-first (**requires auth**). Options: `--committee` (required), `--since-meeting N` (required), `--max-per-run`. |
+| `policy resume` | Finish meetings left mid-flight after a partial failure (**requires auth**). |
+| `policy status` | Per-committee state: latest summarised meeting + pending counts (no auth). |
+| `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--dry-run`. |
 
 Examples:
 
 ```bash
 repower run-all
 repower backfill --since 2024-04 --area all
+repower policy detect --committee all      # no auth — safe to run daily
+repower policy run --committee emissions_trading --max-per-run 5   # needs `notebooklm login`
 ```
 
 ## Running the dashboard locally
@@ -104,13 +112,101 @@ Both market tabs support switchable aggregation (Native / Daily / Weekly /
 Monthly, default Daily), a Period-comparison view (Period A vs B, per-area
 deltas), and Excel/PDF export.
 
+## Policy observer
+
+Alongside the market data, the bot tracks **14 Japanese energy-policy committees**
+(METI / OCCTO / EGC), detects new meetings, and uses Google **NotebookLM** to
+produce a detailed Japanese briefing + a compact English digest per meeting,
+maintaining a per-committee running document (`data/policy/<key>.md`, regenerated
+from the DB and surfaced in the dashboard's **Policy** tab).
+
+The work is split by whether it needs NotebookLM authentication:
+
+- **Detection is auth-free** and cheap (one conditional-GET per index, or a bounded
+  OCCTO probe). It folds into the daily `run-all` pipeline, so the worklist of
+  unsummarised meetings stays current with no cookies required.
+- **Summarisation needs a live NotebookLM session.** Google rotates NotebookLM
+  cookies and only an interactive browser login can mint a fresh session — no CI or
+  HF compute can do it. So summarisation runs **weekly** (`policy.yml`), gated on a
+  network-validated auth check; if auth is stale the job alerts and exits cleanly
+  **without fabricating summaries**.
+
+### Operator runbook — keeping summarisation alive
+
+Summaries are produced only while the `NOTEBOOKLM_AUTH_JSON` secret holds a valid
+session. Refresh it whenever the weekly job reports stale auth (roughly weekly):
+
+```bash
+# 1. Re-authenticate locally (opens a browser for Google OAuth).
+notebooklm login
+notebooklm auth check --test          # confirm status: ok AND token_fetch: true
+
+# 2. Push the fresh session to the repo secret the weekly workflow reads.
+#    bash / Git Bash:
+gh secret set NOTEBOOKLM_AUTH_JSON < ~/.notebooklm/profiles/default/storage_state.json
+#    PowerShell:
+#    Get-Content -Raw "$env:USERPROFILE\.notebooklm\profiles\default\storage_state.json" | gh secret set NOTEBOOKLM_AUTH_JSON
+```
+
+`auth refresh` (server-side cookie keepalive) is tried automatically, but once Google
+has hard-expired the session it cannot recover it — only `notebooklm login` can.
+
+If the NotebookLM account is on a paid plan, set the source-cap tier so ingestion
+and synthesis are sized correctly (default `standard` = 50 sources/notebook):
+
+```bash
+gh variable set NOTEBOOKLM_TIER --body plus   # standard | plus | pro | ultra
+```
+
+### Backfilling history (throttled)
+
+`policy detect` records that every historical meeting exists, but summarisation is
+deliberately throttled (cost + NotebookLM rate limits). To summarise a committee's
+back-catalogue, backfill one committee at a time, newest-first, capping each pass:
+
+```bash
+# Summarise emissions_trading back to meeting #N, ~10 meetings per invocation.
+repower policy backfill --committee emissions_trading --since-meeting 30 --max-per-run 10
+```
+
+Re-run until `policy status` shows the desired `LATEST`. The same effect happens
+gradually through the weekly `policy run` (it drains the worklist newest-first at
+`--max-per-run` per week). Each pass needs valid auth.
+
+When a `policy run` spans multiple committees (e.g. `--committee all`), the worklist
+is ordered by each committee's **priority** (set in `committees.py`) before newest-first,
+so the day's NotebookLM quota is spent on the highest-priority committees first.
+Current priority order: `system_review` → `emissions_trading` → `chousei_jukyu`, then
+everything else.
+
 ## CI workflows
 
 - **`daily.yml`** — scheduled run of the full pipeline (scrape → analyze →
   notify) at 05:30 JST (20:30 UTC). Pulls the DB from Hugging Face, runs
-  `run-all`, then pushes the updated DB back.
+  `run-all --months-back 1` (current + previous month only), then pushes back.
+- **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
+  over a wider window (last ~6 months of TSO, ~2 years of JEPX, all EPRX years)
+  to pick up late upstream revisions the daily window misses.
 - **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
   `since` and `area` inputs.
+- **`policy.yml`** — weekly (Mondays 06:30 JST) + `workflow_dispatch` authenticated
+  NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
+  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, push DB.
+  Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the
+  operator runbook above).
 - **`sync-space.yml`** — on push to `main` (code/config paths), uploads the
   Space deployment (`space/`, `src/`, `Dockerfile`, `pyproject.toml`) to the
   Hugging Face Space.
+
+### Incremental scraping & caching
+
+Sources publish whole files (TSO: monthly CSVs; JEPX: a yearly CSV; EPRX:
+fiscal-year ZIPs), so the smallest fetchable unit is a file, not a day. All
+scrapers share a persistent **conditional-GET cache** (`http_cache` table,
+synced to Hugging Face): ETag / Last-Modified validators are stored per URL, so
+re-runs send `If-None-Match` / `If-Modified-Since` and the server returns **304
+Not Modified** for unchanged files — which are then skipped (no download, no
+re-parse). The result is that the daily job effectively re-fetches only the
+files that actually changed (the current month/year). All writes are idempotent
+upserts, so any overlap is deduplicated. The daily EPRX scrape covers only the
+current fiscal year; the weekly job re-validates earlier years.

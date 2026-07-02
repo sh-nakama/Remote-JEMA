@@ -158,9 +158,9 @@ def notify(
     target_date = date.fromisoformat(target) if target else yesterday_jst()
     ok = do_notify(target_date, dry_run=dry_run)
     if ok:
-        typer.echo("✓ Notification sent")
+        typer.echo("Notification sent")
     else:
-        typer.echo("✗ Notification failed", err=True)
+        typer.echo("Notification failed", err=True)
         raise typer.Exit(code=1)
 
 
@@ -192,6 +192,15 @@ def run_all(
     yesterday = yesterday_jst()
     run_analysis(yesterday)
 
+    typer.echo("═══ POLICY DETECT ═══")
+    try:
+        from repower.policy.detect import detect as policy_detect
+        res = policy_detect()
+        new = sum(r["new"] for r in res)
+        typer.echo(f"   {new} new committee meeting(s) detected")
+    except Exception as e:  # noqa: BLE001 — policy detection must not break the data pipeline
+        typer.echo(f"   policy detect skipped: {e}", err=True)
+
     typer.echo("═══ NOTIFY ═══")
     do_notify(yesterday, dry_run=dry_run)
 
@@ -203,7 +212,7 @@ def push_hf():
     """Push the local database to Hugging Face Dataset."""
     from repower.hf_sync import push_db_to_hf
     push_db_to_hf()
-    typer.echo("✓ Database pushed to Hugging Face")
+    typer.echo("Database pushed to Hugging Face")
 
 
 @app.command()
@@ -211,7 +220,7 @@ def pull_hf():
     """Pull the database from Hugging Face Dataset."""
     from repower.hf_sync import pull_db_from_hf
     pull_db_from_hf()
-    typer.echo("✓ Database pulled from Hugging Face")
+    typer.echo("Database pulled from Hugging Face")
 
 
 @app.command()
@@ -219,7 +228,131 @@ def init_db_cmd():
     """Initialize the database (create tables)."""
     from repower.db import init_db
     init_db()
-    typer.echo("✓ Database initialized")
+    typer.echo("Database initialized")
+
+
+# ── Policy observer ──────────────────────────────────────────────────────────
+policy_app = typer.Typer(name="policy", help="Japanese energy-policy committee observer")
+app.add_typer(policy_app, name="policy")
+
+
+def _require_auth_or_exit() -> None:
+    """Clean pre-check for NotebookLM auth: print a plain message and exit (no
+    traceback) when the session is missing/stale, so operators and the catch-up
+    loop get an actionable line instead of a stack trace."""
+    from repower.policy.notebook import auth_ok
+
+    if not auth_ok():
+        typer.echo("NotebookLM auth is missing/stale.", err=True)
+        typer.echo("Run `notebooklm login` locally (or refresh the NOTEBOOKLM_AUTH_JSON "
+                   "secret), then retry.", err=True)
+        raise typer.Exit(code=2)
+
+
+@policy_app.command("detect")
+def policy_detect(
+    committee: str = typer.Option("all", help="Committee key or 'all'"),
+    window: int = typer.Option(8, help="Enumerate materials for the newest N new meetings"),
+    dry_run: bool = typer.Option(False, help="Report new meetings without writing to the DB"),
+):
+    """Detect new committee meetings (no NotebookLM auth required)."""
+    from repower.policy.detect import detect
+
+    keys = None if committee == "all" else [committee]
+    results = detect(keys, enumerate_window=window, dry_run=dry_run)
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}")
+    for r in results:
+        typer.echo(
+            f"{r['key']:<28}{r['source']:<6}{r['status']:<10}"
+            f"{str(r['latest_online'] or '-'):>7}{str(r['known_latest'] or '-'):>7}{r['new']:>5}"
+        )
+    typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
+
+
+@policy_app.command("run")
+def policy_run(
+    committee: str = typer.Option("all", help="Committee key or 'all'"),
+    max_per_run: int = typer.Option(5, help="Max meetings to summarise this run (rate/cost guard)"),
+):
+    """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
+    from repower.policy.pipeline import run
+
+    _require_auth_or_exit()
+    keys = None if committee == "all" else [committee]
+    summary = run(keys, max_per_run=max_per_run)
+    typer.echo(
+        f"processed={summary['processed']} done={summary['done']} "
+        f"errored={summary['errored']} synthesized={summary['synthesized']}"
+    )
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - run stopped early; remaining meetings "
+                   "stay pending (retry later; the cap resets over time).")
+
+
+@policy_app.command("backfill")
+def policy_backfill(
+    committee: str = typer.Option(..., help="Committee key (backfill one at a time)"),
+    since_meeting: int = typer.Option(..., help="Earliest meeting number to summarise"),
+    max_per_run: int = typer.Option(10, help="Max meetings to summarise this run"),
+):
+    """Throttled historical backfill for one committee (newest-first), requires auth."""
+    from repower.policy.detect import detect
+    from repower.policy.pipeline import run
+
+    detect([committee], backfill_to=since_meeting)  # auth-free; prime the worklist first
+    _require_auth_or_exit()
+    summary = run([committee], max_per_run=max_per_run)
+    typer.echo(
+        f"backfilled {committee}: done={summary['done']} errored={summary['errored']} "
+        f"synthesized={summary['synthesized']}"
+    )
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - re-run this backfill later to continue "
+                   "(meetings left are still pending; the cap resets over time).")
+
+
+@policy_app.command("resume")
+def policy_resume():
+    """Finish meetings left mid-flight after a partial failure (requires auth)."""
+    from repower.policy.pipeline import resume
+
+    _require_auth_or_exit()
+    summary = resume()
+    typer.echo(f"resumed: done={summary['done']} errored={summary['errored']}")
+    if summary.get("rate_limited"):
+        typer.echo("WARNING: NotebookLM rate limit hit - re-run `policy resume` later to finish.")
+
+
+@policy_app.command("status")
+def policy_status():
+    """Show per-committee state: latest summarised meeting and pending counts."""
+    from collections import Counter
+
+    from repower.policy.committees import COMMITTEES
+    from repower.policy.store import get_committee, pending_meetings, sync_committees
+
+    sync_committees()
+    pend = Counter(m["committee_key"] for m in pending_meetings())
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'LATEST':>7}{'PENDING':>9}")
+    for c in COMMITTEES:
+        row = get_committee(c.key)
+        latest = row.latest_meeting if row and row.latest_meeting else "-"
+        typer.echo(f"{c.key:<28}{c.source:<6}{str(latest):>7}{pend.get(c.key, 0):>9}")
+
+
+@policy_app.command("digest")
+def policy_digest(
+    since_days: int = typer.Option(7, help="Window of recently summarised meetings to include"),
+    dry_run: bool = typer.Option(False, help="Print the digest without posting to the webhook"),
+):
+    """Assemble a digest of recently summarised meetings (for the weekly run)."""
+    from repower.policy.digest import build_digest, post_digest
+
+    md = build_digest(since_days=since_days)
+    typer.echo(md)
+    if not dry_run:
+        ok = post_digest(md)
+        typer.echo("Digest posted" if ok else "(no webhook configured / post failed)")
 
 
 if __name__ == "__main__":
