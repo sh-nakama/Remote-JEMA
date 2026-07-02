@@ -114,7 +114,7 @@ deltas), and Excel/PDF export.
 
 ## Policy observer
 
-Alongside the market data, the bot tracks **12 Japanese energy-policy committees**
+Alongside the market data, the bot tracks **14 Japanese energy-policy committees**
 (METI / OCCTO / EGC), detects new meetings, and uses Google **NotebookLM** to
 produce a detailed Japanese briefing + a compact English digest per meeting,
 maintaining a per-committee running document (`data/policy/<key>.md`, regenerated
@@ -172,6 +172,12 @@ repower policy backfill --committee emissions_trading --since-meeting 30 --max-p
 Re-run until `policy status` shows the desired `LATEST`. The same effect happens
 gradually through the weekly `policy run` (it drains the worklist newest-first at
 `--max-per-run` per week). Each pass needs valid auth.
+
+When a `policy run` spans multiple committees (e.g. `--committee all`), the worklist
+is ordered by each committee's **priority** (set in `committees.py`) before newest-first,
+so the day's NotebookLM quota is spent on the highest-priority committees first.
+Current priority order: `system_review` → `emissions_trading` → `chousei_jukyu`, then
+everything else.
 
 ## CI workflows
 

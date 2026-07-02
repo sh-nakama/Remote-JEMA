@@ -307,6 +307,22 @@ def test_no_aurora_anywhere_in_package():
 
 def test_all_committees_have_unique_keys_and_valid_source():
     keys = [c.key for c in COMMITTEES]
-    assert len(keys) == len(set(keys)) == 12
+    assert len(keys) == len(set(keys)) == 14
     assert all(c.source in {"METI", "OCCTO", "EGC"} for c in COMMITTEES)
     assert committee_by_key("chousei_jukyu").is_occto
+    # The two recently-added METI committees are tracked.
+    assert committee_by_key("doji_shijo").is_meti
+    assert committee_by_key("saiene_shuryoku").is_meti
+
+
+def test_pending_meetings_ordered_by_priority_then_newest(tmp_path):
+    """A quota-bounded run should drain high-priority committees first, newest-first."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    # santeii is a default-priority committee; system_review is priority 1.
+    store.record_meeting("santeii", 5, None, db_path=db)
+    store.record_meeting("system_review", 108, None, db_path=db)
+    store.record_meeting("system_review", 114, None, db_path=db)
+
+    order = [(m["committee_key"], m["meeting_num"]) for m in store.pending_meetings(db_path=db)]
+    assert order == [("system_review", 114), ("system_review", 108), ("santeii", 5)]

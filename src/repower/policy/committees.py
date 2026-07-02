@@ -29,6 +29,10 @@ class Committee:
     name_en: str
     url: str
     source: str  # "METI" | "OCCTO" | "EGC"
+    # Summarisation priority (lower = summarised first when the daily NotebookLM
+    # quota is the binding constraint). Untagged committees share the default and
+    # sort after the prioritised ones. See ``pending_meetings`` for how it's applied.
+    priority: int = 100
     # OCCTO: cap the meeting-number probe; prefix for stable material ids.
     max_meeting: int | None = None
     prefix: str | None = None
@@ -57,6 +61,7 @@ COMMITTEES: list[Committee] = [
         name_en="System Review Working Group (balancing market design)",
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/jisedai_kiban/system_review/",
         source="METI",
+        priority=1,  # top priority for the backfill/catch-up
     ),
     Committee(
         key="emissions_trading",
@@ -64,6 +69,7 @@ COMMITTEES: list[Committee] = [
         name_en="Emissions Trading Scheme Subcommittee",
         url="https://www.meti.go.jp/shingikai/sankoshin/sangyo_gijutsu/emissions_trading/",
         source="METI",
+        priority=2,
     ),
     Committee(
         key="emissions_trading_power",
@@ -107,6 +113,20 @@ COMMITTEES: list[Committee] = [
         url="https://www.meti.go.jp/shingikai/santeii/",
         source="METI",
     ),
+    Committee(
+        key="doji_shijo",
+        name_ja="同時市場の在り方等に関する検討会",
+        name_en="Simultaneous Market Study Group (co-optimised energy + reserves)",
+        url="https://www.meti.go.jp/shingikai/energy_environment/doji_shijo_kento/",
+        source="METI",
+    ),
+    Committee(
+        key="saiene_shuryoku",
+        name_ja="再生可能エネルギー主力電源化小委員会",
+        name_en="Renewable Energy Main Power Source Subcommittee",
+        url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/saiene_shuryoku/",
+        source="METI",
+    ),
     # ── OCCTO (電力広域的運営推進機関) — JS-rendered indexes, probe by number ──
     Committee(
         key="youryou_kentoukai",
@@ -125,6 +145,7 @@ COMMITTEES: list[Committee] = [
         source="OCCTO",
         max_meeting=150,
         prefix="chousei_jukyu",
+        priority=3,
     ),
     # ── EGC (電力・ガス取引監視等委員会) — HTML tables + 配布資料 subpages ──────
     Committee(
@@ -165,3 +186,12 @@ def committee_by_key(key: str) -> Committee:
 
 def committee_keys() -> list[str]:
     return [c.key for c in COMMITTEES]
+
+
+def committee_priority(key: str) -> int:
+    """Summarisation priority for *key* (lower = summarised first).
+
+    Unknown keys fall back to the default so they sort after prioritised ones.
+    """
+    c = _BY_KEY.get(key)
+    return c.priority if c else 100

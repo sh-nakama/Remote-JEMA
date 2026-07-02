@@ -28,10 +28,17 @@ day only hits the spent quota.
 - cwd is the repo root; invoke the CLI as `.venv/Scripts/python.exe -m repower.cli`.
 
 ## Scope
-Default **priority committees, newest-first** (override if the user names others):
-1. `emissions_trading`
-2. `system_review`
+Default **priority committees, newest-first** (override if the user names others).
+This order matches the `priority` field in `committees.py`, so `policy run
+--committee all` drains them in the same order:
+1. `system_review`
+2. `emissions_trading`
 3. `chousei_jukyu`
+
+All other committees (including the recently-added `doji_shijo` and
+`saiene_shuryoku`) share the default priority and are summarised after these three
+once their quota frees up — run them explicitly with `--committee <key>` if the
+user asks.
 
 `--max-per-run 8` per committee (the CLI default is 5, so pass `8` explicitly). This
 is just an upper bound per process — the real limiter is the account-wide **daily
@@ -61,9 +68,9 @@ within committee #1). `--committee` is **single-valued**: one `policy run` per k
    its own Bash invocation and read its summary line before deciding to continue:
    ```bash
    export NOTEBOOKLM_BIN="C:/Users/SehunNakama/.local/bin/notebooklm.exe"
-   .venv/Scripts/python.exe -m repower.cli policy run --committee emissions_trading --max-per-run 8
+   .venv/Scripts/python.exe -m repower.cli policy run --committee system_review --max-per-run 8
    ```
-   then `system_review`, then `chousei_jukyu` (same pattern). These are long-running
+   then `emissions_trading`, then `chousei_jukyu` (same pattern). These are long-running
    (minutes per meeting); run them foreground (or background and wait for each to
    finish before the next). Each prints `processed=… done=… errored=… synthesized=…`.
 

@@ -16,7 +16,7 @@ from sqlalchemy import func, or_
 
 from repower.config import POLICY_DIR
 from repower.db import PolicyCommittee, PolicyMaterial, PolicyMeeting, get_session, init_db
-from repower.policy.committees import COMMITTEES, committee_by_key
+from repower.policy.committees import COMMITTEES, committee_by_key, committee_priority
 from repower.policy.scraper import Material
 
 logger = logging.getLogger(__name__)
@@ -152,7 +152,11 @@ def set_committee_checked(key: str, latest_online: int | None, db_path: str | No
 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────
 def pending_meetings(key: str | None = None, db_path: str | None = None) -> list[dict]:
-    """Meetings still needing work, newest first, as plain dicts.
+    """Meetings still needing work, in summarisation order, as plain dicts.
+
+    Ordered by committee **priority** first (so a quota-bounded ``policy run`` drains
+    the high-priority committees first), then committee key to keep each committee's
+    meetings grouped, then newest meeting first within a committee.
 
     Includes everything not yet ``done``, plus ``error`` rows that have failed
     fewer than ``MAX_RETRIES`` times (so transient failures are retried).
@@ -169,7 +173,9 @@ def pending_meetings(key: str | None = None, db_path: str | None = None) -> list
         )
         if key:
             q = q.filter_by(committee_key=key)
-        q = q.order_by(PolicyMeeting.committee_key, PolicyMeeting.meeting_num.desc())
+        rows = q.all()
+        # Priority lives in config (not the DB), so order in Python.
+        rows.sort(key=lambda m: (committee_priority(m.committee_key), m.committee_key, -m.meeting_num))
         return [
             {
                 "id": m.id,
@@ -179,7 +185,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None) -> list
                 "has_minutes": m.has_minutes,
                 "has_torimatome": m.has_torimatome,
             }
-            for m in q.all()
+            for m in rows
         ]
     finally:
         session.close()
