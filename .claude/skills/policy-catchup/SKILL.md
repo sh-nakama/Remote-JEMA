@@ -29,16 +29,22 @@ day only hits the spent quota.
 
 ## Scope
 Default **priority committees, newest-first** (override if the user names others).
-This order matches the `priority` field in `committees.py`, so `policy run
---committee all` drains them in the same order:
+Priority now lives in the DB registry (`policy_committee.priority`, seeded from
+`committees.py` and editable in the dashboard's *Manage tracked committees* panel),
+so `policy run --committee all` drains committees in that order — by default:
 1. `system_review`
 2. `emissions_trading`
 3. `chousei_jukyu`
 
-All other committees (including the recently-added `doji_shijo` and
-`saiene_shuryoku`) share the default priority and are summarised after these three
-once their quota frees up — run them explicitly with `--committee <key>` if the
-user asks.
+All other committees (including `doji_shijo` and `saiene_shuryoku`) share the
+default priority and are summarised after these three once quota frees up — run
+them explicitly with `--committee <key>` if the user asks.
+
+**Dashboard-queued meetings drain first.** Meetings the operator queued from the
+Policy tab's "Summarise …" buttons (when auth was stale) are flagged
+`gen_requested`; `pending_meetings` sorts those ahead of everything else, so a
+plain `policy run` (or this skill) picks them up first, before priority order.
+Disabled committees are skipped entirely.
 
 `--max-per-run 8` per committee (the CLI default is 5, so pass `8` explicitly). This
 is just an upper bound per process — the real limiter is the account-wide **daily

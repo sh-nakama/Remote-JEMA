@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 
-from repower.policy.committees import COMMITTEES, committee_by_key
 from repower.policy.scraper import discover_meetings, list_materials
 from repower.policy.store import (
     known_meeting_nums,
     record_meeting,
+    resolve_committee,
     set_committee_checked,
     sync_committees,
+    tracked_committees,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,7 +44,12 @@ def detect(
     if not dry_run:
         sync_committees(db_path)
 
-    committees = [committee_by_key(k) for k in keys] if keys else COMMITTEES
+    # DB-backed registry: honour the enabled flag + include user-added committees.
+    # Already synced above for non-dry runs, so avoid a second sync here.
+    if keys:
+        committees = [resolve_committee(k, db_path=db_path) for k in keys]
+    else:
+        committees = tracked_committees(db_path=db_path, sync=False)
     results: list[dict] = []
 
     for c in committees:

@@ -80,7 +80,9 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `policy run` | Summarise pending meetings via NotebookLM (**requires auth**). Options: `--committee`, `--max-per-run`. |
 | `policy backfill` | Throttled historical backfill for one committee, newest-first (**requires auth**). Options: `--committee` (required), `--since-meeting N` (required), `--max-per-run`. |
 | `policy resume` | Finish meetings left mid-flight after a partial failure (**requires auth**). |
-| `policy status` | Per-committee state: latest summarised meeting + pending counts (no auth). |
+| `policy status` | Per-committee state: enabled flag, priority, latest summarised meeting + pending counts (no auth). User-added committees are marked `*`. |
+| `policy add` | Add/update a tracked committee. Options: `--key`, `--name-ja`, `--url`, `--source` (METI/OCCTO/EGC), `--name-en`, `--priority`. |
+| `policy enable` / `policy disable` | Start/stop tracking a committee (kept in the DB; disabled committees are skipped by detect/run). |
 | `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--dry-run`. |
 
 Examples:
@@ -98,7 +100,7 @@ repower policy run --committee emissions_trading --max-per-run 5   # needs `note
 streamlit run dashboard/app.py
 ```
 
-The dashboard has four top-level tabs:
+The dashboard has five top-level tabs:
 
 - **Wholesale** — a 9-area grid; per area, the left column shows demand + a
   stacked generation mix and the right column shows the JEPX spot price.
@@ -107,6 +109,8 @@ The dashboard has four top-level tabs:
   price (max/avg/min), plus a full-width interconnector (DCM/DAM) panel.
 - **Drivers** — fuel/commodity prices and JEPX-vs-Brent correlation.
 - **Analyses** — daily analysis history.
+- **Policy** — per-committee running documents + per-meeting briefings, plus a
+  **Manage tracked committees** panel (see below).
 
 Both market tabs support switchable aggregation (Native / Daily / Weekly /
 Monthly, default Daily), a Period-comparison view (Period A vs B, per-area
@@ -114,11 +118,33 @@ deltas), and Excel/PDF export.
 
 ## Policy observer
 
-Alongside the market data, the bot tracks **14 Japanese energy-policy committees**
-(METI / OCCTO / EGC), detects new meetings, and uses Google **NotebookLM** to
-produce a detailed Japanese briefing + a compact English digest per meeting,
-maintaining a per-committee running document (`data/policy/<key>.md`, regenerated
-from the DB and surfaced in the dashboard's **Policy** tab).
+Alongside the market data, the bot tracks Japanese energy-policy committees
+(METI / OCCTO / EGC) — **14 out of the box, and extensible from the dashboard** —
+detects new meetings, and uses Google **NotebookLM** to produce a detailed
+Japanese briefing + a compact English digest per meeting, maintaining a
+per-committee running document (`data/policy/<key>.md`, regenerated from the DB
+and surfaced in the dashboard's **Policy** tab).
+
+### Managing tracked committees (dashboard)
+
+The Policy tab's **Manage tracked committees** panel is a DB-backed registry
+(columns on `policy_committee`) that overlays the code config, so it can be
+edited without a code change and rides the Hugging Face sync:
+
+- **Enable / disable** any committee and set its summarisation **priority** — a
+  disabled committee is skipped by `policy detect` / `policy run`.
+- **Discover new committees** — search energy committees across the METI / OCCTO
+  / EGC index roots (Japanese name or English keyword, with an EN→JA keyword
+  bridge) and add one in a click, or **add by URL** (the URL is probed to guess
+  source/name and preview how many meetings would be tracked).
+- **Summarise on command** — "Summarise latest meeting" (or a per-meeting
+  button) runs the NotebookLM pipeline **in-process when `notebooklm login` is
+  fresh**, otherwise it **queues** the meeting (`gen_requested`), which the next
+  `repower policy run` / `/policy-catchup` drains first. Summaries are generated
+  on the machine running the dashboard (the hosted Space uses the queue).
+
+The same registry is manageable from the CLI (`policy add` / `enable` / `disable`
+/ `status`).
 
 The work is split by whether it needs NotebookLM authentication:
 

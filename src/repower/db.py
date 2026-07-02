@@ -147,6 +147,18 @@ class PolicyCommittee(Base):
     name_en = Column(Text)
     url = Column(Text)
     source = Column(String(8))  # METI | OCCTO | EGC
+    # Registry state (editable from the dashboard, so DB — not code config — wins).
+    # `enabled` gates detection/summarisation; `user_added` marks committees created
+    # from the UI (not seeded from the code config). Scrape params mirror the
+    # `Committee` dataclass so a user-added committee can be scraped without a code
+    # change: OCCTO uses max_meeting/prefix; EGC uses log_pages (JSON list)/min_meeting.
+    enabled = Column(Boolean, default=True, nullable=False)
+    user_added = Column(Boolean, default=False, nullable=False)
+    priority = Column(Integer)  # summarisation order (lower = first); NULL until seeded
+    max_meeting = Column(Integer)  # OCCTO probe cap
+    prefix = Column(String(64))   # OCCTO material-id prefix
+    log_pages = Column(Text)      # EGC historical log pages, JSON array of filenames
+    min_meeting = Column(Integer)  # EGC earliest meeting to consider
     latest_meeting = Column(Integer)  # highest meeting reaching state='done'
     synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
     last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
@@ -182,6 +194,9 @@ class PolicyMeeting(Base):
     # notebook. Tracked per-meeting (not via a single high-water mark) so backfilled
     # / out-of-order meetings are included rather than skipped.
     synth_done = Column(Boolean, default=False)
+    # Set when a user asks the dashboard to summarise this meeting but auth was stale
+    # (or they queued it): the next `policy run` drains requested meetings first.
+    gen_requested = Column(Boolean, default=False)
     detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (
@@ -241,6 +256,7 @@ def init_db(db_path: str | None = None) -> Engine:
             Base.metadata.create_all(engine)
             _migrate_add_area_column(engine)
             _migrate_add_policy_synth_done(engine)
+            _migrate_add_policy_registry(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -317,6 +333,44 @@ def _migrate_add_policy_synth_done(engine) -> None:
             "  SELECT COALESCE(c.last_synth_meeting, -1) FROM policy_committee c"
             "  WHERE c.committee_key = policy_meeting.committee_key)"
         ))
+
+
+def _migrate_add_policy_registry(engine) -> None:
+    """Add the dashboard-editable registry columns (all additive).
+
+    ``policy_committee`` gains enabled/user_added/priority + the OCCTO/EGC scrape
+    params so committees can be added and toggled from the UI; ``policy_meeting``
+    gains ``gen_requested``. Existing committees default to enabled (so the current
+    tracked set is unchanged); ``priority`` is added NULL and seeded from the code
+    config by ``sync_committees`` (which can't be expressed in plain SQL here).
+    """
+    from sqlalchemy import inspect, text as sql_text
+    insp = inspect(engine)
+    names = insp.get_table_names()
+
+    if "policy_committee" in names:
+        cols = {c["name"] for c in insp.get_columns("policy_committee")}
+        adds = [
+            ("enabled", "ALTER TABLE policy_committee ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1"),
+            ("user_added", "ALTER TABLE policy_committee ADD COLUMN user_added BOOLEAN NOT NULL DEFAULT 0"),
+            ("priority", "ALTER TABLE policy_committee ADD COLUMN priority INTEGER"),
+            ("max_meeting", "ALTER TABLE policy_committee ADD COLUMN max_meeting INTEGER"),
+            ("prefix", "ALTER TABLE policy_committee ADD COLUMN prefix VARCHAR(64)"),
+            ("log_pages", "ALTER TABLE policy_committee ADD COLUMN log_pages TEXT"),
+            ("min_meeting", "ALTER TABLE policy_committee ADD COLUMN min_meeting INTEGER"),
+        ]
+        with engine.begin() as conn:
+            for col, ddl in adds:
+                if col not in cols:
+                    conn.execute(sql_text(ddl))
+
+    if "policy_meeting" in names:
+        cols = {c["name"] for c in insp.get_columns("policy_meeting")}
+        if "gen_requested" not in cols:
+            with engine.begin() as conn:
+                conn.execute(sql_text(
+                    "ALTER TABLE policy_meeting ADD COLUMN gen_requested BOOLEAN DEFAULT 0"
+                ))
 
 
 def get_session(db_path: str | None = None) -> Session:
