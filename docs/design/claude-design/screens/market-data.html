@@ -1,0 +1,131 @@
+<!-- @dsCard group="Screens" name="Market Data" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JEMA — Low-fi wireframes (Market Overview · Market Data · Policy Deep Dive)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.47.0/iconfont/tabler-icons.min.css">
+<style>
+:root{
+ --font-sans:'Inter','Noto Sans JP',system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+ --surface-0:#f2f1ec;--surface-1:#faf9f5;--surface-2:#ffffff;
+ --border:rgba(20,20,19,.12);--border-strong:rgba(20,20,19,.20);
+ --text-primary:#1d1d1b;--text-secondary:#5f5e59;--text-muted:#8b8a84;
+ --bg-accent:#e2f0f5;--text-accent:#0a6d86;
+ --bg-success:#e6f5ee;--text-success:#0f6e56;
+ --bg-warning:#faeeda;--text-warning:#8a5410;
+}
+@media (prefers-color-scheme:dark){:root{
+ --surface-0:#1a1a18;--surface-1:#242422;--surface-2:#2e2e2b;
+ --border:rgba(255,255,255,.13);--border-strong:rgba(255,255,255,.24);
+ --text-primary:#f2f1ea;--text-secondary:#b9b8b0;--text-muted:#8f8e87;
+ --bg-accent:#0c3a46;--text-accent:#7fd4e8;
+ --bg-success:#0c3d31;--text-success:#7fe0c0;
+ --bg-warning:#3d2e12;--text-warning:#f0c07a;
+}}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);font-family:var(--font-sans);padding:28px 20px;line-height:1.5}
+.page{max-width:920px;margin:0 auto}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+.lead{color:var(--text-secondary);font-size:13px;margin:0 0 14px;max-width:760px}
+h2.screen-title{font-size:16px;font-weight:600;margin:34px 0 2px}
+p.cap{color:var(--text-secondary);font-size:13px;margin:0 0 12px;max-width:820px}
+.screen{max-width:900px}
+.legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:11px;margin:6px 0 4px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.jm{font-family:var(--font-sans);color:var(--text-primary);font-size:12px;line-height:1.45}
+.jm .card{background:var(--surface-2);border:.5px solid var(--border);border-radius:12px;padding:10px 12px}
+.jm .mut{color:var(--text-muted)}
+.jm .bar{background:var(--border-strong);border-radius:4px}
+.jm .tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;padding:1px 6px;border-radius:6px}
+.jm .exists{background:var(--bg-success);color:var(--text-success)}
+.jm .defer{background:var(--bg-warning);color:var(--text-warning)}
+.jm .hold{background:var(--surface-0);color:var(--text-muted);border:.5px solid var(--border)}
+.jm .rb{font-size:11px;font-weight:500;background:var(--bg-accent);color:var(--text-accent);border-radius:6px;padding:0 6px}
+.jm .nav{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;color:var(--text-secondary)}
+.jm .nav.on{color:#0a7f9e;background:var(--surface-0);border-left:3px solid #0C8FB2}
+.jm .navi{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;color:var(--text-secondary)}
+.jm .navi.on{color:#fff;background:#0C8FB2}
+.jm .chip{font-size:11px;padding:2px 8px;border-radius:999px;border:.5px solid var(--border);color:var(--text-secondary)}
+.jm .chip.on{background:#0C8FB2;color:#fff;border-color:#0C8FB2}
+.jm .btnP{background:#0C8FB2;color:#fff;border-radius:999px;padding:5px 12px;font-size:12px}
+.jm .btnS{border:.5px solid var(--border-strong);border-radius:999px;padding:5px 12px;font-size:12px;color:var(--text-secondary)}
+.jm .st{font-size:10px;padding:1px 6px;border-radius:999px}
+</style>
+</head>
+<body>
+<div class="page">
+<div class="legend">
+ <span class="jm"><span class="tag exists">EXISTS — live data today</span></span>
+ <span class="jm"><span class="tag defer">PROPOSED / deferred — post-v1</span></span>
+ <span class="jm"><span class="tag hold">placeholder — single-tenant v1</span></span>
+ <span style="color:var(--text-muted)">Regions A–F / Explorer · Feed · Detail are labelled with chips.</span>
+</div>
+<h2 class="screen-title">2 · Market Data (Wholesale &amp; Balancing)</h2>
+<p class="cap">Sub-view switcher (Wholesale/Balancing + Interconnectors/Drivers), a shared control bar, a 4-card KPI row, a proposed price heatmap, and the 9-area two-column grid (generation-mix + price per area). Heatmap, renewable %, System series and brush/zoom are proposed (data exists; new component/wiring).</p>
+<div class="screen"><div class="jm">
+ <div style="background:var(--surface-1);border-radius:14px;padding:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+   <div style="display:flex;align-items:center;gap:5px;font-weight:500;color:#0a7f9e;width:112px"><i class="ti ti-bolt" style="font-size:18px" aria-hidden="true"></i>JEMA</div>
+   <div class="card" style="flex:1;display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--text-muted);min-width:0"><i class="ti ti-search" aria-hidden="true"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Search markets &amp; committees · 市場・委員会を検索</span></div>
+   <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-bell" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i><span class="tag hold">placeholder</span></div>
+   <div style="width:30px;height:30px;border-radius:50%;background:var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0">AN</div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:10px">
+   <div style="width:112px;display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+    <div class="nav"><i class="ti ti-layout-dashboard" aria-hidden="true"></i>Overview</div>
+    <div class="nav on"><i class="ti ti-chart-bar" aria-hidden="true"></i>Market Data</div>
+    <div class="nav"><i class="ti ti-building-bank" aria-hidden="true"></i>Policy</div>
+    <div style="height:1px;background:var(--border);margin:5px 2px"></div>
+    <div class="nav"><i class="ti ti-star" aria-hidden="true"></i>Watchlist</div>
+    <div style="padding:0 8px"><span class="tag hold">v1 placeholder</span></div>
+    <div class="nav"><i class="ti ti-settings" aria-hidden="true"></i>Settings</div>
+   </div>
+   <div style="flex:1;display:flex;flex-direction:column;gap:11px;min-width:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+     <div style="min-width:0">
+      <div style="display:flex;align-items:center;gap:6px"><span class="rb">Hdr</span><span style="font-size:15px;font-weight:500">Market Data</span><span class="mut">マーケットデータ</span></div>
+      <div class="mut" style="margin-top:2px">Wholesale &amp; balancing · 9 areas · 30-min</div>
+     </div>
+     <span class="btnS" style="flex-shrink:0"><i class="ti ti-download" aria-hidden="true"></i> Export</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+     <div style="display:flex;gap:0"><span class="chip on" style="border-radius:999px 0 0 999px">Wholesale (Spot)</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Balancing</span></div>
+     <span class="mut">·</span>
+     <div style="display:flex;gap:0"><span class="chip" style="border-radius:999px 0 0 999px">Interconnectors</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Drivers</span></div>
+    </div>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 12px">
+     <span class="chip"><i class="ti ti-calendar" aria-hidden="true"></i> 60D ▾</span>
+     <span class="mut">Areas:</span><span class="chip on">Hokkaido</span><span class="chip on">Tohoku</span><span class="chip on">Tokyo</span><span class="chip">+6</span><span class="chip hold">System (off)</span>
+     <span class="mut">·</span>
+     <div style="display:flex;gap:0"><span class="chip" style="border-radius:999px 0 0 999px">Native</span><span class="chip on" style="border-radius:0;border-left:none">Daily</span><span class="chip" style="border-radius:0;border-left:none">Weekly</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Monthly</span></div>
+     <span class="chip">Compare</span><span class="chip">Reset</span>
+     <span class="tag exists" style="margin-left:auto"><i class="ti ti-database" aria-hidden="true"></i>read.aggregate() · EXISTS</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+     <div style="background:#0C8FB2;color:#fff;border-radius:12px;padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;opacity:.92">Avg clearing ¥/kWh <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div style="height:16px;width:82%;background:rgba(255,255,255,.6);border-radius:4px;margin:9px 0 7px"></div><span style="font-size:11px;background:rgba(255,255,255,.24);padding:1px 6px;border-radius:6px">Δ% vs prior</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Peak price <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:70%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Peak demand MW <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:66%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Renewable % <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:52%;margin:9px 0 6px"></div><span class="tag defer">PROPOSED</span></div>
+    </div>
+    <div class="card">
+     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px"><div style="display:flex;align-items:center;gap:6px"><span style="font-weight:500">Price heatmap</span><span class="mut">価格ヒートマップ · Area × 30-min slot</span></div><span class="tag defer"><i class="ti ti-sparkles" aria-hidden="true"></i>PROPOSED · new component</span></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Hokkaido</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span></div></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Tokyo</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span></div></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Kyushu</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span></div></div>
+     <div style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px"><span class="mut">low</span><span style="width:16px;height:10px;background:#9FE1CB;border-radius:2px"></span><span style="width:16px;height:10px;background:#5DCAA5;border-radius:2px"></span><span style="width:16px;height:10px;background:#FAC775;border-radius:2px"></span><span style="width:16px;height:10px;background:#EF9F27;border-radius:2px"></span><span style="width:16px;height:10px;background:#E24B4A;border-radius:2px"></span><span class="mut">high ¥/kWh · rows = 9 areas · cols = 48 slots</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:2px"><span style="background:var(--surface-0);border:.5px solid var(--border);border-radius:999px;padding:3px 10px;font-size:11px">北海道 / Hokkaido</span><i class="ti ti-chevron-down mut" aria-hidden="true"></i><i class="ti ti-pin mut" aria-label="pin area"></i><span class="tag defer" style="margin-left:auto">pin = PROPOSED</span></div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-weight:500;font-size:11px">Generation mix</span><span class="mut" style="font-size:11px">14 fuels · MW</span></div><svg viewBox="0 0 250 70" width="100%" height="66" preserveAspectRatio="none" role="img" aria-label="Stacked generation-mix area with demand overlay"><polygon points="4,66 4,40 45,38 90,42 135,34 180,40 245,36 245,66" fill="#5DCAA5" fill-opacity=".85"/><polygon points="4,66 4,50 45,49 90,52 135,47 180,51 245,48 245,66" fill="#9FE1CB" fill-opacity=".9"/><polygon points="4,66 4,58 45,57 90,59 135,56 180,58 245,57 245,66" fill="#FAC775" fill-opacity=".9"/><polyline points="4,32 45,30 90,34 135,26 180,31 245,28" fill="none" stroke="#1B2A4A" stroke-width="1.6"/></svg></div>
+     <div class="card" style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-weight:500;font-size:11px">Price</span><span class="mut" style="font-size:11px">max / avg / min · ¥/kWh</span></div><svg viewBox="0 0 250 70" width="100%" height="66" preserveAspectRatio="none" role="img" aria-label="Price lines with max-min band"><polygon points="4,30 45,26 90,34 135,22 180,30 245,24 245,54 180,50 135,52 90,56 45,50 4,52" fill="#0C8FB2" fill-opacity=".12"/><polyline points="4,30 45,26 90,34 135,22 180,30 245,24" fill="none" stroke="#E24B4A" stroke-width="1.6"/><polyline points="4,42 45,40 90,44 135,38 180,42 245,39" fill="none" stroke="#1B2A4A" stroke-width="1.6"/><polyline points="4,52 45,50 90,56 135,52 180,50 245,48" fill="none" stroke="#0C8FB2" stroke-width="1.6"/></svg></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px"><span style="background:var(--surface-0);border:.5px solid var(--border);border-radius:999px;padding:3px 10px;font-size:11px">東北 / Tohoku</span><i class="ti ti-chevron-down mut" aria-hidden="true"></i><span class="mut" style="font-size:11px">+ 7 more areas (deselected areas hidden, not greyed)</span></div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px"><span class="tag exists"><i class="ti ti-database" aria-hidden="true"></i>grid · price · mix · compare · export = EXISTS</span><span class="tag defer">heatmap · renewable % · System series · brush/zoom = PROPOSED (data exists, new component)</span></div>
+   </div>
+  </div>
+ </div>
+</div></div>
+</div>
+</body>
+</html>

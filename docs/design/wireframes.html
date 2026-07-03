@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JEMA — Low-fi wireframes (Market Overview · Market Data · Policy Deep Dive)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.47.0/iconfont/tabler-icons.min.css">
+<style>
+:root{
+ --font-sans:'Inter','Noto Sans JP',system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+ --surface-0:#f2f1ec;--surface-1:#faf9f5;--surface-2:#ffffff;
+ --border:rgba(20,20,19,.12);--border-strong:rgba(20,20,19,.20);
+ --text-primary:#1d1d1b;--text-secondary:#5f5e59;--text-muted:#8b8a84;
+ --bg-accent:#e2f0f5;--text-accent:#0a6d86;
+ --bg-success:#e6f5ee;--text-success:#0f6e56;
+ --bg-warning:#faeeda;--text-warning:#8a5410;
+}
+@media (prefers-color-scheme:dark){:root{
+ --surface-0:#1a1a18;--surface-1:#242422;--surface-2:#2e2e2b;
+ --border:rgba(255,255,255,.13);--border-strong:rgba(255,255,255,.24);
+ --text-primary:#f2f1ea;--text-secondary:#b9b8b0;--text-muted:#8f8e87;
+ --bg-accent:#0c3a46;--text-accent:#7fd4e8;
+ --bg-success:#0c3d31;--text-success:#7fe0c0;
+ --bg-warning:#3d2e12;--text-warning:#f0c07a;
+}}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);font-family:var(--font-sans);padding:28px 20px;line-height:1.5}
+.page{max-width:920px;margin:0 auto}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+.lead{color:var(--text-secondary);font-size:13px;margin:0 0 14px;max-width:760px}
+h2.screen-title{font-size:16px;font-weight:600;margin:34px 0 2px}
+p.cap{color:var(--text-secondary);font-size:13px;margin:0 0 12px;max-width:820px}
+.screen{max-width:900px}
+.legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:11px;margin:6px 0 4px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.jm{font-family:var(--font-sans);color:var(--text-primary);font-size:12px;line-height:1.45}
+.jm .card{background:var(--surface-2);border:.5px solid var(--border);border-radius:12px;padding:10px 12px}
+.jm .mut{color:var(--text-muted)}
+.jm .bar{background:var(--border-strong);border-radius:4px}
+.jm .tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;padding:1px 6px;border-radius:6px}
+.jm .exists{background:var(--bg-success);color:var(--text-success)}
+.jm .defer{background:var(--bg-warning);color:var(--text-warning)}
+.jm .hold{background:var(--surface-0);color:var(--text-muted);border:.5px solid var(--border)}
+.jm .rb{font-size:11px;font-weight:500;background:var(--bg-accent);color:var(--text-accent);border-radius:6px;padding:0 6px}
+.jm .nav{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;color:var(--text-secondary)}
+.jm .nav.on{color:#0a7f9e;background:var(--surface-0);border-left:3px solid #0C8FB2}
+.jm .navi{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;color:var(--text-secondary)}
+.jm .navi.on{color:#fff;background:#0C8FB2}
+.jm .chip{font-size:11px;padding:2px 8px;border-radius:999px;border:.5px solid var(--border);color:var(--text-secondary)}
+.jm .chip.on{background:#0C8FB2;color:#fff;border-color:#0C8FB2}
+.jm .btnP{background:#0C8FB2;color:#fff;border-radius:999px;padding:5px 12px;font-size:12px}
+.jm .btnS{border:.5px solid var(--border-strong);border-radius:999px;padding:5px 12px;font-size:12px;color:var(--text-secondary)}
+.jm .st{font-size:10px;padding:1px 6px;border-radius:999px}
+</style>
+</head>
+<body>
+<div class="page">
+<h1>JEMA — low-fidelity wireframes</h1>
+<p class="lead">Companion visual for <code>JEMA-product-design-spec.md</code>. Three screens: Market Overview (hybrid landing), Market Data (wholesale &amp; balancing), Policy Deep Dive (policy observer). Grey bars are data/text placeholders; the color tags below are the honesty legend. Palette is the placeholder teal/navy "Harbor" base. Toggle your OS light/dark mode to preview both.</p>
+<div class="legend">
+ <span class="jm"><span class="tag exists">EXISTS — live data today</span></span>
+ <span class="jm"><span class="tag defer">PROPOSED / deferred — post-v1</span></span>
+ <span class="jm"><span class="tag hold">placeholder — single-tenant v1</span></span>
+ <span style="color:var(--text-muted)">Regions A–F / Explorer · Feed · Detail are labelled with chips.</span>
+</div>
+
+<h2 class="screen-title">1 · Market Overview (hybrid landing)</h2>
+<p class="cap">Fuses system-level JEPX trading (KPI strip A/B, intraday chart C, market pulse D) with the METI Committee Radar (E) and a data-freshness rail (F). YouTube-views ranking is off (w_V=0, deferred); AI Daily Brief intentionally absent.</p>
+<div class="screen"><div class="jm">
+ <div style="background:var(--surface-1);border-radius:14px;padding:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+   <div style="display:flex;align-items:center;gap:5px;font-weight:500;color:#0a7f9e;width:112px"><i class="ti ti-bolt" style="font-size:18px" aria-hidden="true"></i>JEMA</div>
+   <div class="card" style="flex:1;display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--text-muted);min-width:0"><i class="ti ti-search" aria-hidden="true"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Search markets &amp; committees · 市場・委員会を検索</span></div>
+   <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-bell" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i><span class="tag hold">placeholder</span></div>
+   <div style="width:30px;height:30px;border-radius:50%;background:var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0">AN</div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:10px">
+   <div style="width:112px;display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+    <div class="nav on"><i class="ti ti-layout-dashboard" aria-hidden="true"></i>Overview</div>
+    <div class="nav"><i class="ti ti-chart-bar" aria-hidden="true"></i>Market Data</div>
+    <div class="nav"><i class="ti ti-building-bank" aria-hidden="true"></i>Policy</div>
+    <div style="height:1px;background:var(--border);margin:5px 2px"></div>
+    <div class="nav" style="justify-content:space-between"><span style="display:flex;gap:8px;align-items:center"><i class="ti ti-star" aria-hidden="true"></i>Watchlist</span></div>
+    <div style="padding:0 8px"><span class="tag hold">v1 placeholder</span></div>
+    <div class="nav"><i class="ti ti-settings" aria-hidden="true"></i>Settings</div>
+    <div style="margin-top:8px;padding:0 8px"><span class="tag hold">JA / EN</span></div>
+   </div>
+   <div style="flex:1;display:flex;flex-direction:column;gap:11px;min-width:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+     <div style="min-width:0">
+      <div style="display:flex;align-items:center;gap:6px"><span class="rb">A</span><span style="font-size:15px;font-weight:500">Market Overview</span><span class="mut">マーケット概況</span></div>
+      <div class="mut" style="margin-top:2px">JEPX system price &amp; the latest policy-committee signals</div>
+     </div>
+     <div style="display:flex;gap:6px;flex-shrink:0"><span class="btnP">Open Market Data</span><span class="btnS">All Committees</span></div>
+    </div>
+    <div>
+     <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">B</span><span style="font-weight:500">JEPX system KPIs</span><span class="tag exists"><i class="ti ti-database" aria-hidden="true"></i>EXISTS · JepxSpot30m.system_price</span></div>
+     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <div style="background:#0C8FB2;color:#fff;border-radius:12px;padding:10px">
+       <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;opacity:.92">Latest ¥/kWh <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div>
+       <div style="height:16px;width:82%;background:rgba(255,255,255,.6);border-radius:4px;margin:9px 0 7px"></div>
+       <span style="font-size:11px;background:rgba(255,255,255,.24);padding:1px 6px;border-radius:6px">Δ vs y'day</span>
+      </div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today avg <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:70%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today high <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:64%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today low <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:58%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     </div>
+    </div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1.55;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+       <div style="display:flex;align-items:center;gap:6px"><span class="rb">C</span><span style="font-weight:500">System price — intraday</span></div>
+       <div style="display:flex;gap:4px"><span class="chip on">Today</span><span class="chip">Y'day</span><span class="chip">7-day</span></div>
+      </div>
+      <svg viewBox="0 0 320 96" width="100%" height="94" preserveAspectRatio="none" role="img" aria-label="Intraday system-price line with a dashed yesterday comparison and a highlighted current slot">
+       <line x1="4" y1="34" x2="316" y2="34" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>
+       <line x1="4" y1="64" x2="316" y2="64" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>
+       <polygon points="6,70 34,60 62,66 90,46 118,52 146,34 174,40 202,24 230,48 258,38 286,52 314,42 314,86 6,86" fill="#0C8FB2" fill-opacity="0.10"/>
+       <polyline points="6,74 34,68 62,64 90,58 118,50 146,48 174,44 202,40 230,52 258,50 286,58 314,54" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-dasharray="4 3"/>
+       <polyline points="6,70 34,60 62,66 90,46 118,52 146,34 174,40 202,24 230,48 258,38 286,52 314,42" fill="none" stroke="#0C8FB2" stroke-width="2"/>
+       <circle cx="202" cy="24" r="4" fill="#0C8FB2" stroke="#fff" stroke-width="1.5"/>
+      </svg>
+      <div class="mut" style="margin-top:3px;font-size:11px">48 half-hour slots · ¥/kWh · day-ahead · <span style="color:var(--text-secondary)">dashed = yesterday (ghost)</span> · <span class="tag exists" style="padding:0 5px">EXISTS</span></div>
+     </div>
+     <div class="card" style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">D</span><span style="font-weight:500">Market pulse</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">System now</span><span class="bar" style="height:10px;width:54px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">Tokyo now</span><span class="bar" style="height:10px;width:54px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">Sys–Tokyo spread</span><span class="bar" style="height:10px;width:40px"></span></div>
+      <div style="height:1px;background:var(--border);margin:7px 0"></div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">Per-area prices (9)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Tokyo</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,10 8,7 16,9 24,4 32,8 40,3 46,6" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:34px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Kansai</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,7 8,9 16,6 24,8 32,5 40,7 46,4" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:30px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Kyushu</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,6 8,5 16,8 24,7 32,9 40,6 46,8" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:38px"></span></div>
+      <div class="mut" style="font-size:11px;margin-top:3px">+6 more areas</div>
+     </div>
+    </div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1.6;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+       <div style="display:flex;align-items:center;gap:6px"><span class="rb">E</span><span style="font-weight:500">METI Committee Radar</span><span class="mut">委員会レーダー</span></div>
+       <i class="ti ti-info-circle" style="color:var(--text-muted)" aria-label="Why this ranking"></i>
+      </div>
+      <div style="display:flex;gap:5px;margin:8px 0 2px"><span class="chip">Followed</span><span class="chip">+Watchlist</span><span class="chip on">All tracked</span></div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:#0C8FB2;color:#fff">1</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Electricity &amp; Gas Market Surveillance</div><div class="mut" style="font-size:11px">電力・ガス取引監視 · No.58 · 2026-06-24</div><div class="bar" style="height:9px;width:94%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#0C8FB2"></span><span class="mut" style="font-size:11px">METI</span></span><span class="tag" style="background:var(--bg-accent);color:var(--text-accent)">とりまとめ</span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:var(--border-strong);color:var(--text-primary)">2</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Mid- &amp; Long-term Power Supply WG</div><div class="mut" style="font-size:11px">中長期の供給力 · No.12 · 2026-06-19</div><div class="bar" style="height:9px;width:86%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--text-muted)"></span><span class="mut" style="font-size:11px">OCCTO</span></span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:var(--border-strong);color:var(--text-primary)">3</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Institutional Design Subcommittee</div><div class="mut" style="font-size:11px">制度設計専門会合 · No.91 · 2026-06-13</div><div class="bar" style="height:9px;width:78%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#0C8FB2"></span><span class="mut" style="font-size:11px">METI</span></span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:7px;border-top:.5px solid var(--border)"><span class="tag defer"><i class="ti ti-player-track-next" aria-hidden="true"></i>YouTube views ranking off · w_V=0 · deferred</span><span class="tag hold">tracked committees only</span></div>
+     </div>
+     <div style="flex:1;min-width:0;background:#132a4a;color:#e6eef6;border-radius:12px;padding:10px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="font-size:11px;font-weight:500;background:rgba(255,255,255,.16);color:#dbe6f2;border-radius:6px;padding:0 6px">F</span><span style="font-weight:500">Data freshness</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>JEPX spot</span><span style="height:8px;width:40px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Area prices</span><span style="height:8px;width:40px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Balancing</span><span style="height:8px;width:36px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Policy detect</span><span style="height:8px;width:44px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#f0b657"></span>Summaries</span><span style="color:#c4d2e4;font-size:11px">lags days</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Fuels / FX</span><span style="height:8px;width:36px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="border-top:.5px solid rgba(255,255,255,.16);margin-top:7px;padding-top:6px;font-size:11px;color:#aebfd6"><i class="ti ti-clock" aria-hidden="true"></i> All times JST · near-daily</div>
+     </div>
+    </div>
+   </div>
+  </div>
+ </div>
+</div></div>
+
+<h2 class="screen-title">2 · Market Data (Wholesale &amp; Balancing)</h2>
+<p class="cap">Sub-view switcher (Wholesale/Balancing + Interconnectors/Drivers), a shared control bar, a 4-card KPI row, a proposed price heatmap, and the 9-area two-column grid (generation-mix + price per area). Heatmap, renewable %, System series and brush/zoom are proposed (data exists; new component/wiring).</p>
+<div class="screen"><div class="jm">
+ <div style="background:var(--surface-1);border-radius:14px;padding:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+   <div style="display:flex;align-items:center;gap:5px;font-weight:500;color:#0a7f9e;width:112px"><i class="ti ti-bolt" style="font-size:18px" aria-hidden="true"></i>JEMA</div>
+   <div class="card" style="flex:1;display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--text-muted);min-width:0"><i class="ti ti-search" aria-hidden="true"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Search markets &amp; committees · 市場・委員会を検索</span></div>
+   <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-bell" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i><span class="tag hold">placeholder</span></div>
+   <div style="width:30px;height:30px;border-radius:50%;background:var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0">AN</div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:10px">
+   <div style="width:112px;display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+    <div class="nav"><i class="ti ti-layout-dashboard" aria-hidden="true"></i>Overview</div>
+    <div class="nav on"><i class="ti ti-chart-bar" aria-hidden="true"></i>Market Data</div>
+    <div class="nav"><i class="ti ti-building-bank" aria-hidden="true"></i>Policy</div>
+    <div style="height:1px;background:var(--border);margin:5px 2px"></div>
+    <div class="nav"><i class="ti ti-star" aria-hidden="true"></i>Watchlist</div>
+    <div style="padding:0 8px"><span class="tag hold">v1 placeholder</span></div>
+    <div class="nav"><i class="ti ti-settings" aria-hidden="true"></i>Settings</div>
+   </div>
+   <div style="flex:1;display:flex;flex-direction:column;gap:11px;min-width:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+     <div style="min-width:0">
+      <div style="display:flex;align-items:center;gap:6px"><span class="rb">Hdr</span><span style="font-size:15px;font-weight:500">Market Data</span><span class="mut">マーケットデータ</span></div>
+      <div class="mut" style="margin-top:2px">Wholesale &amp; balancing · 9 areas · 30-min</div>
+     </div>
+     <span class="btnS" style="flex-shrink:0"><i class="ti ti-download" aria-hidden="true"></i> Export</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+     <div style="display:flex;gap:0"><span class="chip on" style="border-radius:999px 0 0 999px">Wholesale (Spot)</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Balancing</span></div>
+     <span class="mut">·</span>
+     <div style="display:flex;gap:0"><span class="chip" style="border-radius:999px 0 0 999px">Interconnectors</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Drivers</span></div>
+    </div>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:9px 12px">
+     <span class="chip"><i class="ti ti-calendar" aria-hidden="true"></i> 60D ▾</span>
+     <span class="mut">Areas:</span><span class="chip on">Hokkaido</span><span class="chip on">Tohoku</span><span class="chip on">Tokyo</span><span class="chip">+6</span><span class="chip hold">System (off)</span>
+     <span class="mut">·</span>
+     <div style="display:flex;gap:0"><span class="chip" style="border-radius:999px 0 0 999px">Native</span><span class="chip on" style="border-radius:0;border-left:none">Daily</span><span class="chip" style="border-radius:0;border-left:none">Weekly</span><span class="chip" style="border-radius:0 999px 999px 0;border-left:none">Monthly</span></div>
+     <span class="chip">Compare</span><span class="chip">Reset</span>
+     <span class="tag exists" style="margin-left:auto"><i class="ti ti-database" aria-hidden="true"></i>read.aggregate() · EXISTS</span>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+     <div style="background:#0C8FB2;color:#fff;border-radius:12px;padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;opacity:.92">Avg clearing ¥/kWh <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div style="height:16px;width:82%;background:rgba(255,255,255,.6);border-radius:4px;margin:9px 0 7px"></div><span style="font-size:11px;background:rgba(255,255,255,.24);padding:1px 6px;border-radius:6px">Δ% vs prior</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Peak price <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:70%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Peak demand MW <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:66%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Renewable % <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:52%;margin:9px 0 6px"></div><span class="tag defer">PROPOSED</span></div>
+    </div>
+    <div class="card">
+     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px"><div style="display:flex;align-items:center;gap:6px"><span style="font-weight:500">Price heatmap</span><span class="mut">価格ヒートマップ · Area × 30-min slot</span></div><span class="tag defer"><i class="ti ti-sparkles" aria-hidden="true"></i>PROPOSED · new component</span></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Hokkaido</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span></div></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Tokyo</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#E24B4A"></span><span style="height:12px;background:#F09595"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span></div></div>
+     <div style="display:flex;align-items:center;gap:8px;margin:3px 0"><span style="width:56px" class="mut">Kyushu</span><div style="flex:1;display:grid;grid-template-columns:repeat(14,1fr);gap:2px"><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#EF9F27"></span><span style="height:12px;background:#FAC775"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#5DCAA5"></span><span style="height:12px;background:#9FE1CB"></span></div></div>
+     <div style="display:flex;align-items:center;gap:6px;margin-top:7px;font-size:11px"><span class="mut">low</span><span style="width:16px;height:10px;background:#9FE1CB;border-radius:2px"></span><span style="width:16px;height:10px;background:#5DCAA5;border-radius:2px"></span><span style="width:16px;height:10px;background:#FAC775;border-radius:2px"></span><span style="width:16px;height:10px;background:#EF9F27;border-radius:2px"></span><span style="width:16px;height:10px;background:#E24B4A;border-radius:2px"></span><span class="mut">high ¥/kWh · rows = 9 areas · cols = 48 slots</span></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;margin-top:2px"><span style="background:var(--surface-0);border:.5px solid var(--border);border-radius:999px;padding:3px 10px;font-size:11px">北海道 / Hokkaido</span><i class="ti ti-chevron-down mut" aria-hidden="true"></i><i class="ti ti-pin mut" aria-label="pin area"></i><span class="tag defer" style="margin-left:auto">pin = PROPOSED</span></div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-weight:500;font-size:11px">Generation mix</span><span class="mut" style="font-size:11px">14 fuels · MW</span></div><svg viewBox="0 0 250 70" width="100%" height="66" preserveAspectRatio="none" role="img" aria-label="Stacked generation-mix area with demand overlay"><polygon points="4,66 4,40 45,38 90,42 135,34 180,40 245,36 245,66" fill="#5DCAA5" fill-opacity=".85"/><polygon points="4,66 4,50 45,49 90,52 135,47 180,51 245,48 245,66" fill="#9FE1CB" fill-opacity=".9"/><polygon points="4,66 4,58 45,57 90,59 135,56 180,58 245,57 245,66" fill="#FAC775" fill-opacity=".9"/><polyline points="4,32 45,30 90,34 135,26 180,31 245,28" fill="none" stroke="#1B2A4A" stroke-width="1.6"/></svg></div>
+     <div class="card" style="flex:1;min-width:0"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px"><span style="font-weight:500;font-size:11px">Price</span><span class="mut" style="font-size:11px">max / avg / min · ¥/kWh</span></div><svg viewBox="0 0 250 70" width="100%" height="66" preserveAspectRatio="none" role="img" aria-label="Price lines with max-min band"><polygon points="4,30 45,26 90,34 135,22 180,30 245,24 245,54 180,50 135,52 90,56 45,50 4,52" fill="#0C8FB2" fill-opacity=".12"/><polyline points="4,30 45,26 90,34 135,22 180,30 245,24" fill="none" stroke="#E24B4A" stroke-width="1.6"/><polyline points="4,42 45,40 90,44 135,38 180,42 245,39" fill="none" stroke="#1B2A4A" stroke-width="1.6"/><polyline points="4,52 45,50 90,56 135,52 180,50 245,48" fill="none" stroke="#0C8FB2" stroke-width="1.6"/></svg></div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px"><span style="background:var(--surface-0);border:.5px solid var(--border);border-radius:999px;padding:3px 10px;font-size:11px">東北 / Tohoku</span><i class="ti ti-chevron-down mut" aria-hidden="true"></i><span class="mut" style="font-size:11px">+ 7 more areas (deselected areas hidden, not greyed)</span></div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px"><span class="tag exists"><i class="ti ti-database" aria-hidden="true"></i>grid · price · mix · compare · export = EXISTS</span><span class="tag defer">heatmap · renewable % · System series · brush/zoom = PROPOSED (data exists, new component)</span></div>
+   </div>
+  </div>
+ </div>
+</div></div>
+
+<h2 class="screen-title">3 · Policy Deep Dive (Policy Observer)</h2>
+<p class="cap">Master–feed–detail: committee Explorer, meeting Feed with lifecycle status chips, and a Detail pane (English digest, expandable Japanese briefing, source materials). Full-text search, the NotebookLM audio overview, and YouTube views are deferred; nav shown as the collapsed icon rail to make room for three panes.</p>
+<div class="screen"><div class="jm">
+ <div style="background:var(--surface-1);border-radius:14px;padding:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+   <div style="display:flex;align-items:center;gap:5px;font-weight:500;color:#0a7f9e;width:44px"><i class="ti ti-bolt" style="font-size:18px" aria-hidden="true"></i></div>
+   <div class="card" style="flex:1;display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--text-muted);min-width:0"><i class="ti ti-search" aria-hidden="true"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Search markets &amp; committees · 市場・委員会を検索</span></div>
+   <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-bell" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i><span class="tag hold">placeholder</span></div>
+   <div style="width:30px;height:30px;border-radius:50%;background:var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0">AN</div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:10px">
+   <div style="width:44px;display:flex;flex-direction:column;gap:4px;align-items:center;flex-shrink:0">
+    <div class="navi" title="Overview"><i class="ti ti-layout-dashboard" aria-hidden="true"></i></div>
+    <div class="navi" title="Market Data"><i class="ti ti-chart-bar" aria-hidden="true"></i></div>
+    <div class="navi on" title="Policy"><i class="ti ti-building-bank" aria-hidden="true"></i></div>
+    <div style="width:24px;height:1px;background:var(--border);margin:3px 0"></div>
+    <div class="navi" title="Watchlist"><i class="ti ti-star" aria-hidden="true"></i></div>
+    <div class="navi" title="Settings"><i class="ti ti-settings" aria-hidden="true"></i></div>
+    <span class="mut" style="font-size:10px;text-align:center;margin-top:2px">rail</span>
+   </div>
+   <div style="flex:1;display:flex;flex-direction:column;gap:10px;min-width:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+     <div style="min-width:0">
+      <div style="display:flex;align-items:center;gap:6px"><span class="rb">Hdr</span><span style="font-size:15px;font-weight:500">Policy deep dive</span><span class="mut">政策ディープダイブ</span></div>
+      <div class="mut" style="margin-top:2px">Committee tracking &amp; AI briefings · METI · OCCTO · EGC</div>
+     </div>
+     <div style="display:flex;gap:6px;flex-shrink:0"><span class="btnP"><i class="ti ti-refresh" aria-hidden="true"></i> Run catch-up</span><span class="btnS"><i class="ti ti-settings" aria-hidden="true"></i> Manage</span></div>
+    </div>
+    <div class="card" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px">
+     <span style="flex:1;min-width:120px;color:var(--text-muted);display:flex;align-items:center;gap:6px"><i class="ti ti-search" aria-hidden="true"></i>Search briefings &amp; digests</span>
+     <span class="tag defer">full-text = PROPOSED (FTS5)</span>
+     <span class="chip">Committee ▾</span><span class="chip">Date ▾</span><span class="chip on">Followed only</span>
+    </div>
+    <div style="background:var(--bg-accent);border-radius:12px;padding:8px 12px">
+     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span style="font-weight:500;color:var(--text-accent)"><i class="ti ti-sparkles" aria-hidden="true"></i> Newly summarised · last 7 days (3)</span><span style="color:var(--text-accent);font-size:11px">View all →</span></div>
+     <div style="display:flex;gap:8px;overflow:hidden">
+      <div class="card" style="flex:1;padding:8px"><div style="font-size:11px;font-weight:500">EGMSC · 第58回 🏁</div><div class="bar" style="height:8px;width:90%;margin-top:5px"></div><div class="bar" style="height:8px;width:70%;margin-top:3px"></div></div>
+      <div class="card" style="flex:1;padding:8px"><div style="font-size:11px;font-weight:500">System Review · 第60回</div><div class="bar" style="height:8px;width:85%;margin-top:5px"></div><div class="bar" style="height:8px;width:64%;margin-top:3px"></div></div>
+     </div>
+     <div class="mut" style="font-size:11px;margin-top:6px">Run summary — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no <span class="tag exists" style="margin-left:4px">EXISTS</span></div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:stretch">
+     <div class="card" style="flex:1;min-width:0;padding:9px 10px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">Explorer</span><span class="mut" style="font-size:11px">committees</span></div>
+      <div style="font-size:11px;font-weight:500;color:var(--text-secondary);margin:4px 0">METI · 9</div>
+      <div style="border-left:3px solid #0C8FB2;background:var(--bg-accent);border-radius:0 8px 8px 0;padding:5px 7px;margin-bottom:5px"><div style="font-weight:500;font-size:11px">Electricity &amp; Gas Mkt Surveillance</div><div class="mut" style="font-size:10px">電力・ガス取引監視 · Tier 1</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px"><span class="st" style="background:#0C8FB2;color:#fff">Following</span><span class="mut" style="font-size:10px">第58回 · 2h</span></div></div>
+      <div style="padding:5px 7px;margin-bottom:5px"><div style="font-weight:500;font-size:11px">System Review WG</div><div class="mut" style="font-size:10px">制度検討作業部会 · Tier 1</div><div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px"><span class="st" style="background:#0C8FB2;color:#fff">Following</span><span class="mut" style="font-size:10px">第60回 · 5h</span></div></div>
+      <div style="font-size:11px;font-weight:500;color:var(--text-secondary);margin:6px 0 4px">OCCTO · 2</div>
+      <div style="padding:5px 7px"><div style="font-weight:500;font-size:11px;color:var(--text-muted)">Supply Adequacy WG</div><div class="mut" style="font-size:10px">供給力WG · Tier 2 · unfollowed</div></div>
+      <div style="font-size:11px;font-weight:500;color:var(--text-secondary);margin:6px 0 4px">EGC · 3</div>
+      <div style="border:1px dashed var(--border-strong);border-radius:8px;padding:5px 7px;display:flex;justify-content:space-between;align-items:center"><span class="mut" style="font-size:10px">Discovered · 24 mtgs</span><span class="chip">Add</span></div>
+      <div style="margin-top:6px"><span class="tag exists">registry · follow · discover = EXISTS</span></div>
+     </div>
+     <div class="card" style="flex:1.05;min-width:0;padding:9px 10px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">Feed</span><span class="mut" style="font-size:11px">newest first</span></div>
+      <div style="border-bottom:.5px solid var(--border);padding:6px 0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px"><span style="width:7px;height:7px;border-radius:50%;background:#0C8FB2;display:inline-block;margin-right:4px"></span>EGMSC · 第58回</span><span class="st" style="background:var(--bg-success);color:var(--text-success)">Summarised</span></div><div class="mut" style="font-size:10px;margin-top:2px">2026-06-24 · 🏁 とりまとめ · 議事録</div><div class="bar" style="height:8px;width:94%;margin-top:5px"></div></div>
+      <div style="border-bottom:.5px solid var(--border);padding:6px 0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px"><span style="width:7px;height:7px;border-radius:50%;background:#0C8FB2;display:inline-block;margin-right:4px"></span>System Review · 第60回</span><span class="st" style="background:var(--bg-accent);color:var(--text-accent)">Summarising…</span></div><div class="mut" style="font-size:10px;margin-top:2px">2026-06-19</div><div class="bar" style="height:8px;width:80%;margin-top:5px"></div></div>
+      <div style="border-bottom:.5px solid var(--border);padding:6px 0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px"><span style="width:7px;height:7px;border-radius:50%;background:var(--text-muted);display:inline-block;margin-right:4px"></span>Inst. Design · 第91回</span><span style="display:flex;gap:3px"><span class="st hold">Pending</span><span class="st" style="background:var(--bg-accent);color:var(--text-accent)">Queued</span></span></div><div class="mut" style="font-size:10px;margin-top:2px">2026-06-13</div><div class="bar" style="height:8px;width:72%;margin-top:5px"></div></div>
+      <div style="padding:6px 0"><div style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:11px"><span style="width:7px;height:7px;border-radius:50%;background:var(--text-muted);display:inline-block;margin-right:4px"></span>Emissions Trading · 第14回</span><span class="st" style="background:var(--bg-warning);color:var(--text-warning)">Failed — retry</span></div><div class="mut" style="font-size:10px;margin-top:2px">2026-06-05 · quality: OCR</div></div>
+      <div style="margin-top:6px"><span class="tag exists">state chips · queue · retry = EXISTS</span> <span class="tag defer">all-by-state feed = PROPOSED</span></div>
+     </div>
+     <div class="card" style="flex:1.4;min-width:0;padding:9px 11px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><span class="rb">Detail</span><span style="font-weight:500;font-size:12px">EGMSC · 第58回</span></div>
+      <div class="mut" style="font-size:10px">電力・ガス取引監視等委員会 · 2026-06-24 · 🏁 とりまとめ · 議事録 · <span style="color:var(--text-success)">Summarised</span></div>
+      <div style="font-weight:500;font-size:11px;margin:8px 0 3px">English digest</div>
+      <div style="font-size:11px;color:var(--text-secondary)">Key decisions</div><div class="bar" style="height:8px;width:96%;margin:3px 0"></div><div class="bar" style="height:8px;width:88%;margin-bottom:5px"></div>
+      <div style="font-size:11px;color:var(--text-secondary)">Points of disagreement</div><div class="bar" style="height:8px;width:90%;margin:3px 0 5px"></div>
+      <div style="font-size:11px;color:var(--text-secondary)">Action items</div><div class="bar" style="height:8px;width:82%;margin:3px 0"></div>
+      <div style="display:flex;gap:4px;margin:6px 0"><span class="chip">ref 1</span><span class="chip">ref 2</span><span class="chip">ref 3</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;border-top:.5px solid var(--border);padding-top:6px"><span style="font-size:11px">詳細briefing（4部構成）</span><i class="ti ti-chevron-down mut" aria-hidden="true"></i></div>
+      <div class="mut" style="font-size:10px">主要な論点 / 数値 / 結論 / 今後の課題 · JP authoritative</div>
+      <div style="display:flex;align-items:center;gap:8px;border:1px dashed var(--border-strong);border-radius:10px;padding:7px 9px;margin-top:8px"><i class="ti ti-player-play" style="font-size:18px;color:var(--text-muted)" aria-hidden="true"></i><div style="flex:1"><div style="font-size:11px;font-weight:500">Audio overview</div><div class="mut" style="font-size:10px">Not generated yet / 未生成</div></div><span class="tag defer">PROPOSED</span></div>
+      <div style="font-weight:500;font-size:11px;margin:8px 0 3px">Source materials</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;margin:2px 0"><span class="mut"><i class="ti ti-file" aria-hidden="true"></i> 資料1_議事次第.pdf</span><i class="ti ti-external-link mut" aria-hidden="true"></i></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;margin:2px 0"><span class="mut"><i class="ti ti-file" aria-hidden="true"></i> 資料3_制度設計.pdf</span><i class="ti ti-external-link mut" aria-hidden="true"></i></div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;border-top:.5px solid var(--border);padding-top:6px"><span class="tag exists">digest · JP briefing · sources = EXISTS</span><span class="tag defer">views · audio = deferred</span></div>
+     </div>
+    </div>
+   </div>
+  </div>
+ </div>
+</div></div>
+
+</div>
+</body>
+</html>

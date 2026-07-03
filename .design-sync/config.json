@@ -1,0 +1,7 @@
+{
+  "projectId": "90bd7f59-3baf-4c28-8d73-42807869c993",
+  "projectName": "JEMA",
+  "kind": "reference-seed",
+  "localDir": "docs/design/claude-design",
+  "note": "Seeded with hand-authored wireframe preview cards (docs/design/claude-design/screens/*.html carry @dsCard markers) plus JEMA-product-design-spec.md as reference for the Claude Design agent. This is NOT a compiled component-library sync — the RePower repo has no JS design system to convert, so the /design-sync converter pipeline (dist/, Storybook, _ds_bundle.js) does not apply. To refresh cards, re-run scratchpad/split_wireframes.py against docs/design/wireframes.html."
+}

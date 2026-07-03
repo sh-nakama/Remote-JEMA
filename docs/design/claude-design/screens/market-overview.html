@@ -1,0 +1,176 @@
+<!-- @dsCard group="Screens" name="Market Overview" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JEMA — Low-fi wireframes (Market Overview · Market Data · Policy Deep Dive)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.47.0/iconfont/tabler-icons.min.css">
+<style>
+:root{
+ --font-sans:'Inter','Noto Sans JP',system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+ --surface-0:#f2f1ec;--surface-1:#faf9f5;--surface-2:#ffffff;
+ --border:rgba(20,20,19,.12);--border-strong:rgba(20,20,19,.20);
+ --text-primary:#1d1d1b;--text-secondary:#5f5e59;--text-muted:#8b8a84;
+ --bg-accent:#e2f0f5;--text-accent:#0a6d86;
+ --bg-success:#e6f5ee;--text-success:#0f6e56;
+ --bg-warning:#faeeda;--text-warning:#8a5410;
+}
+@media (prefers-color-scheme:dark){:root{
+ --surface-0:#1a1a18;--surface-1:#242422;--surface-2:#2e2e2b;
+ --border:rgba(255,255,255,.13);--border-strong:rgba(255,255,255,.24);
+ --text-primary:#f2f1ea;--text-secondary:#b9b8b0;--text-muted:#8f8e87;
+ --bg-accent:#0c3a46;--text-accent:#7fd4e8;
+ --bg-success:#0c3d31;--text-success:#7fe0c0;
+ --bg-warning:#3d2e12;--text-warning:#f0c07a;
+}}
+body{margin:0;background:var(--surface-0);color:var(--text-primary);font-family:var(--font-sans);padding:28px 20px;line-height:1.5}
+.page{max-width:920px;margin:0 auto}
+h1{font-size:22px;font-weight:600;margin:0 0 4px}
+.lead{color:var(--text-secondary);font-size:13px;margin:0 0 14px;max-width:760px}
+h2.screen-title{font-size:16px;font-weight:600;margin:34px 0 2px}
+p.cap{color:var(--text-secondary);font-size:13px;margin:0 0 12px;max-width:820px}
+.screen{max-width:900px}
+.legend{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:11px;margin:6px 0 4px}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+.jm{font-family:var(--font-sans);color:var(--text-primary);font-size:12px;line-height:1.45}
+.jm .card{background:var(--surface-2);border:.5px solid var(--border);border-radius:12px;padding:10px 12px}
+.jm .mut{color:var(--text-muted)}
+.jm .bar{background:var(--border-strong);border-radius:4px}
+.jm .tag{display:inline-flex;align-items:center;gap:3px;font-size:11px;padding:1px 6px;border-radius:6px}
+.jm .exists{background:var(--bg-success);color:var(--text-success)}
+.jm .defer{background:var(--bg-warning);color:var(--text-warning)}
+.jm .hold{background:var(--surface-0);color:var(--text-muted);border:.5px solid var(--border)}
+.jm .rb{font-size:11px;font-weight:500;background:var(--bg-accent);color:var(--text-accent);border-radius:6px;padding:0 6px}
+.jm .nav{display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:8px;color:var(--text-secondary)}
+.jm .nav.on{color:#0a7f9e;background:var(--surface-0);border-left:3px solid #0C8FB2}
+.jm .navi{display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:8px;color:var(--text-secondary)}
+.jm .navi.on{color:#fff;background:#0C8FB2}
+.jm .chip{font-size:11px;padding:2px 8px;border-radius:999px;border:.5px solid var(--border);color:var(--text-secondary)}
+.jm .chip.on{background:#0C8FB2;color:#fff;border-color:#0C8FB2}
+.jm .btnP{background:#0C8FB2;color:#fff;border-radius:999px;padding:5px 12px;font-size:12px}
+.jm .btnS{border:.5px solid var(--border-strong);border-radius:999px;padding:5px 12px;font-size:12px;color:var(--text-secondary)}
+.jm .st{font-size:10px;padding:1px 6px;border-radius:999px}
+</style>
+</head>
+<body>
+<div class="page">
+<div class="legend">
+ <span class="jm"><span class="tag exists">EXISTS — live data today</span></span>
+ <span class="jm"><span class="tag defer">PROPOSED / deferred — post-v1</span></span>
+ <span class="jm"><span class="tag hold">placeholder — single-tenant v1</span></span>
+ <span style="color:var(--text-muted)">Regions A–F / Explorer · Feed · Detail are labelled with chips.</span>
+</div>
+<h2 class="screen-title">1 · Market Overview (hybrid landing)</h2>
+<p class="cap">Fuses system-level JEPX trading (KPI strip A/B, intraday chart C, market pulse D) with the METI Committee Radar (E) and a data-freshness rail (F). YouTube-views ranking is off (w_V=0, deferred); AI Daily Brief intentionally absent.</p>
+<div class="screen"><div class="jm">
+ <div style="background:var(--surface-1);border-radius:14px;padding:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+   <div style="display:flex;align-items:center;gap:5px;font-weight:500;color:#0a7f9e;width:112px"><i class="ti ti-bolt" style="font-size:18px" aria-hidden="true"></i>JEMA</div>
+   <div class="card" style="flex:1;display:flex;align-items:center;gap:8px;padding:7px 12px;color:var(--text-muted);min-width:0"><i class="ti ti-search" aria-hidden="true"></i><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">Search markets &amp; committees · 市場・委員会を検索</span></div>
+   <div style="display:flex;align-items:center;gap:4px"><i class="ti ti-bell" style="font-size:18px;color:var(--text-secondary)" aria-hidden="true"></i><span class="tag hold">placeholder</span></div>
+   <div style="width:30px;height:30px;border-radius:50%;background:var(--border-strong);display:flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0">AN</div>
+  </div>
+  <div style="display:flex;gap:10px;margin-top:10px">
+   <div style="width:112px;display:flex;flex-direction:column;gap:3px;flex-shrink:0">
+    <div class="nav on"><i class="ti ti-layout-dashboard" aria-hidden="true"></i>Overview</div>
+    <div class="nav"><i class="ti ti-chart-bar" aria-hidden="true"></i>Market Data</div>
+    <div class="nav"><i class="ti ti-building-bank" aria-hidden="true"></i>Policy</div>
+    <div style="height:1px;background:var(--border);margin:5px 2px"></div>
+    <div class="nav" style="justify-content:space-between"><span style="display:flex;gap:8px;align-items:center"><i class="ti ti-star" aria-hidden="true"></i>Watchlist</span></div>
+    <div style="padding:0 8px"><span class="tag hold">v1 placeholder</span></div>
+    <div class="nav"><i class="ti ti-settings" aria-hidden="true"></i>Settings</div>
+    <div style="margin-top:8px;padding:0 8px"><span class="tag hold">JA / EN</span></div>
+   </div>
+   <div style="flex:1;display:flex;flex-direction:column;gap:11px;min-width:0">
+    <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">
+     <div style="min-width:0">
+      <div style="display:flex;align-items:center;gap:6px"><span class="rb">A</span><span style="font-size:15px;font-weight:500">Market Overview</span><span class="mut">マーケット概況</span></div>
+      <div class="mut" style="margin-top:2px">JEPX system price &amp; the latest policy-committee signals</div>
+     </div>
+     <div style="display:flex;gap:6px;flex-shrink:0"><span class="btnP">Open Market Data</span><span class="btnS">All Committees</span></div>
+    </div>
+    <div>
+     <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">B</span><span style="font-weight:500">JEPX system KPIs</span><span class="tag exists"><i class="ti ti-database" aria-hidden="true"></i>EXISTS · JepxSpot30m.system_price</span></div>
+     <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+      <div style="background:#0C8FB2;color:#fff;border-radius:12px;padding:10px">
+       <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;opacity:.92">Latest ¥/kWh <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div>
+       <div style="height:16px;width:82%;background:rgba(255,255,255,.6);border-radius:4px;margin:9px 0 7px"></div>
+       <span style="font-size:11px;background:rgba(255,255,255,.24);padding:1px 6px;border-radius:6px">Δ vs y'day</span>
+      </div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today avg <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:70%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today high <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:64%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+      <div class="card" style="padding:10px"><div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;color:var(--text-secondary)">Today low <i class="ti ti-arrow-up-right" aria-hidden="true"></i></div><div class="bar" style="height:16px;width:58%;margin:9px 0 7px"></div><span class="tag hold" style="border:none">Δ</span></div>
+     </div>
+    </div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1.55;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+       <div style="display:flex;align-items:center;gap:6px"><span class="rb">C</span><span style="font-weight:500">System price — intraday</span></div>
+       <div style="display:flex;gap:4px"><span class="chip on">Today</span><span class="chip">Y'day</span><span class="chip">7-day</span></div>
+      </div>
+      <svg viewBox="0 0 320 96" width="100%" height="94" preserveAspectRatio="none" role="img" aria-label="Intraday system-price line with a dashed yesterday comparison and a highlighted current slot">
+       <line x1="4" y1="34" x2="316" y2="34" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>
+       <line x1="4" y1="64" x2="316" y2="64" stroke="var(--border)" stroke-width="1" stroke-dasharray="3 3"/>
+       <polygon points="6,70 34,60 62,66 90,46 118,52 146,34 174,40 202,24 230,48 258,38 286,52 314,42 314,86 6,86" fill="#0C8FB2" fill-opacity="0.10"/>
+       <polyline points="6,74 34,68 62,64 90,58 118,50 146,48 174,44 202,40 230,52 258,50 286,58 314,54" fill="none" stroke="var(--text-muted)" stroke-width="1.5" stroke-dasharray="4 3"/>
+       <polyline points="6,70 34,60 62,66 90,46 118,52 146,34 174,40 202,24 230,48 258,38 286,52 314,42" fill="none" stroke="#0C8FB2" stroke-width="2"/>
+       <circle cx="202" cy="24" r="4" fill="#0C8FB2" stroke="#fff" stroke-width="1.5"/>
+      </svg>
+      <div class="mut" style="margin-top:3px;font-size:11px">48 half-hour slots · ¥/kWh · day-ahead · <span style="color:var(--text-secondary)">dashed = yesterday (ghost)</span> · <span class="tag exists" style="padding:0 5px">EXISTS</span></div>
+     </div>
+     <div class="card" style="flex:1;min-width:0">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px"><span class="rb">D</span><span style="font-weight:500">Market pulse</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">System now</span><span class="bar" style="height:10px;width:54px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">Tokyo now</span><span class="bar" style="height:10px;width:54px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span class="mut">Sys–Tokyo spread</span><span class="bar" style="height:10px;width:40px"></span></div>
+      <div style="height:1px;background:var(--border);margin:7px 0"></div>
+      <div style="font-size:11px;color:var(--text-secondary);margin-bottom:4px">Per-area prices (9)</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Tokyo</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,10 8,7 16,9 24,4 32,8 40,3 46,6" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:34px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Kansai</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,7 8,9 16,6 24,8 32,5 40,7 46,4" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:30px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:4px 0"><span style="width:46px">Kyushu</span><svg viewBox="0 0 46 14" width="46" height="14" aria-hidden="true"><polyline points="0,6 8,5 16,8 24,7 32,9 40,6 46,8" fill="none" stroke="#0C8FB2" stroke-width="1.5"/></svg><span class="bar" style="height:9px;width:38px"></span></div>
+      <div class="mut" style="font-size:11px;margin-top:3px">+6 more areas</div>
+     </div>
+    </div>
+    <div style="display:flex;gap:8px">
+     <div class="card" style="flex:1.6;min-width:0">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+       <div style="display:flex;align-items:center;gap:6px"><span class="rb">E</span><span style="font-weight:500">METI Committee Radar</span><span class="mut">委員会レーダー</span></div>
+       <i class="ti ti-info-circle" style="color:var(--text-muted)" aria-label="Why this ranking"></i>
+      </div>
+      <div style="display:flex;gap:5px;margin:8px 0 2px"><span class="chip">Followed</span><span class="chip">+Watchlist</span><span class="chip on">All tracked</span></div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:#0C8FB2;color:#fff">1</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Electricity &amp; Gas Market Surveillance</div><div class="mut" style="font-size:11px">電力・ガス取引監視 · No.58 · 2026-06-24</div><div class="bar" style="height:9px;width:94%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#0C8FB2"></span><span class="mut" style="font-size:11px">METI</span></span><span class="tag" style="background:var(--bg-accent);color:var(--text-accent)">とりまとめ</span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:var(--border-strong);color:var(--text-primary)">2</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Mid- &amp; Long-term Power Supply WG</div><div class="mut" style="font-size:11px">中長期の供給力 · No.12 · 2026-06-19</div><div class="bar" style="height:9px;width:86%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--text-muted)"></span><span class="mut" style="font-size:11px">OCCTO</span></span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;gap:8px;align-items:flex-start;padding:7px 0;border-top:.5px solid var(--border)">
+       <div class="rb" style="background:var(--border-strong);color:var(--text-primary)">3</div>
+       <div style="flex:1;min-width:0"><div style="font-weight:500">Institutional Design Subcommittee</div><div class="mut" style="font-size:11px">制度設計専門会合 · No.91 · 2026-06-13</div><div class="bar" style="height:9px;width:78%;margin-top:5px"></div></div>
+       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0"><span style="display:flex;gap:4px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:#0C8FB2"></span><span class="mut" style="font-size:11px">METI</span></span><span style="color:#0a7f9e;font-size:11px">Deep dive →</span></div>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;padding-top:7px;border-top:.5px solid var(--border)"><span class="tag defer"><i class="ti ti-player-track-next" aria-hidden="true"></i>YouTube views ranking off · w_V=0 · deferred</span><span class="tag hold">tracked committees only</span></div>
+     </div>
+     <div style="flex:1;min-width:0;background:#132a4a;color:#e6eef6;border-radius:12px;padding:10px">
+      <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px"><span style="font-size:11px;font-weight:500;background:rgba(255,255,255,.16);color:#dbe6f2;border-radius:6px;padding:0 6px">F</span><span style="font-weight:500">Data freshness</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>JEPX spot</span><span style="height:8px;width:40px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Area prices</span><span style="height:8px;width:40px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Balancing</span><span style="height:8px;width:36px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Policy detect</span><span style="height:8px;width:44px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#f0b657"></span>Summaries</span><span style="color:#c4d2e4;font-size:11px">lags days</span></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:5px 0"><span style="display:flex;gap:6px;align-items:center"><span style="width:7px;height:7px;border-radius:50%;background:#3fd0a3"></span>Fuels / FX</span><span style="height:8px;width:36px;background:rgba(255,255,255,.28);border-radius:4px"></span></div>
+      <div style="border-top:.5px solid rgba(255,255,255,.16);margin-top:7px;padding-top:6px;font-size:11px;color:#aebfd6"><i class="ti ti-clock" aria-hidden="true"></i> All times JST · near-daily</div>
+     </div>
+    </div>
+   </div>
+  </div>
+ </div>
+</div></div>
+</div>
+</body>
+</html>
