@@ -1,0 +1,111 @@
+/* JEMA design tokens — copied verbatim from the Claude Design hi-fi exports
+   (screens/*.html <style> block). Light on [data-jema-root]; dark adds
+   [data-jema-root][data-dark="true"]. Hex values are the placeholder
+   "Harbor" palette (teal #00A5CF accent + navy #1B2A4A ink). No legacy
+   vendor branding. */
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+#root {
+  height: 100%;
+}
+* {
+  box-sizing: border-box;
+}
+
+[data-jema-root] {
+  --bg0: #f6f8fb;
+  --bg1: #ffffff;
+  --bg2: #f1f4f8;
+  --bg3: #fafbfd;
+  --bd: #e8e8e8;
+  --bd2: #e2e7ee;
+  --dv: #eef1f5;
+  --grid: #e5e9f0;
+  --tx: #1b2a4a;
+  --tx2: #4a5568;
+  --mut: #8a93a3;
+  --fnt: #a7afbc;
+  --fnt2: #b4bcc9;
+  --fnt3: #cbd2dc;
+  --ac: #00a5cf;
+  --acT: #0090b5;
+  --acHi: #5ab6cc;
+  --acTint: rgba(0, 165, 207, 0.1);
+  --acTint2: rgba(0, 165, 207, 0.06);
+  --acBadge: #00a5cf;
+  --up: #1f7a6e;
+  --upBg: rgba(42, 157, 143, 0.13);
+  --dn: #c92a37;
+  --dnBg: rgba(230, 57, 70, 0.1);
+  --warnBg: rgba(244, 162, 97, 0.16);
+  --warnTx: #9a6210;
+  --okDot: #3fd0a3;
+  --warnDot: #f0b657;
+  --hov: #eef2f7;
+  --avatar: #1b2a4a;
+  --navyA: #1b2a4a;
+  --navyB: #264653;
+  --tipBg: rgba(27, 42, 74, 0.94);
+  --sh1: 0 2px 8px rgba(27, 42, 74, 0.08);
+  --sh1a: 0 2px 8px rgba(27, 42, 74, 0.1);
+  --sh2: 0 8px 24px rgba(27, 42, 74, 0.12);
+  --sh2a: 0 8px 24px rgba(27, 42, 74, 0.18);
+  --shPop: 0 16px 48px rgba(27, 42, 74, 0.16);
+}
+
+[data-jema-root][data-dark='true'] {
+  --bg0: #0d1420;
+  --bg1: #161f31;
+  --bg2: #212e49;
+  --bg3: #1a2438;
+  --bd: #263450;
+  --bd2: #2c3b59;
+  --dv: #232f4a;
+  --grid: #26334d;
+  --tx: #e9eef7;
+  --tx2: #bbc6da;
+  --mut: #8493ac;
+  --fnt: #69778f;
+  --fnt2: #5d6b85;
+  --fnt3: #48526b;
+  --ac: #1fb6dc;
+  --acT: #4fcbe9;
+  --acHi: #4fcbe9;
+  --acTint: rgba(31, 182, 220, 0.14);
+  --acTint2: rgba(31, 182, 220, 0.08);
+  --acBadge: #0fa3c8;
+  --up: #4ed4ae;
+  --upBg: rgba(63, 208, 163, 0.15);
+  --dn: #ff8b94;
+  --dnBg: rgba(255, 107, 118, 0.15);
+  --warnBg: rgba(240, 182, 87, 0.15);
+  --warnTx: #f0c07a;
+  --okDot: #3fd0a3;
+  --warnDot: #f0b657;
+  --hov: #20304e;
+  --avatar: #33425f;
+  --navyA: #131e33;
+  --navyB: #1c333d;
+  --tipBg: rgba(8, 14, 27, 0.96);
+  --sh1: 0 2px 8px rgba(0, 0, 0, 0.35);
+  --sh1a: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --sh2: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --sh2a: 0 8px 24px rgba(0, 0, 0, 0.5);
+  --shPop: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(139, 148, 163, 0.45);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

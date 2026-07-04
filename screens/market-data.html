@@ -1,0 +1,2758 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// GENERATED from dc-runtime/src/*.ts — do not edit. Rebuild with `cd dc-runtime && bun run build`.
+"use strict";
+(() => {
+  var __defProp = Object.defineProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+  // src/react.ts
+  function getReact() {
+    const R = window.React;
+    if (!R) throw new Error("dc-runtime: window.React is not available yet");
+    return R;
+  }
+  function getReactDOM() {
+    const RD = window.ReactDOM;
+    if (!RD) throw new Error("dc-runtime: window.ReactDOM is not available yet");
+    return RD;
+  }
+  var h = ((...args) => getReact().createElement(
+    ...args
+  ));
+
+  // src/parse.ts
+  function parseDcDocument(doc) {
+    const dc = doc.querySelector("x-dc");
+    if (!dc) return null;
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template: dc.innerHTML,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDcText(src) {
+    const openMatch = /<x-dc(?:\s[^>]*)?>/.exec(src);
+    if (!openMatch) return null;
+    const close = src.lastIndexOf("</x-dc>");
+    if (close === -1 || close < openMatch.index) return null;
+    const template = src.slice(openMatch.index + openMatch[0].length, close);
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDataProps(raw) {
+    if (!raw) return { props: null, preview: null };
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { props: null, preview: null };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { props: null, preview: null };
+    }
+    const obj = parsed;
+    const preview = obj.$preview && typeof obj.$preview === "object" ? obj.$preview : null;
+    const rest = {};
+    for (const k of Object.keys(obj)) {
+      if (k[0] !== "$") rest[k] = obj[k];
+    }
+    return { props: Object.keys(rest).length ? rest : null, preview };
+  }
+  function dcNameFromPath(pathname) {
+    let p = pathname || "";
+    try {
+      p = decodeURIComponent(p);
+    } catch {
+    }
+    const base = p.split("/").pop() || "Root";
+    return base.replace(/\.dc\.html$/, "").replace(/\.html?$/, "") || "Root";
+  }
+
+  // src/boot.ts
+  var BASE_CSS = `
+    .sc-placeholder{background:color-mix(in srgb,currentColor 8%,transparent);
+      border:1px solid color-mix(in srgb,currentColor 50%,transparent);
+      border-radius:2px;box-sizing:border-box;overflow:hidden}
+    @keyframes sc-shine{0%{background-position:100% 50%}100%{background-position:0% 50%}}
+    html.sc-dc-streaming .sc-placeholder,
+    html.sc-dc-streaming .sc-interp.sc-missing{position:relative;
+      background:color-mix(in srgb,currentColor 5%,transparent);
+      border-color:transparent}
+    html.sc-dc-streaming .sc-placeholder::before,
+    html.sc-dc-streaming .sc-interp.sc-missing::before{content:'';
+      position:absolute;inset:0;pointer-events:none;
+      background:linear-gradient(90deg,rgba(217,119,87,0) 25%,rgba(247,225,211,.95) 37%,rgba(217,119,87,0) 63%);
+      background-size:400% 100%;animation:sc-shine 1.4s ease infinite}
+    html.sc-dc-streaming .sc-placeholder:nth-child(n+9 of .sc-placeholder)::before,
+    html.sc-dc-streaming .sc-interp.sc-missing:nth-child(n+9 of .sc-interp.sc-missing)::before{animation:none;
+      background:color-mix(in srgb,currentColor 8%,transparent)}
+    .sc-placeholder-error{padding:4px 8px;font:11px/1.4 ui-monospace,monospace;
+      color:color-mix(in srgb,currentColor 70%,transparent);word-break:break-word}
+    .sc-interp.sc-missing{display:inline-block;width:2em;height:1em;overflow:hidden;
+      vertical-align:text-bottom;background:rgba(255,255,255,.3);border:1px solid rgba(0,0,0,.5);
+      border-radius:2px;box-sizing:border-box;color:transparent;
+      user-select:none}
+    .sc-interp.sc-unresolved{font-family:ui-monospace,monospace;font-size:.85em;
+      color:color-mix(in srgb,currentColor 50%,transparent);
+      background:color-mix(in srgb,currentColor 10%,transparent);border-radius:3px;
+      padding:0 3px}
+    .sc-host.sc-has-error{position:relative}
+    .sc-logic-error{position:absolute;top:8px;left:8px;z-index:2147483647;max-width:60ch;
+      padding:6px 10px;background:#b00020;color:#fff;font:12px/1.4 ui-monospace,monospace;
+      border-radius:4px;white-space:pre-wrap;pointer-events:none}
+    /* Mirrors PRINT_BASELINE_CSS in apps/web deck-stage-export.ts \u2014 keep both
+       in sync until dc-runtime regains a build step. */
+    @media print {
+      @page { margin: 0.5cm; }
+      figure, table { break-inside: avoid; }
+      #dc-root, #dc-root > .sc-host { height: auto; }
+      *, *::before, *::after {
+        print-color-adjust: exact; -webkit-print-color-adjust: exact;
+        backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+        animation-delay: -99s !important; animation-duration: .001s !important;
+        animation-iteration-count: 1 !important; animation-fill-mode: both !important;
+        animation-play-state: running !important; transition-duration: 0s !important;
+      }
+    }
+  `;
+  var FULL_PAGE_CSS = "html,body{height:100%;margin:0}#dc-root,#dc-root>.sc-host{height:100%}";
+  function rootNameForDocument(doc, loc) {
+    let bootPath = loc.pathname || "";
+    if (!/\.dc\.html?$/i.test(safeDecode(bootPath))) {
+      try {
+        bootPath = new URL(doc.baseURI || "/").pathname;
+      } catch {
+      }
+    }
+    return dcNameFromPath(bootPath);
+  }
+  function safeDecode(s) {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  }
+  function boot(runtime, doc = document) {
+    const parsed = parseDcDocument(doc);
+    if (!parsed) return null;
+    const React = getReact();
+    const rootName = rootNameForDocument(doc, location);
+    runtime.markFetched(rootName);
+    runtime.setRootName(rootName);
+    runtime.adoptParsed(rootName, parsed);
+    fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
+      const raw = t ? parseDcText(t) : null;
+      if (raw?.template) runtime.updateHtml(rootName, raw.template);
+    }).catch(() => {
+    });
+    const dc = doc.querySelector("x-dc");
+    const hostEl = doc.createElement("div");
+    hostEl.id = "dc-root";
+    dc.replaceWith(hostEl);
+    if (!parsed.preview) {
+      const s = doc.createElement("style");
+      s.textContent = FULL_PAGE_CSS;
+      doc.head.appendChild(s);
+    }
+    const Root = runtime.getDC(rootName);
+    const entry = runtime.registry.get(rootName);
+    function StandaloneRoot() {
+      const [, setTick] = React.useState(0);
+      React.useEffect(() => {
+        const sub = () => setTick((n) => n + 1);
+        entry.subs.add(sub);
+        return () => {
+          entry.subs.delete(sub);
+        };
+      }, []);
+      const defaults = React.useMemo(() => {
+        const d = {};
+        for (const k in entry.propsMeta || {}) {
+          const v = entry.propsMeta?.[k]?.default;
+          if (v !== void 0) d[k] = v;
+        }
+        return d;
+      }, [entry.propsMeta]);
+      return h(Root, { ...defaults, ...entry.propOverrides || {} });
+    }
+    const ReactDOM = getReactDOM();
+    if (ReactDOM.createRoot)
+      ReactDOM.createRoot(hostEl).render(h(StandaloneRoot));
+    else ReactDOM.render(h(StandaloneRoot), hostEl);
+    return rootName;
+  }
+
+  // src/expr.ts
+  var IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+  var NUMBER_RE = /^-?\d+(\.\d+)?$/;
+  function resolve(vals, src) {
+    const expr = String(src).trim();
+    if (!expr) return void 0;
+    if (expr[0] === "(" && expr[expr.length - 1] === ")" && parensWrapWhole(expr)) {
+      return resolve(vals, expr.slice(1, -1));
+    }
+    const eq = findTopLevelEquality(expr);
+    if (eq) {
+      const lv = resolve(vals, expr.slice(0, eq.index));
+      const rv = resolve(vals, expr.slice(eq.index + eq.op.length));
+      switch (eq.op) {
+        case "===":
+          return lv === rv;
+        case "!==":
+          return lv !== rv;
+        case "==":
+          return lv == rv;
+        default:
+          return lv != rv;
+      }
+    }
+    if (expr[0] === "!") return !resolve(vals, expr.slice(1));
+    if (expr === "true") return true;
+    if (expr === "false") return false;
+    if (expr === "null") return null;
+    if (expr === "undefined") return void 0;
+    if (NUMBER_RE.test(expr)) return Number(expr);
+    if (expr.length >= 2 && (expr[0] === '"' || expr[0] === "'") && expr[expr.length - 1] === expr[0]) {
+      return expr.slice(1, -1);
+    }
+    return resolvePath(vals, expr);
+  }
+  function parensWrapWhole(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length - 1; i++) {
+      if (expr[i] === "(") depth++;
+      else if (expr[i] === ")") {
+        depth--;
+        if (depth === 0) return false;
+      }
+    }
+    return true;
+  }
+  function findTopLevelEquality(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length; i++) {
+      const c = expr[i];
+      if (c === "[" || c === "(") depth++;
+      else if (c === "]" || c === ")") depth--;
+      else if (depth === 0 && (c === "=" || c === "!") && expr[i + 1] === "=") {
+        if (i > 0 && (expr[i - 1] === "=" || expr[i - 1] === "!")) continue;
+        if (!expr.slice(0, i).trim()) continue;
+        const op = expr[i + 2] === "=" ? c + "==" : c + "=";
+        return { index: i, op };
+      }
+    }
+    return null;
+  }
+  function resolvePath(vals, expr) {
+    const head = expr.match(IDENT_RE);
+    if (!head) return void 0;
+    let cur = vals == null ? void 0 : vals[head[0]];
+    let i = head[0].length;
+    while (i < expr.length) {
+      if (expr[i] === ".") {
+        const m = expr.slice(i + 1).match(IDENT_RE) || expr.slice(i + 1).match(/^\d+/);
+        if (!m) return void 0;
+        cur = cur == null ? void 0 : cur[m[0]];
+        i += 1 + m[0].length;
+      } else if (expr[i] === "[") {
+        let depth = 1;
+        let j = i + 1;
+        while (j < expr.length && depth > 0) {
+          if (expr[j] === "[") depth++;
+          else if (expr[j] === "]") {
+            depth--;
+            if (depth === 0) break;
+          }
+          j++;
+        }
+        if (depth !== 0) return void 0;
+        const key = resolve(vals, expr.slice(i + 1, j));
+        cur = cur == null ? void 0 : cur[key];
+        i = j + 1;
+      } else {
+        return void 0;
+      }
+    }
+    return cur;
+  }
+
+  // src/encode.ts
+  var CAMEL_ATTR = "sc-camel-";
+  var INLINE_TEXT_TAGS = new Set(
+    "a abbr b bdi bdo br cite code del dfn em i ins kbd mark q s samp small span strike strong sub sup u var wbr".split(
+      " "
+    )
+  );
+  var RAW_WRAP = {
+    select: "sc-raw-select",
+    table: "sc-raw-table",
+    tbody: "sc-raw-tbody",
+    thead: "sc-raw-thead",
+    tfoot: "sc-raw-tfoot",
+    tr: "sc-raw-tr",
+    td: "sc-raw-td",
+    th: "sc-raw-th",
+    caption: "sc-raw-caption"
+  };
+  var RAW_UNWRAP = Object.fromEntries(
+    Object.entries(RAW_WRAP).map(([k, v]) => [v, k])
+  );
+  var EVENT_MAP = {
+    onclick: "onClick",
+    onchange: "onChange",
+    oninput: "onInput",
+    onsubmit: "onSubmit",
+    onkeydown: "onKeyDown",
+    onkeyup: "onKeyUp",
+    onkeypress: "onKeyPress",
+    onmousedown: "onMouseDown",
+    onmouseup: "onMouseUp",
+    onmouseenter: "onMouseEnter",
+    onmouseleave: "onMouseLeave",
+    onfocus: "onFocus",
+    onblur: "onBlur",
+    ondoubleclick: "onDoubleClick",
+    oncontextmenu: "onContextMenu"
+  };
+  var ATTRS = `(?:[^>"']|"[^"]*"|'[^']*')*`;
+  var IMPORT_SELF_CLOSE_RE = new RegExp(
+    "<(x-import|dc-import)(" + ATTRS + ")/>",
+    "gi"
+  );
+  var CAMEL_ATTR_RE = /(\s)([a-z]+[A-Z][A-Za-z0-9]*)(\s*=)/g;
+  function encodeCase(html) {
+    html = html.replace(
+      IMPORT_SELF_CLOSE_RE,
+      (_, t, a) => "<" + t + a + "></" + t + ">"
+    );
+    html = html.replace(/<helmet(\s|>)/gi, "<sc-helmet$1");
+    html = html.replace(/<\/helmet\s*>/gi, "</sc-helmet>");
+    html = html.replace(
+      CAMEL_ATTR_RE,
+      (_, sp, name, eq) => sp + CAMEL_ATTR + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + eq
+    );
+    for (const [real, alias] of Object.entries(RAW_WRAP)) {
+      html = html.replace(
+        new RegExp("(</?)" + real + "(?=[\\s>])", "gi"),
+        "$1" + alias
+      );
+    }
+    return html;
+  }
+  function kebabToCamel(s) {
+    return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  }
+  function cssToObj(css) {
+    const o = {};
+    for (const decl of css.split(";")) {
+      const i = decl.indexOf(":");
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      o[prop.startsWith("--") ? prop : kebabToCamel(prop)] = decl.slice(i + 1).trim();
+    }
+    return o;
+  }
+  function compileAttr(raw) {
+    const whole = raw.match(/^\s*\{\{([\s\S]+?)\}\}\s*$/);
+    if (whole) {
+      const path = whole[1];
+      return (vals) => resolve(vals, path);
+    }
+    if (raw.includes("{{")) {
+      const parts = raw.split(/\{\{([\s\S]+?)\}\}/g);
+      return (vals) => parts.map((s, i) => i & 1 ? resolve(vals, s) ?? "" : s).join("");
+    }
+    return () => raw;
+  }
+
+  // src/compile.ts
+  function collectProps(node, kind, host) {
+    const propGetters = [];
+    const pseudoClasses = [];
+    let hintSize = null;
+    for (const { name, value } of [...node.attributes]) {
+      if (name === "sc-name" || name === "data-dc-tpl") continue;
+      let key = name;
+      if (key.startsWith(CAMEL_ATTR))
+        key = kebabToCamel(key.slice(CAMEL_ATTR.length));
+      if (key === "hint-size") {
+        hintSize = value;
+        continue;
+      }
+      if (key.startsWith("style-")) {
+        pseudoClasses.push(host.pseudoClass(key.slice(6), value));
+        continue;
+      }
+      if (kind !== "dom") {
+        if (key.includes("-") && !(kind === "x-import" && (key.startsWith("aria-") || key.startsWith("data-"))))
+          key = kebabToCamel(key);
+      } else {
+        if (key === "class") key = "className";
+        else if (key === "for") key = "htmlFor";
+        else if (key.startsWith("on"))
+          key = EVENT_MAP[key] || "on" + key[2].toUpperCase() + key.slice(3);
+      }
+      propGetters.push([key, compileAttr(value)]);
+    }
+    return { propGetters, pseudoClasses, hintSize };
+  }
+  var HOST_STYLE_PROPS = /* @__PURE__ */ new Set([
+    "position",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "inset",
+    "width",
+    "height",
+    "z-index",
+    "transform"
+  ]);
+  function hostPositionStyle(style) {
+    const all = typeof style === "string" ? cssToObj(style) : style != null && typeof style === "object" ? style : null;
+    if (!all) return void 0;
+    const out = {};
+    for (const [k, v] of Object.entries(all)) {
+      const kebab = k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+      if (HOST_STYLE_PROPS.has(kebab)) out[k] = v;
+    }
+    return Object.keys(out).length ? out : void 0;
+  }
+  function compileTemplate(html, host) {
+    const tpl = document.createElement("template");
+    //! nosemgrep: direct-inner-html-assignment
+    tpl.innerHTML = encodeCase(html);
+    let tplN = 0;
+    (function stamp(node) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        node.setAttribute("data-dc-tpl", String(tplN++));
+      }
+      for (const c of node.childNodes) stamp(c);
+    })(tpl.content);
+    const builders = walkChildren(tpl.content, host);
+    const render = ((vals, ctx) => builders.map((b, i) => b(vals || {}, ctx, i)));
+    render.__annotated = tpl.innerHTML;
+    return render;
+  }
+  function walkChildren(node, host) {
+    return [...node.childNodes].map((c) => walk(c, host)).filter((b) => b != null);
+  }
+  function walk(node, host) {
+    if (node.nodeType === Node.TEXT_NODE) return walkText(node);
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    const el = node;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "sc-for") return walkFor(el, host);
+    if (tag === "sc-if") return walkIf(el, host);
+    if (tag === "x-import") return walkXImport(el, host);
+    if (tag === "sc-helmet") return host.helmet(el);
+    if (tag === "dc-import") return walkComponent(el, host);
+    return walkElement(el, host);
+  }
+  var warnedHoles = /* @__PURE__ */ new Set();
+  function warnUnresolved(ctx, what) {
+    const key = (ctx?.__name || "?") + "\0" + what;
+    if (warnedHoles.has(key)) return;
+    warnedHoles.add(key);
+    console.warn("[dc-runtime] " + (ctx?.__name || "template") + ": " + what);
+  }
+  function walkText(node) {
+    const txt = node.nodeValue ?? "";
+    if (!txt.includes("{{")) {
+      if (!txt.trim() && !txt.includes(" ")) return null;
+      return () => txt;
+    }
+    const parts = txt.split(/\{\{([\s\S]+?)\}\}/g);
+    return (vals, ctx, key) => h(
+      getReact().Fragment,
+      { key },
+      ...parts.map((p, i) => {
+        if (!(i & 1)) return p;
+        const v = resolve(vals, p);
+        if (v === void 0) {
+          if (!ctx?.__streamingNow) {
+            if (document.body?.hasAttribute("data-dc-editor-on")) {
+              return h(
+                "span",
+                { key: i, className: "sc-interp sc-unresolved" },
+                "{{ " + p.trim() + " }}"
+              );
+            }
+            warnUnresolved(
+              ctx,
+              "{{ " + p.trim() + " }} never resolved \u2014 rendered as empty"
+            );
+            return null;
+          }
+          return h(
+            "span",
+            { key: i, className: "sc-interp sc-missing" },
+            p.trim()
+          );
+        }
+        if (getReact().isValidElement(v) || Array.isArray(v)) {
+          return h(getReact().Fragment, { key: i }, v);
+        }
+        if (v === null || typeof v === "boolean") return null;
+        return h("span", { key: i, className: "sc-interp" }, String(v));
+      })
+    );
+  }
+  function walkFor(el, host) {
+    const listGet = compileAttr(el.getAttribute("list") || "");
+    const asName = el.getAttribute("as") || "item";
+    const hintN = parseInt(el.getAttribute("hint-placeholder-count") || "0", 10);
+    const kids = walkChildren(el, host);
+    const listSrc = el.getAttribute("list") || "";
+    return (vals, ctx, key) => {
+      let list = listGet(vals);
+      if (!Array.isArray(list)) {
+        if (!ctx?.__streamingNow) {
+          if (list !== void 0 && list !== null) {
+            warnUnresolved(
+              ctx,
+              'sc-for list="' + listSrc + '" is not an array (' + typeof list + ")"
+            );
+          }
+          list = [];
+        } else {
+          list = hintN > 0 ? Array(hintN).fill(void 0) : [];
+        }
+      }
+      return h(
+        getReact().Fragment,
+        { key },
+        list.map((item, i) => {
+          const sub = { ...vals, [asName]: item, $index: i };
+          return h(
+            getReact().Fragment,
+            { key: i },
+            kids.map((b, j) => b(sub, ctx, j))
+          );
+        })
+      );
+    };
+  }
+  function walkIf(el, host) {
+    const valGet = compileAttr(el.getAttribute("value") || "");
+    const hintRaw = el.getAttribute("hint-placeholder-val");
+    const hintGet = hintRaw != null ? compileAttr(hintRaw) : null;
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      let v = valGet(vals);
+      if (v === void 0 && hintGet && ctx?.__streamingNow) v = hintGet(vals);
+      return v ? h(
+        getReact().Fragment,
+        { key },
+        kids.map((b, j) => b(vals, ctx, j))
+      ) : null;
+    };
+  }
+  function walkComponent(el, host) {
+    const name = el.getAttribute("name") || el.getAttribute("component") || "";
+    el.removeAttribute("name");
+    el.removeAttribute("component");
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const { propGetters, hintSize } = collectProps(el, "dc-import", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key,
+        __hintSize: hintSize,
+        __tplId: tplId,
+        __hostStyle: styleGet ? hostPositionStyle(styleGet(vals)) : void 0
+      };
+      for (const [k, g] of propGetters) {
+        const v = g(vals);
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return h(host.component(name), props);
+    };
+  }
+  function walkXImport(el, host) {
+    const globalNameGet = compileAttr(
+      el.getAttribute("component-from-global-scope") || ""
+    );
+    const exportNameGet = compileAttr(
+      el.getAttribute("component") || el.getAttribute("name") || ""
+    );
+    const fromRaw = el.getAttribute("from") || el.getAttribute("src") || el.getAttribute("import") || "";
+    const urls = fromRaw.trim() ? fromRaw.trim().split(/\s+/) : [];
+    const url = urls.length ? urls[urls.length - 1] : "";
+    const kindOf = (u) => /\.(jsx|tsx)(\?|#|$)/i.test(u) ? "jsx" : "js";
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const wrap = tplId != null || styleGet != null;
+    const { propGetters, hintSize } = collectProps(el, "x-import", host);
+    const hasContent = el.children.length > 0 || !!(el.textContent || "").trim();
+    const kids = hasContent ? walkChildren(el, host) : [];
+    const urlBindable = fromRaw.includes("{{");
+    if (urls.length && !urlBindable) {
+      let prev;
+      for (const u of urls) prev = host.loadExternal(kindOf(u), u, prev);
+    }
+    const evalName = (g, vals) => {
+      const v = g(vals);
+      const s = v == null ? "" : String(v);
+      return s.includes("{{") ? "" : s;
+    };
+    return (vals, ctx, key) => {
+      const globalName = evalName(globalNameGet, vals);
+      const name = globalName || evalName(exportNameGet, vals);
+      const C = !name || urlBindable ? null : globalName ? host.resolveExternalGlobal(url, globalName) : host.resolveExternal(url, name);
+      const hostStyle = styleGet ? hostPositionStyle(styleGet(vals)) : void 0;
+      const wrapper = wrap ? {
+        key,
+        className: "sc-host-x",
+        "data-dc-tpl": tplId,
+        style: hostStyle || { display: "contents" }
+      } : null;
+      if (!C) {
+        const error = urlBindable ? "x-import `from` cannot contain {{ \u2026 }} \u2014 module URLs are resolved at parse time; use a literal URL" : host.resolveExternalError(url, name);
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      const props = wrapper ? {} : { key };
+      let unresolvedHole = false;
+      for (const [k, g] of propGetters) {
+        if (k === "component" || k === "componentFromGlobalScope" || k === "from") {
+          continue;
+        }
+        const v = g(vals);
+        if (v === void 0) unresolvedHole = true;
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (unresolvedHole && ctx?.__htmlStreamingNow) {
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error: null
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return wrapper ? h("div", wrapper, h(C, props)) : h(C, props);
+    };
+  }
+  function contentKey(el) {
+    const clone = el.cloneNode(true);
+    for (const d of clone.querySelectorAll("*")) {
+      while (d.attributes.length) d.removeAttribute(d.attributes[0].name);
+    }
+    const s = clone.innerHTML;
+    let h2 = 5381;
+    for (let i = 0; i < s.length; i++) h2 = (h2 << 5) + h2 + s.charCodeAt(i) | 0;
+    return s.length + "." + (h2 >>> 0).toString(36);
+  }
+  var NEVER_CONTENT_KEYED = new Set(
+    "script style textarea option title select canvas iframe video audio".split(
+      " "
+    )
+  );
+  var NOT_INLINE_SELECTOR = ":not(" + [...INLINE_TEXT_TAGS].join(",") + ")";
+  function walkElement(el, host) {
+    const realTag = RAW_UNWRAP[el.localName] || el.localName;
+    const tplId = el.getAttribute("data-dc-tpl");
+    const inlineOnly = el.childNodes.length > 0 && !NEVER_CONTENT_KEYED.has(realTag) && el.querySelector(NOT_INLINE_SELECTOR) === null;
+    const keySuffix = inlineOnly ? "|" + contentKey(el) : "";
+    const { propGetters, pseudoClasses } = collectProps(el, "dom", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key: key + keySuffix,
+        "data-dc-tpl": tplId
+      };
+      for (const [k, g] of propGetters) {
+        let v = g(vals);
+        if (k === "style" && typeof v === "string") v = cssToObj(v);
+        if ((k === "value" || k === "checked") && v === void 0) {
+          v = k === "checked" ? false : "";
+        }
+        props[k] = v;
+      }
+      if (pseudoClasses.length) {
+        props.className = [props.className, ...pseudoClasses].filter(Boolean).join(" ");
+      }
+      return h(realTag, props, ...kids.map((b, j) => b(vals, ctx, j)));
+    };
+  }
+
+  // src/logic.ts
+  var StreamableLogic = class {
+    constructor(props) {
+      __publicField(this, "props");
+      __publicField(this, "state", {});
+      /** Back-pointer to the wrapper component, installed after construction. */
+      __publicField(this, "__host");
+      this.props = props || {};
+    }
+    setState(update, cb) {
+      this.__host && this.__host.__setLogicState(update, cb);
+    }
+    forceUpdate() {
+      this.__host && this.__host.forceUpdate();
+    }
+    componentDidMount() {
+    }
+    componentDidUpdate(_prevProps) {
+    }
+    componentWillUnmount() {
+    }
+    /** The flat object the template renders against (merged over props). */
+    renderVals() {
+      return {};
+    }
+  };
+  function evalDcLogic(src) {
+    //! nosemgrep: eval-and-function-constructor
+    const fn = new Function(
+      "DCLogic",
+      "StreamableLogic",
+      "React",
+      src + '\n;return (typeof Component!=="undefined"&&Component)||undefined;'
+    );
+    return fn(StreamableLogic, StreamableLogic, getReact());
+  }
+
+  // src/component.ts
+  function shallowEqual(a, b) {
+    if (!b) return false;
+    const ak = Object.keys(a).filter((k) => k !== "children");
+    const bk = Object.keys(b).filter((k) => k !== "children");
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) if (a[k] !== b[k]) return false;
+    return true;
+  }
+  function Placeholder({
+    name,
+    hintSize,
+    streaming,
+    error
+  }) {
+    const [w, hgt] = (hintSize || "100%,60px").split(",");
+    return h(
+      "div",
+      {
+        className: "sc-placeholder" + (streaming ? " sc-streaming" : ""),
+        style: { width: w.trim(), height: hgt && hgt.trim() },
+        title: name
+      },
+      error ? h(
+        "div",
+        { className: "sc-placeholder-error" },
+        (name ? name + ": " : "") + error
+      ) : null
+    );
+  }
+  function hintToMin(hint) {
+    if (!hint) return void 0;
+    const [w, hgt] = hint.split(",");
+    return { minWidth: w.trim(), minHeight: hgt && hgt.trim() };
+  }
+  function createComponentFactory(registry, ensureFetched) {
+    const React = getReact();
+    const AncestorContext = React.createContext([]);
+    class StreamableComponent extends React.Component {
+      constructor(props) {
+        super(props);
+        __publicField(this, "__name");
+        __publicField(this, "__sub");
+        __publicField(this, "__needsDidMount", false);
+        /** Snapshot of the registry's streaming flags taken at render time —
+         *  builders read it off the RenderCtx (this) to pick placeholder vs
+         *  render-nothing for unresolved values. */
+        __publicField(this, "__streamingNow", false);
+        __publicField(this, "__htmlStreamingNow", false);
+        /** When a construct throws, remember the (class, registry.ver, props)
+         *  triple so render-time reconcile doesn't re-attempt it on every parent
+         *  re-render. A registry bump (new class, template, external module
+         *  resolving via bumpAll) changes `ver` and breaks the memo so an
+         *  env-dependent constructor can self-heal. */
+        __publicField(this, "__failedLogic", null);
+        __publicField(this, "__failedUserProps", null);
+        __publicField(this, "__failedVer", -1);
+        /** Per-instance constructor error — kept here (not on the registry entry)
+         *  so one instance's successful construct can't hide a sibling's failure,
+         *  and a construct can never wipe an eval error `updateJs` recorded on
+         *  `r.logicError`. */
+        __publicField(this, "__ctorError", null);
+        __publicField(this, "logic");
+        this.__name = props.__name;
+        this.state = { __v: 0, __err: null };
+        this.__sub = () => {
+          if (this.state.__err) this.setState({ __err: null });
+          this.forceUpdate();
+        };
+        this.__makeLogic(registry.get(this.__name).Logic, null);
+        ensureFetched(this.__name);
+      }
+      /** Error-boundary hook: a render crash anywhere in this DC's subtree
+       *  (its own template, an x-import'd component, a child DC without its
+       *  own deeper boundary) lands here instead of unmounting the page. */
+      static getDerivedStateFromError(e) {
+        return { __err: e instanceof Error && e.message ? e.message : String(e) };
+      }
+      componentDidCatch(e, info) {
+        console.error(
+          "[dc-runtime] render error in <" + this.__name + ">:",
+          e,
+          info?.componentStack || ""
+        );
+      }
+      /** Instantiate the logic class (or the no-op base) and adopt `prevState`
+       *  over its initial state — used both at mount and on hot-swap. */
+      __makeLogic(Logic, prevState) {
+        const L = Logic || StreamableLogic;
+        try {
+          this.logic = new L(this.__userProps());
+          this.__failedLogic = null;
+          this.__failedUserProps = null;
+          this.__ctorError = null;
+        } catch (e) {
+          console.error(e);
+          this.__failedLogic = Logic;
+          this.__failedUserProps = this.__userProps();
+          this.__failedVer = registry.get(this.__name).ver;
+          this.__ctorError = this.__name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+          this.logic = new StreamableLogic(
+            this.__userProps()
+          );
+        }
+        this.logic.__host = this;
+        if (prevState)
+          this.logic.state = { ...this.logic.state || {}, ...prevState };
+      }
+      /** The props the author's logic + template see — internal __-prefixed
+       *  wiring stripped. */
+      __userProps() {
+        const { __name, __hintSize, __tplId, __hostStyle, ...rest } = this.props;
+        return rest;
+      }
+      __setLogicState(update, cb) {
+        const prev = this.logic.state;
+        const patch = typeof update === "function" ? update(prev) : update;
+        this.logic.state = { ...prev, ...patch };
+        this.setState((s) => ({ __v: s.__v + 1 }), cb);
+      }
+      /** Swap the logic instance when the registry's Logic class changed
+       *  (streaming completion, hot reload). State carries over; didMount
+       *  re-fires after the swap commits so refs exist. */
+      __reconcileLogic() {
+        const r = registry.get(this.__name);
+        const Next = r.Logic;
+        const Cur = this.logic.constructor;
+        if (Next === Cur || !Next && Cur === StreamableLogic || Next === this.__failedLogic && r.ver === this.__failedVer && shallowEqual(this.__userProps(), this.__failedUserProps)) {
+          return;
+        }
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+        this.__makeLogic(Next, this.logic.state);
+        this.__needsDidMount = true;
+      }
+      componentDidMount() {
+        registry.get(this.__name).subs.add(this.__sub);
+        try {
+          this.logic.componentDidMount();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      componentDidUpdate(prevProps) {
+        this.logic.props = this.__userProps();
+        if (this.__needsDidMount) {
+          if (this.state.__err || !registry.get(this.__name).tpl) return;
+          this.__needsDidMount = false;
+          try {
+            this.logic.componentDidMount();
+          } catch (e) {
+            console.error(e);
+          }
+        } else {
+          try {
+            this.logic.componentDidUpdate(prevProps);
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      componentWillUnmount() {
+        registry.get(this.__name).subs.delete(this.__sub);
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      render() {
+        const r = registry.get(this.__name);
+        const cls = "sc-host" + (r.htmlStreaming ? " sc-streaming-html" : "") + (r.jsStreaming ? " sc-streaming-js" : "");
+        const hintStyle = r.htmlStreaming ? hintToMin(this.props.__hintSize) : void 0;
+        const hostStyle = this.props.__hostStyle || hintStyle ? { ...hintStyle || {}, ...this.props.__hostStyle || {} } : void 0;
+        const hostBase = {
+          className: cls,
+          style: hostStyle,
+          "data-sc-name": this.__name,
+          "data-dc-tpl": this.props.__tplId
+        };
+        const chain = Array.isArray(this.context) ? this.context : [];
+        if (chain.includes(this.__name)) {
+          const cycle = [
+            ...chain.slice(chain.indexOf(this.__name)),
+            this.__name
+          ].join(" \u2192 ");
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: "circular import: " + cycle
+            })
+          );
+        }
+        if (this.state.__err) {
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(
+              "div",
+              { className: "sc-logic-error", "data-omelette-chrome": "" },
+              this.__name + ": " + this.state.__err
+            ),
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: this.state.__err
+            })
+          );
+        }
+        this.__reconcileLogic();
+        if (!r.tpl) {
+          return h(
+            "div",
+            hostBase,
+            h(Placeholder, { name: this.__name, hintSize: this.props.__hintSize })
+          );
+        }
+        const userProps = this.__userProps();
+        this.logic.props = userProps;
+        let vals = userProps;
+        let renderErr = r.logicError || this.__ctorError;
+        try {
+          vals = { ...userProps, ...this.logic.renderVals() || {} };
+        } catch (e) {
+          console.error(e);
+          renderErr = this.__name + ".renderVals(): " + (e instanceof Error && e.message ? e.message : String(e));
+        }
+        this.__streamingNow = !!(r.htmlStreaming || r.jsStreaming);
+        this.__htmlStreamingNow = !!r.htmlStreaming;
+        return h(
+          "div",
+          { ...hostBase, className: cls + (renderErr ? " sc-has-error" : "") },
+          renderErr && h(
+            "div",
+            { className: "sc-logic-error", "data-omelette-chrome": "" },
+            renderErr
+          ),
+          h(
+            AncestorContext.Provider,
+            { value: [...chain, this.__name] },
+            r.tpl(vals, this)
+          )
+        );
+      }
+    }
+    __publicField(StreamableComponent, "contextType", AncestorContext);
+    const named = /* @__PURE__ */ new Map();
+    function getDC(name) {
+      const hit = named.get(name);
+      if (hit) return hit;
+      function Dispatcher(p) {
+        const [, setTick] = React.useState(0);
+        React.useEffect(() => {
+          const sub = () => setTick((n) => n + 1);
+          registry.get(name).subs.add(sub);
+          return () => {
+            registry.get(name).subs.delete(sub);
+          };
+        }, []);
+        ensureFetched(name);
+        return h(StreamableComponent, { ...p, __name: name });
+      }
+      Dispatcher.displayName = name;
+      named.set(name, Dispatcher);
+      return Dispatcher;
+    }
+    return {
+      getDC,
+      StreamableComponent
+    };
+  }
+
+  // src/external.ts
+  var isCustomElementName = (n) => !n.includes(".") && n.includes("-");
+  function isRenderableType(g) {
+    if (typeof g === "function") return !isElementClass(g);
+    return typeof g === "object" && g !== null && typeof g.$$typeof === "symbol";
+  }
+  function resolveDottedPath(root, name) {
+    let cur = root;
+    for (const seg of name.split(".")) {
+      if (cur == null) return void 0;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+  var BABEL_SRI = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+  var GLOBAL_POLL_INTERVAL_MS = 50;
+  var GLOBAL_POLL_TIMEOUT_MS = 3e4;
+  function createExternalModules(onResolved) {
+    const cache = /* @__PURE__ */ new Map();
+    let babelLoading = null;
+    const reportedMissing = /* @__PURE__ */ new Map();
+    const polling = /* @__PURE__ */ new Set();
+    function ensureBabel() {
+      if (window.Babel) return Promise.resolve();
+      if (babelLoading) return babelLoading;
+      babelLoading = new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = BABEL_URL;
+        s.integrity = BABEL_SRI;
+        s.crossOrigin = "anonymous";
+        s.onload = () => res();
+        s.onerror = rej;
+        document.head.appendChild(s);
+      });
+      return babelLoading;
+    }
+    const pending = /* @__PURE__ */ new Map();
+    function load(kind, url, after) {
+      const existing = pending.get(url);
+      if (existing) return existing;
+      cache.set(url, null);
+      console.info("[dc-runtime] x-import: loading", url, "(" + kind + ")");
+      const ready = Promise.all([
+        kind === "jsx" ? ensureBabel() : Promise.resolve(),
+        after ?? Promise.resolve()
+      ]);
+      const p = ready.then(() => fetch(url)).then((r) => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      }).then((src) => {
+        const code = kind === "jsx" ? window.Babel.transform(src, {
+          filename: url,
+          presets: ["react", "typescript"]
+        }).code : src;
+        const module = { exports: {} };
+        const before = new Set(Object.keys(window));
+        //! nosemgrep: eval-and-function-constructor
+        new Function("React", "module", "exports", "require", code)(
+          getReact(),
+          module,
+          module.exports,
+          () => ({})
+        );
+        const globals = {};
+        for (const k of Object.keys(window)) {
+          if (!before.has(k) && typeof window[k] === "function") {
+            globals[k] = window[k];
+          }
+        }
+        cache.set(url, { mod: module.exports, globals });
+        console.info(
+          "[dc-runtime] x-import: loaded",
+          url,
+          "\u2014 exports:",
+          Object.keys(module.exports),
+          "window globals:",
+          Object.keys(globals)
+        );
+        onResolved();
+      }).catch((e) => {
+        cache.set(url, {
+          mod: {},
+          globals: {},
+          error: "failed to load: " + (e instanceof Error && e.message ? e.message : String(e))
+        });
+        console.error(
+          "[dc-runtime] x-import: FAILED to load",
+          url,
+          "(" + kind + ")",
+          e
+        );
+        onResolved();
+      });
+      pending.set(url, p);
+      return p;
+    }
+    function resolve2(url, name) {
+      const entry = cache.get(url);
+      if (!entry) return null;
+      const { mod, globals } = entry;
+      const C = mod && mod[name] || globals && globals[name] || typeof window !== "undefined" && window[name] || mod && mod.default;
+      if (typeof C === "function") return C;
+      const key = url + "\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(
+          key,
+          entry.error || 'no export named "' + name + '" (has: ' + Object.keys(mod).join(", ") + ")"
+        );
+        console.error(
+          "[dc-runtime] x-import: module",
+          url,
+          "loaded but has no component named",
+          JSON.stringify(name),
+          "\u2014 available exports:",
+          Object.keys(mod),
+          "window globals:",
+          Object.keys(globals),
+          ". The module must `module.exports = {" + name + "}` or set `window." + name + "`."
+        );
+      }
+      return null;
+    }
+    function waitForGlobal(name) {
+      if (polling.has(name)) return;
+      polling.add(name);
+      const started = Date.now();
+      const isCE = isCustomElementName(name);
+      const tick = () => {
+        const found = isCE ? customElements.get(name) : isRenderableType(resolveDottedPath(window, name));
+        if (found) {
+          polling.delete(name);
+          onResolved();
+          return;
+        }
+        if (Date.now() - started >= GLOBAL_POLL_TIMEOUT_MS) {
+          console.warn(
+            "[dc-runtime] x-import: global",
+            JSON.stringify(name),
+            "never appeared on window after " + GLOBAL_POLL_TIMEOUT_MS + "ms"
+          );
+          return;
+        }
+        setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+      };
+      setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+    }
+    function resolveGlobal(url, name) {
+      const isCE = isCustomElementName(name);
+      if (!url) {
+        if (isCE) {
+          if (customElements.get(name)) return name;
+          waitForGlobal(name);
+          return null;
+        }
+        const g2 = resolveDottedPath(window, name);
+        if (isRenderableType(g2)) return g2;
+        waitForGlobal(name);
+        return null;
+      }
+      const entry = cache.get(url);
+      if (!entry) return null;
+      if (isCE && customElements.get(name)) return name;
+      const g = entry.globals[name] ?? resolveDottedPath(window, name);
+      if (isRenderableType(g)) return g;
+      if (name.includes(".")) return null;
+      const key = url + "\0global\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(key, null);
+        if (isCE && !customElements.get(name)) {
+          console.warn(
+            "[dc-runtime] x-import:",
+            url,
+            "loaded but no custom element",
+            JSON.stringify(name),
+            "is registered and window." + name + " is not a function \u2014 rendering <" + name + "> as an unknown element."
+          );
+        }
+      }
+      return name;
+    }
+    function getError(url, name) {
+      const entry = cache.get(url);
+      if (entry?.error) return entry.error;
+      return reportedMissing.get(url + "\0" + name) || null;
+    }
+    return { load, resolve: resolve2, resolveGlobal, getError };
+  }
+  function isElementClass(g) {
+    try {
+      return typeof g === "function" && typeof HTMLElement !== "undefined" && g.prototype instanceof HTMLElement;
+    } catch {
+      return false;
+    }
+  }
+
+  // src/atomics.ts
+  var ATOMIC_CSS = (
+    // layout
+    ".fx{display:flex}.col{display:flex;flex-direction:column}.grid{display:grid}.ac{align-items:center}.jc{justify-content:center}.jb{justify-content:space-between}.f1{flex:1}.noshrink{flex-shrink:0}.wrap{flex-wrap:wrap}.fw5{font-weight:500}.fw6{font-weight:600}.fw7{font-weight:700}.fw8{font-weight:800}.fs11{font-size:11px}.fs12{font-size:12px}.fs13{font-size:13px}.fs14{font-size:14px}.fs15{font-size:15px}.fs16{font-size:16px}.fs20{font-size:20px}.fs22{font-size:22px}.upper{text-transform:uppercase}.tc{text-align:center}.nowrap{white-space:nowrap}.gap8{gap:8px}.gap10{gap:10px}.gap12{gap:12px}.gap16{gap:16px}.gap24{gap:24px}.m0{margin:0}.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mb8{margin-bottom:8px}.mb12{margin-bottom:12px}.mb16{margin-bottom:16px}.posrel{position:relative}.posabs{position:absolute}.round{border-radius:50%}.ohide{overflow:hidden}.bbox{box-sizing:border-box}.pointer{cursor:pointer}.w100{width:100%}.b0{border:none}"
+  );
+
+  // src/helmet.ts
+  var DESIGN_DOC_MODE_RE = /<meta\b[^>]*\bname\s*=\s*["']design_doc_mode["'][^>]*\b(?:content|value)\s*=\s*["'](\w+)["']/i;
+  var CANVAS_BG_LIGHT = "#f0eee6";
+  var CANVAS_BG_DARK = "#2e2c26";
+  function createHelmetManager(doc, isStreaming) {
+    const mounted = /* @__PURE__ */ new Set();
+    const live = /* @__PURE__ */ new Map();
+    let designDocMode = null;
+    let canvasStyleEl = null;
+    let appTheme = "light";
+    try {
+      const ds = doc.documentElement.dataset.theme;
+      appTheme = ds === "dark" || ds === "light" ? ds : new URLSearchParams(doc.defaultView?.location.search ?? "").get(
+        "theme"
+      ) === "dark" ? "dark" : "light";
+    } catch {
+    }
+    function applyCanvasBg() {
+      if (!canvasStyleEl) return;
+      const bg = appTheme === "dark" ? CANVAS_BG_DARK : CANVAS_BG_LIGHT;
+      canvasStyleEl.textContent = `html,body{background:${bg}}#dc-root>.sc-host{position:relative}`;
+    }
+    function postDesignMode(mode) {
+      if (window.parent === window) return;
+      try {
+        window.parent.postMessage({ type: "__dc_design_mode", mode }, "*");
+      } catch {
+      }
+    }
+    function setDesignDocMode(mode) {
+      if (mode === designDocMode) return;
+      designDocMode = mode;
+      postDesignMode(mode);
+      if (mode === "canvas") {
+        doc.documentElement.setAttribute("data-dc-canvas", "");
+        canvasStyleEl = doc.createElement("style");
+        canvasStyleEl.setAttribute("data-dc-canvas", "");
+        applyCanvasBg();
+        doc.head.appendChild(canvasStyleEl);
+      } else {
+        doc.documentElement.removeAttribute("data-dc-canvas");
+        canvasStyleEl?.remove();
+        canvasStyleEl = null;
+      }
+    }
+    window.addEventListener("message", (e) => {
+      const type = e.data && e.data.type;
+      if (type === "__dc_theme") {
+        const t = e.data.theme;
+        if (t === "light" || t === "dark") {
+          appTheme = t;
+          doc.documentElement.dataset.theme = t;
+          applyCanvasBg();
+        }
+        return;
+      }
+      if (!designDocMode || type !== "__dc_probe") return;
+      postDesignMode(designDocMode);
+    });
+    function compile(node) {
+      const raw = [...node.children];
+      const helmetClosed = node.nextSibling != null || node.parentNode?.nextSibling != null;
+      if (node.hasAttribute("data-dc-atomics") && !mounted.has("__dc-atomics")) {
+        mounted.add("__dc-atomics");
+        const el = doc.createElement("style");
+        el.id = "__dc-atomics";
+        el.textContent = ATOMIC_CSS;
+        doc.head.appendChild(el);
+      }
+      return (_vals, ctx) => {
+        const name = ctx && ctx.__name || "";
+        const streaming = !!(name && isStreaming(name));
+        for (let i = 0; i < raw.length; i++) {
+          const child = raw[i];
+          const tag = child.tagName;
+          const mayBePartial = streaming && !helmetClosed && i === raw.length - 1;
+          if (tag === "SCRIPT") {
+            if (mayBePartial) continue;
+            const key = "SCRIPT|" + (child.getAttribute("src") || child.textContent || "");
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            const el = doc.createElement("script");
+            for (const { name: an, value } of [...child.attributes])
+              el.setAttribute(an, value);
+            if (child.textContent) el.textContent = child.textContent;
+            doc.head.appendChild(el);
+          } else if (tag === "LINK" || tag === "META") {
+            if (mayBePartial) continue;
+            const key = tag + "|" + (child.getAttribute("href") || child.getAttribute("src") || child.outerHTML);
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            doc.head.appendChild(child.cloneNode(true));
+          } else {
+            const key = name + "|" + i;
+            let el = live.get(key);
+            if (!el || el.tagName !== tag) {
+              if (el) el.remove();
+              el = doc.createElement(tag.toLowerCase());
+              live.set(key, el);
+              doc.head.appendChild(el);
+            }
+            for (const { name: an, value } of [...child.attributes]) {
+              if (el.getAttribute(an) !== value) el.setAttribute(an, value);
+            }
+            if (el.textContent !== child.textContent)
+              el.textContent = child.textContent;
+          }
+        }
+        return null;
+      };
+    }
+    return { compile, setDesignDocMode };
+  }
+
+  // src/pseudo.ts
+  function createPseudoSheet(doc) {
+    let el = null;
+    const cache = /* @__PURE__ */ new Map();
+    let n = 0;
+    return (pseudo, css) => {
+      const k = pseudo + "|" + css;
+      const hit = cache.get(k);
+      if (hit) return hit;
+      if (!el) {
+        el = doc.createElement("style");
+        doc.head.appendChild(el);
+      }
+      const cls = "scp" + (n++).toString(36);
+      const sel = pseudo === "before" || pseudo === "after" ? "." + cls + "::" + pseudo : "." + cls + ":" + pseudo;
+      el.sheet.insertRule(sel + "{" + css + "}", el.sheet.cssRules.length);
+      cache.set(k, cls);
+      return cls;
+    };
+  }
+
+  // src/registry.ts
+  function createRegistry() {
+    const entries = /* @__PURE__ */ Object.create(null);
+    function get(name) {
+      return entries[name] || (entries[name] = {
+        html: "",
+        tpl: null,
+        Logic: null,
+        jsStreaming: false,
+        htmlStreaming: false,
+        ver: 0,
+        subs: /* @__PURE__ */ new Set(),
+        fetched: false
+      });
+    }
+    function bump(name) {
+      const r = get(name);
+      r.ver++;
+      for (const fn of r.subs) fn();
+    }
+    return {
+      entries,
+      get,
+      bump,
+      bumpAll() {
+        for (const n in entries) bump(n);
+      }
+    };
+  }
+
+  // src/runtime.ts
+  var COMPONENT_DIR = ".";
+  function createRuntime(doc = document) {
+    const registry = createRegistry();
+    const pseudoClass = createPseudoSheet(doc);
+    const helmet = createHelmetManager(
+      doc,
+      (name) => registry.get(name).htmlStreaming
+    );
+    const external = createExternalModules(() => registry.bumpAll());
+    const factory = createComponentFactory(registry, ensureFetched);
+    const host = {
+      component: (name) => factory.getDC(name),
+      placeholder: (props) => h(Placeholder, props),
+      helmet: (node) => helmet.compile(node),
+      loadExternal: (kind, url, after) => external.load(kind, url, after),
+      resolveExternal: (url, name) => external.resolve(url, name),
+      resolveExternalGlobal: (url, name) => external.resolveGlobal(url, name),
+      resolveExternalError: (url, name) => external.getError(url, name),
+      pseudoClass
+    };
+    function ensureFetched(name) {
+      const r = registry.get(name);
+      if (r.fetched) return;
+      r.fetched = true;
+      const url = COMPONENT_DIR + "/" + encodeURIComponent(name) + ".dc.html";
+      fetch(url).then((res) => {
+        if (!res.ok) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/> failed:",
+            url,
+            "returned",
+            res.status,
+            "\u2014 the reference renders as an empty placeholder."
+          );
+          return "";
+        }
+        return res.text();
+      }).then((t) => {
+        if (!t) return;
+        const parsed = parseDcText(t);
+        if (!parsed) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/>:",
+            url,
+            "has no <x-dc> block \u2014 not a Design Component."
+          );
+          return;
+        }
+        if (parsed.props) r.propsMeta = parsed.props;
+        if (parsed.preview) r.preview = parsed.preview;
+        if (parsed.template && !r.html) updateHtml(name, parsed.template);
+        if (parsed.js && !r.Logic) updateJs(name, parsed.js);
+      }).catch(
+        (e) => console.error(
+          "[dc-runtime] sibling fetch for <" + name + "/> threw:",
+          url,
+          e
+        )
+      );
+    }
+    let rootName = null;
+    function updateHtml(name, html) {
+      const r = registry.get(name);
+      r.html = html;
+      if (name === rootName) {
+        const mode = DESIGN_DOC_MODE_RE.exec(html)?.[1] ?? null;
+        if (mode || !r.htmlStreaming) helmet.setDesignDocMode(mode);
+      }
+      try {
+        r.tpl = compileTemplate(html, host);
+      } catch (e) {
+        console.error("[dc-runtime] template compile FAILED for", name, e);
+      }
+      registry.bump(name);
+    }
+    function updateJs(name, src) {
+      const r = registry.get(name);
+      const seq = r.jsSeq = (r.jsSeq || 0) + 1;
+      try {
+        const Cls = evalDcLogic(src);
+        if (r.jsSeq !== seq) return;
+        if (typeof Cls !== "function") {
+          r.logicError = name + ".dc.html: <script data-dc-script> must define `class Component extends DCLogic`";
+        } else {
+          r.logicError = null;
+          r.Logic = Cls;
+        }
+      } catch (e) {
+        if (r.jsSeq !== seq) return;
+        console.error(
+          "[dc-runtime] logic class eval FAILED for",
+          name,
+          "\u2014 the template renders with props only.",
+          e
+        );
+        r.logicError = name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+      }
+      registry.bump(name);
+    }
+    function setStreaming(name, kind, on) {
+      const r = registry.get(name);
+      if (kind === "html") r.htmlStreaming = !!on;
+      else r.jsStreaming = !!on;
+      let any = false;
+      for (const n in registry.entries) {
+        const e = registry.entries[n];
+        if (e && (e.htmlStreaming || e.jsStreaming)) {
+          any = true;
+          break;
+        }
+      }
+      doc.documentElement.classList.toggle("sc-dc-streaming", any);
+      registry.bump(name);
+    }
+    function dcUpdate(name, kind, content, streaming) {
+      if (streaming) registry.get(name).fetched = true;
+      if (kind === "html") {
+        setStreaming(name, "html", !!streaming);
+        updateHtml(name, content);
+      } else if (kind === "js") {
+        setStreaming(name, "js", !!streaming);
+        if (!streaming) updateJs(name, content);
+      } else if (kind === "props") {
+        const { props, preview } = parseDataProps(content);
+        const r = registry.get(name);
+        r.propsMeta = props ?? void 0;
+        r.preview = preview;
+        registry.bump(name);
+      }
+    }
+    function setProps(name, overrides) {
+      registry.get(name).propOverrides = overrides && typeof overrides === "object" ? { ...overrides } : null;
+      registry.bump(name);
+    }
+    function adoptParsed(name, parsed) {
+      if (!parsed) return;
+      const r = registry.get(name);
+      if (parsed.props) r.propsMeta = parsed.props;
+      if (parsed.preview) r.preview = parsed.preview;
+      if (parsed.template) updateHtml(name, parsed.template);
+      if (parsed.js) updateJs(name, parsed.js);
+    }
+    return {
+      registry,
+      getDC: factory.getDC,
+      updateHtml,
+      updateJs,
+      dcUpdate,
+      setProps,
+      adoptParsed,
+      setRootName: (name) => {
+        rootName = name;
+      },
+      markFetched: (name) => {
+        registry.get(name).fetched = true;
+      },
+      annotatedTemplate: (name) => {
+        const r = registry.get(name);
+        return r.tpl && r.tpl.__annotated || null;
+      },
+      templateSource: (name) => registry.get(name).html || null,
+      StreamableLogic
+    };
+  }
+
+  // src/index.ts
+  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
+  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
+  function hideRawTemplate() {
+    const s = document.createElement("style");
+    s.textContent = "x-dc{display:none!important}";
+    document.head.appendChild(s);
+  }
+  function loadScript(src, integrity) {
+    return new Promise((resolve2, reject) => {
+      //! nosemgrep: create-script-element
+      const s = document.createElement("script");
+      s.src = src;
+      s.integrity = integrity;
+      s.crossOrigin = "anonymous";
+      s.async = false;
+      s.onload = () => resolve2();
+      s.onerror = () => reject(new Error(`failed to load ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+  function loadReactUmd() {
+    const w = window;
+    if (w.React && w.ReactDOM) return Promise.resolve();
+    return Promise.all([
+      loadScript(REACT_URL, REACT_SRI),
+      loadScript(REACT_DOM_URL, REACT_DOM_SRI)
+    ]).then(() => void 0);
+  }
+  function init() {
+    const runtime = createRuntime(document);
+    let rootName = "Root";
+    const baseCss = document.createElement("style");
+    baseCss.textContent = BASE_CSS;
+    document.head.prepend(baseCss);
+    const notifyHost = () => {
+      if (window.parent === window) return;
+      const r = runtime.registry.entries[rootName];
+      try {
+        window.parent.postMessage(
+          {
+            type: "__dc_booted",
+            rootName,
+            propsMeta: r && r.propsMeta || null,
+            preview: r && r.preview || null
+          },
+          "*"
+        );
+      } catch {
+      }
+    };
+    const api = {
+      __dcUpdate: (name, kind, content, streaming) => {
+        runtime.dcUpdate(name, kind, content, streaming);
+        if (name === rootName && !streaming && kind === "props") notifyHost();
+      },
+      __dcSetProps: (name, overrides) => runtime.setProps(name, overrides),
+      /** Name of the component currently mounted as the page root — DC tools
+       *  push their template-stream here when targeting "the open page". */
+      __dcRootName: () => rootName,
+      /** Editor bridge — the encoded, `data-dc-tpl`-annotated template source.
+       *  The host editor parses this into its own template DOM so it can map a
+       *  rendered node (carrying the same `data-dc-tpl`) back to the source
+       *  node that emitted it. Returns the encoded form (`<sc-comp>`,
+       *  `sc-camel-*` attrs); the editor decodes on serialize. */
+      __dcAnnotatedTemplate: (name) => runtime.annotatedTemplate(name),
+      /** Editor bridge — the *original* (decoded) template source. */
+      __dcTemplateSource: (name) => runtime.templateSource(name),
+      __dcBoot: () => {
+        rootName = boot(runtime, document) ?? rootName;
+        notifyHost();
+      },
+      __dcRegistry: runtime.registry.entries,
+      getDC: (name) => runtime.getDC(name),
+      // `DCLogic` is the documented base class name; `StreamableLogic` is the
+      // implementation alias kept for any project that already references it.
+      DCLogic: runtime.StreamableLogic,
+      StreamableLogic: runtime.StreamableLogic
+    };
+    Object.assign(window, api);
+    window.__dcContentKeyed = true;
+    if (document.readyState !== "loading") api.__dcBoot();
+    else document.addEventListener("DOMContentLoaded", () => api.__dcBoot());
+  }
+  hideRawTemplate();
+  loadReactUmd().then(init).catch((err) => {
+    console.error("[dc] failed to load React or boot:", err);
+    throw err;
+  });
+})();
+
+</script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Noto+Sans+JP:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0}
+*{box-sizing:border-box}
+[data-jema-root]{
+ --bg0:#F6F8FB;--bg1:#FFFFFF;--bg2:#F1F4F8;--bg3:#FAFBFD;
+ --bd:#E8E8E8;--bd2:#E2E7EE;--dv:#EEF1F5;--grid:#E5E9F0;
+ --tx:#1B2A4A;--tx2:#4A5568;--mut:#8A93A3;--fnt:#A7AFBC;--fnt2:#B4BCC9;--fnt3:#CBD2DC;
+ --ac:#00A5CF;--acT:#0090B5;--acHi:#5AB6CC;--acTint:rgba(0,165,207,.10);--acTint2:rgba(0,165,207,.06);--acBadge:#00A5CF;
+ --up:#1F7A6E;--upBg:rgba(42,157,143,.13);--dn:#C92A37;--dnBg:rgba(230,57,70,.10);
+ --warnBg:rgba(244,162,97,.16);--warnTx:#9A6210;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#EEF2F7;--avatar:#1B2A4A;--navyA:#1B2A4A;--navyB:#264653;--tipBg:rgba(27,42,74,.94);
+ --sh1:0 2px 8px rgba(27,42,74,.08);--sh1a:0 2px 8px rgba(27,42,74,.10);--sh2:0 8px 24px rgba(27,42,74,.12);--sh2a:0 8px 24px rgba(27,42,74,.18);--shPop:0 16px 48px rgba(27,42,74,.16);
+}
+[data-jema-root][data-dark="true"]{
+ --bg0:#0D1420;--bg1:#161F31;--bg2:#212E49;--bg3:#1A2438;
+ --bd:#263450;--bd2:#2C3B59;--dv:#232F4A;--grid:#26334D;
+ --tx:#E9EEF7;--tx2:#BBC6DA;--mut:#8493AC;--fnt:#69778F;--fnt2:#5D6B85;--fnt3:#48526B;
+ --ac:#1FB6DC;--acT:#4FCBE9;--acHi:#4FCBE9;--acTint:rgba(31,182,220,.14);--acTint2:rgba(31,182,220,.08);--acBadge:#0FA3C8;
+ --up:#4ED4AE;--upBg:rgba(63,208,163,.15);--dn:#FF8B94;--dnBg:rgba(255,107,118,.15);
+ --warnBg:rgba(240,182,87,.15);--warnTx:#F0C07A;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#20304E;--avatar:#33425F;--navyA:#131E33;--navyB:#1C333D;--tipBg:rgba(8,14,27,.96);
+ --sh1:0 2px 8px rgba(0,0,0,.35);--sh1a:0 2px 8px rgba(0,0,0,.4);--sh2:0 8px 24px rgba(0,0,0,.45);--sh2a:0 8px 24px rgba(0,0,0,.5);--shPop:0 16px 48px rgba(0,0,0,.55);
+}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:rgba(139,148,163,.45);border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</helmet>
+<div data-screen-label="Market Data" data-jema-root="1" data-dark="{{ isDark }}" style="display:flex;height:100vh;min-width:1280px;background:var(--bg0);font-family:'Inter','Noto Sans JP','Hiragino Kaku Gothic ProN','Yu Gothic',system-ui,sans-serif;color:var(--tx);font-size:14px;line-height:1.5;overflow:hidden">
+
+  <!-- ============ SIDEBAR ============ -->
+  <div style="width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);display:flex;flex-direction:column;padding:22px 16px 16px;overflow-y:auto">
+    <div style="padding:0 8px">
+      <div style="display:flex;align-items:center;gap:7px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:23px;height:23px;color:var(--ac);flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+        <span style="font-size:21px;font-weight:700;letter-spacing:.01em">JEMA</span>
+      </div>
+      <div style="font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--mut);margin-top:3px;text-transform:uppercase">Japan Energy Market Analytics</div>
+    </div>
+
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:26px 8px 8px">MENU · メニュー</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goOverview }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg><span>Market Overview</span>
+        <span style="margin-left:auto;font-size:10.5px;font-weight:500;color:var(--mut)">概況</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:600;color:var(--acT);background:var(--acTint);cursor:pointer;position:relative">
+        <span style="position:absolute;left:-16px;top:8px;bottom:8px;width:3px;background:var(--ac);border-radius:0 2px 2px 0"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg><span>Market Data</span>
+        <span style="margin-left:auto;font-size:10.5px;font-weight:500;color:var(--acHi)">データ</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goCapacity }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg><span>Capacity &amp; Auctions</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;margin-left:auto;color:var(--mut);flex-shrink:0"><path d="M9 18l6-6-6-6"></path></svg>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goPolicy }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg><span>Policy Deep Dive</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">3</span>
+      </div>
+    </div>
+
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:22px 8px 8px">GENERAL · 全般</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg><span>Watchlist</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">5</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg><span>Notifications</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">2</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg><span>Settings</span>
+      </div>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" style-hover="background:var(--bg2);color:var(--tx2)" onClick="{{ tCollapse }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path></svg><span>Collapse · 折りたたむ</span>
+    </div>
+
+    <div style="background:linear-gradient(135deg,var(--navyA),var(--navyB));border-radius:16px;padding:15px 15px 13px;color:#FFFFFF;margin-top:12px">
+      <div style="display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>Data freshness · データ鮮度</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.78);margin-top:6px">Last sync <span style="font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1">06:10 JST</span></div>
+      <div style="font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px">Hugging Face sync · GitHub Actions daily</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" style-hover="background:rgba(255,255,255,.10)" onClick="{{ tRefresh }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>Refresh · 更新
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MAIN COLUMN ============ -->
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column;position:relative">
+
+    <!-- Top bar -->
+    <div style="height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30">
+      <div style="font-size:13px;color:var(--mut);flex-shrink:0">Market Data <span style="color:var(--fnt3)">·</span> マーケットデータ</div>
+      <div style="flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>
+        <input placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style="border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0">
+        <span style="border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0">⌘K</span>
+      </div>
+      <div style="flex:1"></div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ toggleTheme }}" title="Toggle theme · テーマ切替">
+        <sc-if value="{{ isDarkB }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></sc-if>
+        <sc-if value="{{ isLightB }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></sc-if>
+      </div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ tNotif }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+        <span style="position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)"></span>
+      </div>
+      <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0">
+        <span style="{{ langJaS }}" onClick="{{ setLangJa }}">日本語</span>
+        <span style="{{ langEnS }}" onClick="{{ setLangEn }}">English</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <div style="width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600">AN</div>
+        <div style="line-height:1.25">
+          <div style="font-size:13px;font-weight:600">Analyst</div>
+          <div style="font-size:11px;color:var(--mut)">analyst@example.jp</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scrollable content -->
+    <div style="flex:1;overflow-y:auto;padding:26px 32px 40px">
+      <div style="max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px">
+
+        <!-- Page header -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
+          <div>
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-size:26px;font-weight:700;letter-spacing:-.01em">Market Data</span>
+              <span style="font-size:15px;font-weight:500;color:var(--mut)">マーケットデータ</span>
+            </div>
+            <div style="font-size:13.5px;color:var(--tx2);margin-top:2px">Wholesale &amp; balancing · 9 areas · 30-min resolution · 卸電力・需給調整市場 9エリア 30分値</div>
+          </div>
+          <div style="display:flex;gap:10px;flex-shrink:0;padding-top:4px">
+            <div style="display:inline-flex;align-items:center;gap:7px;background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acTint2);border-color:var(--ac)" onClick="{{ tExport }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Export CSV · 出力
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-view switcher -->
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px">
+            <span style="{{ vwWS }}" onClick="{{ viewWholesale }}">Wholesale (Spot) 卸電力</span>
+            <span style="{{ vwBS }}" onClick="{{ viewBalancing }}">Balancing 需給調整</span>
+          </div>
+          <span style="color:var(--fnt3)">·</span>
+          <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px">
+            <span style="{{ vwIS }}" onClick="{{ viewInterco }}">Interconnectors 連系線</span>
+            <span style="{{ vwDS }}" onClick="{{ viewDrivers }}">Drivers 燃料・為替</span>
+          </div>
+        </div>
+
+        <!-- Control bar (spot & balancing only) -->
+        <sc-if value="{{ isSpotBal }}" hint-placeholder-val="{{ true }}">
+        <div style="background:var(--bg1);border-radius:16px;padding:12px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px">
+            <span style="{{ r7S }}" onClick="{{ range7 }}">7D</span>
+            <span style="{{ r30S }}" onClick="{{ range30 }}">30D</span>
+            <span style="{{ r60S }}" onClick="{{ range60 }}">60D</span>
+            <span style="{{ r1yS }}" onClick="{{ range1y }}">1Y</span>
+          </div>
+          <span style="width:1px;height:22px;background:var(--dv)"></span>
+          <span style="font-size:12px;color:var(--mut);flex-shrink:0">Areas エリア</span>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <sc-for list="{{ areaChips }}" as="a" hint-placeholder-count="9">
+              <span style="{{ a.s }}" onClick="{{ a.click }}">{{ a.label }}</span>
+            </sc-for>
+            <span style="font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;cursor:pointer;border:1px dashed var(--fnt2);background:transparent;color:var(--fnt);white-space:nowrap" onClick="{{ tSystem }}" title="System series = PROPOSED · システム系列は提案中">System <span style="font-size:9px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:5px;padding:0 4px;margin-left:2px">P</span></span>
+          </div>
+          <span style="width:1px;height:22px;background:var(--dv)"></span>
+          <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px">
+            <span style="{{ gNS }}" onClick="{{ granN }}">Native 30分</span>
+            <span style="{{ gDS }}" onClick="{{ granD }}">Daily</span>
+            <span style="{{ gWS }}" onClick="{{ granW }}">Weekly</span>
+            <span style="{{ gMS }}" onClick="{{ granM }}">Monthly</span>
+          </div>
+          <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
+            <span style="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" style-hover="color:var(--ac)" onClick="{{ tCompare }}">Compare 比較</span>
+            <span style="color:var(--fnt3)">·</span>
+            <span style="font-size:12px;font-weight:500;color:var(--mut);cursor:pointer;white-space:nowrap" style-hover="color:var(--tx2)" onClick="{{ resetAll }}">Reset リセット</span>
+          </span>
+        </div>
+        </sc-if>
+
+        <!-- ================= WHOLESALE VIEW ================= -->
+        <sc-if value="{{ isWholesale }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+
+            <!-- KPI row -->
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">Avg clearing price<br>平均約定価格</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ kAvg }} <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">¥/kWh</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">{{ kAvgSub }}</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">{{ kAvgD }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Peak price<br>最高価格</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ kPeak }} <span style="font-size:13px;font-weight:500;color:var(--mut)">¥/kWh</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">{{ kPeakSub }}</div>
+                <span style="{{ kPeakDS }}">{{ kPeakD }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Peak demand<br>最大需要</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ kDem }} <span style="font-size:13px;font-weight:500;color:var(--mut)">MW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">{{ kDemSub }}</div>
+                <span style="{{ kDemDS }}">{{ kDemD }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);position:relative">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                  <div style="font-size:12px;font-weight:600;color:var(--mut)">Renewable share<br>再エネ比率</div>
+                  <span style="font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0">PROPOSED</span>
+                </div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;color:var(--fnt2);line-height:1.15">—</div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">Mix data exists · % aggregation not wired · 集計未接続</div>
+              </div>
+            </div>
+
+            <!-- Price heatmap -->
+            <sc-if value="{{ showHeat }}" hint-placeholder-val="{{ true }}">
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                  <div>
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <span style="font-size:16px;font-weight:600">Price Heatmap <span style="font-size:12.5px;font-weight:400;color:var(--mut)">価格ヒートマップ</span></span>
+                      <span style="font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px">PROPOSED · new component</span>
+                    </div>
+                    <div style="font-size:12px;color:var(--mut);margin-top:1px">Area × 30-min slot · today 2026-07-02 · ¥/kWh · deselected areas dimmed</div>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px">
+                    <span>low</span>
+                    <span style="width:16px;height:10px;background:#9FE1CB;border-radius:2px"></span>
+                    <span style="width:16px;height:10px;background:#5DCAA5;border-radius:2px"></span>
+                    <span style="width:16px;height:10px;background:#FAC775;border-radius:2px"></span>
+                    <span style="width:16px;height:10px;background:#EF9F27;border-radius:2px"></span>
+                    <span style="width:16px;height:10px;background:#E24B4A;border-radius:2px"></span>
+                    <span>high</span>
+                  </div>
+                </div>
+                <div style="display:flex;flex-direction:column;gap:4px;margin-top:14px">
+                  <sc-for list="{{ heatRows }}" as="hr" hint-placeholder-count="9">
+                    <div style="display:flex;align-items:center;gap:10px;cursor:pointer" onClick="{{ hr.click }}" title="Click to toggle area · クリックで選択切替">
+                      <span style="{{ hr.labS }}">{{ hr.label }}</span>
+                      <div style="flex:1;display:grid;grid-template-columns:repeat(48,1fr);gap:2px">
+                        <sc-for list="{{ hr.cells }}" as="c" hint-placeholder-count="48">
+                          <span style="{{ c.s }}" title="{{ c.t }}"></span>
+                        </sc-for>
+                      </div>
+                    </div>
+                  </sc-for>
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <span style="width:104px;flex-shrink:0"></span>
+                    <div style="flex:1;display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- Per-area sections -->
+            <sc-for list="{{ sections }}" as="sec" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;gap:10px">
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="background:var(--bg1);border:1px solid var(--bd);border-radius:999px;padding:4px 14px;font-size:12.5px;font-weight:600">{{ sec.title }} <span style="font-weight:400;color:var(--mut)">{{ sec.sub }}</span></span>
+                  <span style="width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" style-hover="background:var(--bg2);color:var(--tx2)" onClick="{{ sec.toggle }}" title="Collapse / expand · 折りたたみ">
+                    <sc-if value="{{ sec.open }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M18 15l-6-6-6 6"></path></svg></sc-if>
+                    <sc-if value="{{ sec.closed }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M6 9l6 6 6-6"></path></svg></sc-if>
+                  </span>
+                  <span style="width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--fnt);cursor:pointer" style-hover="background:var(--bg2)" onClick="{{ tPin }}" title="Pin area = PROPOSED · ピン留めは提案中"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M12 17v5"></path><path d="M9 10.76V7a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3.76a2 2 0 0 0 .59 1.42l1.82 1.82H5.59l1.82-1.82A2 2 0 0 0 8 10.76z"></path></svg></span>
+                  <span style="font-size:11.5px;color:var(--mut);margin-left:auto;font-feature-settings:'tnum' 1">{{ sec.meta }}</span>
+                </div>
+                <sc-if value="{{ sec.open }}" hint-placeholder-val="{{ true }}">
+                  <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+                    <div style="background:var(--bg1);border-radius:20px;padding:18px 20px;box-shadow:var(--sh1)">
+                      <div style="display:flex;justify-content:space-between;align-items:baseline">
+                        <span style="font-size:14px;font-weight:600">Generation mix <span style="font-size:11.5px;font-weight:400;color:var(--mut)">電源構成</span></span>
+                        <span style="font-size:11px;color:var(--mut)">today · 14 fuels grouped · MW</span>
+                      </div>
+                      <svg viewBox="0 0 480 160" style="width:100%;height:auto;display:block;margin-top:10px" preserveAspectRatio="none">
+                        <polygon points="{{ sec.mix1 }}" fill="#2A9D8F" fill-opacity="0.78"></polygon>
+                        <polygon points="{{ sec.mix2 }}" fill="#4A6FA5" fill-opacity="0.72"></polygon>
+                        <polygon points="{{ sec.mix3 }}" fill="#E9C46A" fill-opacity="0.82"></polygon>
+                        <g style="color:var(--tx)"><polyline points="{{ sec.demand }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-dasharray="1 0"></polyline></g>
+                      </svg>
+                      <div style="display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap">
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:#2A9D8F"></span>Baseload 基幹</span>
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:#4A6FA5"></span>Thermal 火力</span>
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:#E9C46A"></span>Solar 太陽光</span>
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid var(--tx)"></span>Demand 需要</span>
+                        <span style="margin-left:auto;font-feature-settings:'tnum' 1;color:var(--mut)">peak {{ sec.peakMW }} MW</span>
+                      </div>
+                    </div>
+                    <div style="background:var(--bg1);border-radius:20px;padding:18px 20px;box-shadow:var(--sh1)">
+                      <div style="display:flex;justify-content:space-between;align-items:baseline">
+                        <span style="font-size:14px;font-weight:600">Price <span style="font-size:11.5px;font-weight:400;color:var(--mut)">価格</span></span>
+                        <span style="font-size:11px;color:var(--mut)">{{ sec.rangeLabel }} · max / avg / min · ¥/kWh</span>
+                      </div>
+                      <svg viewBox="0 0 480 160" style="width:100%;height:auto;display:block;margin-top:10px" preserveAspectRatio="none">
+                        <polygon points="{{ sec.band }}" fill="#00A5CF" fill-opacity="0.10"></polygon>
+                        <polyline points="{{ sec.pMax }}" fill="none" stroke="#E24B4A" stroke-width="1.6"></polyline>
+                        <g style="color:var(--tx)"><polyline points="{{ sec.pAvg }}" fill="none" stroke="currentColor" stroke-width="1.8"></polyline></g>
+                        <polyline points="{{ sec.pMin }}" fill="none" stroke="#00A5CF" stroke-width="1.6"></polyline>
+                      </svg>
+                      <div style="display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap;font-feature-settings:'tnum' 1">
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid #E24B4A"></span>Max ¥{{ sec.vMax }}</span>
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid var(--tx)"></span>Avg ¥{{ sec.vAvg }}</span>
+                        <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:14px;height:0;border-top:2px solid #00A5CF"></span>Min ¥{{ sec.vMin }}</span>
+                        <span style="margin-left:auto;display:flex;gap:14px;color:var(--mut)"><span>{{ sec.d0 }}</span><span>{{ sec.d1 }}</span><span>{{ sec.d2 }}</span></span>
+                      </div>
+                    </div>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+            <div style="font-size:12px;color:var(--mut);text-align:center;padding:2px 0 6px">{{ hiddenNote }}</div>
+          </div>
+        </sc-if>
+
+        <!-- ================= BALANCING VIEW ================= -->
+        <sc-if value="{{ isBalancing }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">Weighted avg ΔkW price<br>加重平均ΔkW価格</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">4.87 <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">¥/ΔkW·30min</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">all products · 2026-07-01</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">▼ −0.32 (−6.2%)</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Procured volume<br>調達量合計</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">9,321 <span style="font-size:13px;font-weight:500;color:var(--mut)">MW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">5 products · vs prior day</div>
+                <span style="{{ balD1S }}">▲ +214 (+2.4%)</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Shortfall slots<br>調達不足コマ</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">3 <span style="font-size:13px;font-weight:500;color:var(--mut)">/ 48</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">三次② evening ramp · 17:00–18:30</div>
+                <span style="{{ balD2S }}">▼ −2 slots vs y'day</span>
+              </div>
+            </div>
+
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Balancing Products <span style="font-size:12.5px;font-weight:400;color:var(--mut)">需給調整市場 商品別</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">EPRX · FY2025+ · daily · 2026-07-01 · nationwide procurement</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px">¥/ΔkW·30min · MW</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)">
+                <span>PRODUCT · 商品</span><span style="text-align:right">AVG PRICE</span><span style="text-align:right">PROCURED</span><span style="text-align:right">OFFERED</span><span style="text-align:right">ACHIEVEMENT 達成率</span>
+              </div>
+              <sc-for list="{{ balRows }}" as="b" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ tProduct }}">
+                  <span style="display:flex;align-items:center;gap:9px;min-width:0">
+                    <span style="{{ b.dot }}"></span>
+                    <span style="font-size:13px;font-weight:600;white-space:nowrap">{{ b.jp }} <span style="font-weight:400;color:var(--mut);font-size:11.5px">{{ b.en }}</span></span>
+                  </span>
+                  <span style="text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1">¥{{ b.price }}</span>
+                  <span style="text-align:right;font-size:13px;font-feature-settings:'tnum' 1">{{ b.proc }}</span>
+                  <span style="text-align:right;font-size:13px;color:var(--tx2);font-feature-settings:'tnum' 1">{{ b.off }}</span>
+                  <span style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+                    <span style="width:72px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0"><span style="{{ b.bar }}"></span></span>
+                    <span style="font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1">{{ b.ach }}%</span>
+                  </span>
+                </div>
+              </sc-for>
+              <div style="font-size:11px;color:var(--mut);margin-top:10px">一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · Prices are weighted daily averages · 価格は日次加重平均</div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ================= INTERCONNECTORS VIEW ================= -->
+        <sc-if value="{{ isInterco }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">Congested lines now<br>混雑中の連系線</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ icCong }} <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">/ 10 lines</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">≥97% of TTC · latest slot 14:30</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">▲ +1 line vs y'day same slot</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Highest utilization<br>最高利用率</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ icMaxU }}<span style="font-size:13px;font-weight:500;color:var(--mut)">%</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">FC 周波数変換 · Chubu → Tokyo</div>
+                <span style="{{ icWarnChip }}">binding since 11:00 · 混雑継続中</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Widest area spread<br>最大エリア価格差</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">¥{{ icSpread }} <span style="font-size:13px;font-weight:500;color:var(--mut)">/kWh</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">Tokyo vs Kyushu · latest slot</div>
+                <span style="{{ icChipN }}">congestion rent signal · 値差＝混雑レント</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Flow in use<br>総送電量</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ icFlowTot }} <span style="font-size:13px;font-weight:500;color:var(--mut)">MW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">of {{ icCapTot }} MW total TTC</div>
+                <span style="{{ icChipN }}">{{ icUtilTot }}% of capability in use</span>
+              </div>
+            </div>
+
+            <!-- Flow map -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Flow Map — 9 Areas <span style="font-size:12.5px;font-weight:400;color:var(--mut)">連系線フロー</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Net flows at latest slot 14:30 · labels in MW · line width ∝ transfer capability · OCCTO 系統情報 2026-07-01</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0">node prices = area spot ¥/kWh</span>
+              </div>
+              <svg viewBox="0 0 960 360" style="width:100%;height:auto;display:block;margin-top:8px">
+                <line x1="885" y1="35" x2="795" y2="95" stroke="#FAC775" stroke-width="2.8"></line>
+                <line x1="795" y1="95" x2="700" y2="170" stroke="#EF9F27" stroke-width="7"></line>
+                <line x1="565" y1="225" x2="700" y2="170" stroke="#E24B4A" stroke-width="3.8"></line>
+                <line x1="425" y1="225" x2="565" y2="225" stroke="#5DCAA5" stroke-width="4.1"></line>
+                <line x1="450" y1="110" x2="565" y2="225" stroke="#5DCAA5" stroke-width="2.3"></line>
+                <line x1="450" y1="110" x2="425" y2="225" stroke="#5DCAA5" stroke-width="3.6"></line>
+                <line x1="250" y1="185" x2="425" y2="225" stroke="#FAC775" stroke-width="5.5"></line>
+                <line x1="300" y1="290" x2="425" y2="225" stroke="#FAC775" stroke-width="3.2"></line>
+                <line x1="250" y1="185" x2="300" y2="290" stroke="#5DCAA5" stroke-width="3"></line>
+                <line x1="85" y1="265" x2="250" y2="185" stroke="#E24B4A" stroke-width="4.3"></line>
+                <circle cx="840" cy="65" r="8" style="fill:var(--bg1)" stroke="#FAC775" stroke-width="1.5"></circle>
+                <text x="840" y="65" transform="rotate(146 840 65)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#D99A2B">▶</text>
+                <circle cx="747.5" cy="132.5" r="8" style="fill:var(--bg1)" stroke="#EF9F27" stroke-width="1.5"></circle>
+                <text x="747.5" y="132.5" transform="rotate(142 747.5 132.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#EF9F27">▶</text>
+                <circle cx="632.5" cy="197.5" r="8" style="fill:var(--bg1)" stroke="#E24B4A" stroke-width="1.5"></circle>
+                <text x="632.5" y="197.5" transform="rotate(-22 632.5 197.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#E24B4A">▶</text>
+                <circle cx="495" cy="225" r="8" style="fill:var(--bg1)" stroke="#5DCAA5" stroke-width="1.5"></circle>
+                <text x="495" y="225" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#2A9D8F">▶</text>
+                <circle cx="507.5" cy="167.5" r="8" style="fill:var(--bg1)" stroke="#5DCAA5" stroke-width="1.5"></circle>
+                <text x="507.5" y="167.5" transform="rotate(45 507.5 167.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#2A9D8F">▶</text>
+                <circle cx="437.5" cy="167.5" r="8" style="fill:var(--bg1)" stroke="#5DCAA5" stroke-width="1.5"></circle>
+                <text x="437.5" y="167.5" transform="rotate(102 437.5 167.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#2A9D8F">▶</text>
+                <circle cx="337.5" cy="205" r="8" style="fill:var(--bg1)" stroke="#FAC775" stroke-width="1.5"></circle>
+                <text x="337.5" y="205" transform="rotate(13 337.5 205)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#D99A2B">▶</text>
+                <circle cx="362.5" cy="257.5" r="8" style="fill:var(--bg1)" stroke="#FAC775" stroke-width="1.5"></circle>
+                <text x="362.5" y="257.5" transform="rotate(-27 362.5 257.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#D99A2B">▶</text>
+                <circle cx="275" cy="237.5" r="8" style="fill:var(--bg1)" stroke="#5DCAA5" stroke-width="1.5"></circle>
+                <text x="275" y="237.5" transform="rotate(64 275 237.5)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#2A9D8F">▶</text>
+                <circle cx="167.5" cy="225" r="8" style="fill:var(--bg1)" stroke="#E24B4A" stroke-width="1.5"></circle>
+                <text x="167.5" y="225" transform="rotate(-26 167.5 225)" text-anchor="middle" dominant-baseline="central" font-size="9" fill="#E24B4A">▶</text>
+                <text x="826" y="44" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.hh }}</text>
+                <text x="735" y="116" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.st }}</text>
+                <text x="626" y="178" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.fc }}</text>
+                <text x="640" y="218" text-anchor="middle" font-size="9" style="fill:var(--mut)">50/60 Hz</text>
+                <text x="495" y="209" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.kc }}</text>
+                <text x="530" y="157" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.hc }}</text>
+                <text x="415" y="164" text-anchor="end" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.hk }}</text>
+                <text x="337" y="187" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.ck }}</text>
+                <text x="372" y="277" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.sk }}</text>
+                <text x="257" y="242" text-anchor="end" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.cs }}</text>
+                <text x="156" y="205" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--tx2)">{{ icF.kq }}</text>
+                <rect x="838" y="16" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="885" y="31" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Hokkaido</text>
+                <text x="885" y="46" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.hokkaido }}</text>
+                <rect x="748" y="76" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="795" y="91" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Tohoku</text>
+                <text x="795" y="106" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.tohoku }}</text>
+                <rect x="653" y="151" width="94" height="38" rx="12" style="fill:var(--acTint);stroke:var(--ac)"></rect>
+                <text x="700" y="166" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Tokyo</text>
+                <text x="700" y="181" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--dn)">¥{{ icPx.tepco }}</text>
+                <rect x="518" y="206" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="565" y="221" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Chubu</text>
+                <text x="565" y="236" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.chubu }}</text>
+                <rect x="403" y="91" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="450" y="106" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Hokuriku</text>
+                <text x="450" y="121" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.hokuriku }}</text>
+                <rect x="378" y="206" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="425" y="221" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Kansai</text>
+                <text x="425" y="236" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.kansai }}</text>
+                <rect x="203" y="166" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="250" y="181" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Chugoku</text>
+                <text x="250" y="196" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.chugoku }}</text>
+                <rect x="253" y="271" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="300" y="286" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Shikoku</text>
+                <text x="300" y="301" text-anchor="middle" font-size="10" style="fill:var(--mut)">¥{{ icPx.shikoku }}</text>
+                <rect x="38" y="246" width="94" height="38" rx="12" style="fill:var(--bg3);stroke:var(--bd2)"></rect>
+                <text x="85" y="261" text-anchor="middle" font-size="11.5" font-weight="600" style="fill:var(--tx)">Kyushu</text>
+                <text x="85" y="276" text-anchor="middle" font-size="10" font-weight="600" style="fill:var(--up)">¥{{ icPx.kyushu }}</text>
+              </svg>
+              <div style="display:flex;align-items:center;gap:16px;margin-top:8px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:4px;border-radius:2px;background:#5DCAA5"></span>&lt;55%</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:4px;border-radius:2px;background:#FAC775"></span>55–85%</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:14px;height:4px;border-radius:2px;background:#EF9F27"></span>85–97%</span>
+                <span style="display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--dn)"><span style="width:14px;height:4px;border-radius:2px;background:#E24B4A"></span>≥97% congested 混雑</span>
+                <span style="margin-left:auto;color:var(--mut)">▶ = net flow direction · utilization of TTC 運用容量に対する利用率</span>
+              </div>
+            </div>
+
+            <!-- Line table -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Interconnector Lines <span style="font-size:12.5px;font-weight:400;color:var(--mut)">連系線一覧</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Latest slot 14:30 · spread = destination minus origin area price · 値差＝流入側−流出側</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px">MW · ¥/kWh</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)">
+                <span>LINE · 連系線</span><span>ROUTE · 区間</span><span style="text-align:right">FLOW</span><span style="text-align:right">TTC</span><span style="text-align:right">UTILIZATION 利用率</span><span style="text-align:right">SPREAD 値差</span><span style="text-align:right">CONGESTED 混雑</span>
+              </div>
+              <sc-for list="{{ icRows }}" as="ln" hint-placeholder-count="10">
+                <div style="display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ tLine }}">
+                  <span style="min-width:0"><span style="display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ln.n1 }}</span><span style="display:block;font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ln.n2 }}</span></span>
+                  <span style="font-size:12px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ln.route }}</span>
+                  <span style="text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1">{{ ln.flow }}</span>
+                  <span style="text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1">{{ ln.cap }}</span>
+                  <span style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+                    <span style="width:64px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0"><span style="{{ ln.barS }}"></span></span>
+                    <span style="font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1">{{ ln.pct }}</span>
+                  </span>
+                  <span style="text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1">{{ ln.spread }}</span>
+                  <span style="text-align:right"><span style="{{ ln.congS }}">{{ ln.congTxt }}</span></span>
+                </div>
+              </sc-for>
+              <div style="font-size:11px;color:var(--mut);margin-top:10px">TTC = total transfer capability 運用容量 · flows are net of counter-flows · click a line for hourly detail</div>
+            </div>
+
+            <!-- Congestion timeline -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Congestion Timeline <span style="font-size:12.5px;font-weight:400;color:var(--mut)">混雑タイムライン</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Utilization by 30-min slot · today 2026-07-02 · 30分コマ別利用率</div>
+                </div>
+                <div style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px">
+                  <span>free</span>
+                  <span style="width:16px;height:10px;background:#9FE1CB;border-radius:2px"></span>
+                  <span style="width:16px;height:10px;background:#5DCAA5;border-radius:2px"></span>
+                  <span style="width:16px;height:10px;background:#FAC775;border-radius:2px"></span>
+                  <span style="width:16px;height:10px;background:#EF9F27;border-radius:2px"></span>
+                  <span style="width:16px;height:10px;background:#E24B4A;border-radius:2px"></span>
+                  <span>congested</span>
+                </div>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:4px;margin-top:14px">
+                <sc-for list="{{ icRows }}" as="tl" hint-placeholder-count="10">
+                  <div style="display:flex;align-items:center;gap:10px">
+                    <span style="width:158px;flex-shrink:0;font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ tl.short }}</span>
+                    <div style="flex:1;display:grid;grid-template-columns:repeat(48,1fr);gap:2px">
+                      <sc-for list="{{ tl.strip }}" as="c" hint-placeholder-count="48">
+                        <span style="{{ c.s }}" title="{{ c.t }}"></span>
+                      </sc-for>
+                    </div>
+                    <span style="width:52px;flex-shrink:0;text-align:right;font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1">{{ tl.congTxt }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:flex;align-items:center;gap:10px">
+                  <span style="width:158px;flex-shrink:0"></span>
+                  <div style="flex:1;display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
+                  <span style="width:52px;flex-shrink:0;text-align:right;font-size:10.5px;color:var(--mut)">≥97%</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ================= DRIVERS VIEW ================= -->
+        <sc-if value="{{ isDrivers }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">JKM LNG front-month<br>JKM（LNGスポット）</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ drJkmV }} <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">$/MMBtu</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">ICE · close 2026-07-01 · vs prior close</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">{{ drJkmC }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Newcastle coal<br>ニューカッスル石炭</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ drNclV }} <span style="font-size:13px;font-weight:500;color:var(--mut)">$/t</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">ICE FOB front-month · vs prior close</div>
+                <span style="{{ drNclCS }}">{{ drNclC }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">USD/JPY<br>ドル円</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">{{ drFxV }}</div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">TTM · weaker yen = costlier fuel imports</div>
+                <span style="{{ drFxCS }}">{{ drFxC }}</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                  <div style="font-size:12px;font-weight:600;color:var(--mut)">Marginal fuel cost<br>限界燃料費指数</div>
+                  <span style="font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0">PROPOSED</span>
+                </div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;color:var(--fnt2);line-height:1.15">—</div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">LNG SRMC estimate · efficiency assumptions not wired · 換算前提未設定</div>
+              </div>
+            </div>
+
+            <div style="display:grid;grid-template-columns:2fr 1fr;gap:20px;align-items:stretch">
+              <!-- Indexed overlay chart -->
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column">
+                <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                  <div>
+                    <div style="font-size:16px;font-weight:600">Drivers vs Spot — Indexed <span style="font-size:12.5px;font-weight:400;color:var(--mut)">燃料・為替×スポット</span></div>
+                    <div style="font-size:12px;color:var(--mut);margin-top:1px">Rebased to 100 at window start · daily closes · spot = 9-area mean · 期初＝100</div>
+                  </div>
+                  <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0">
+                    <span style="{{ dr30S }}" onClick="{{ dr30 }}">30D</span>
+                    <span style="{{ dr90S }}" onClick="{{ dr90 }}">90D</span>
+                    <span style="{{ dr1yS }}" onClick="{{ dr1y }}">1Y</span>
+                  </div>
+                </div>
+                <div style="flex:1;margin-top:14px">
+                  <svg viewBox="0 0 960 320" style="width:100%;height:auto;display:block">
+                    <g style="color:var(--grid)">
+                      <line x1="46" y1="69" x2="944" y2="69" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                      <line x1="46" y1="138" x2="944" y2="138" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                      <line x1="46" y1="207" x2="944" y2="207" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                      <line x1="46" y1="276" x2="944" y2="276" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                    </g>
+                    <g style="color:var(--mut)">
+                      <text x="38" y="73" text-anchor="end" font-size="11" fill="currentColor">{{ drG1 }}</text>
+                      <text x="38" y="142" text-anchor="end" font-size="11" fill="currentColor">{{ drG2 }}</text>
+                      <text x="38" y="211" text-anchor="end" font-size="11" fill="currentColor">{{ drG3 }}</text>
+                      <text x="38" y="280" text-anchor="end" font-size="11" fill="currentColor">{{ drG4 }}</text>
+                      <text x="46" y="310" text-anchor="middle" font-size="10.5" fill="currentColor">{{ drX0 }}</text>
+                      <text x="495" y="310" text-anchor="middle" font-size="10.5" fill="currentColor">{{ drX1 }}</text>
+                      <text x="930" y="310" text-anchor="middle" font-size="10.5" fill="currentColor">{{ drX2 }}</text>
+                    </g>
+                    <line x1="46" x2="944" y1="{{ dr100y }}" y2="{{ dr100y }}" stroke="#94A3B8" stroke-width="1" stroke-dasharray="2 4" opacity="{{ dr100op }}"></line>
+                    <polyline points="{{ drNclPts }}" fill="none" stroke="#B08968" stroke-width="1.8" stroke-linejoin="round" opacity="{{ drNclOp }}"></polyline>
+                    <polyline points="{{ drFxPts }}" fill="none" stroke="#8AB17D" stroke-width="1.8" stroke-linejoin="round" opacity="{{ drFxOp }}"></polyline>
+                    <polyline points="{{ drJkmPts }}" fill="none" stroke="#E76F51" stroke-width="1.8" stroke-linejoin="round" opacity="{{ drJkmOp }}"></polyline>
+                    <polyline points="{{ drSpotPts }}" fill="none" stroke="#00A5CF" stroke-width="2.6" stroke-linejoin="round"></polyline>
+                  </svg>
+                </div>
+                <div style="display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap">
+                  <span style="display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--tx2)"><span style="width:20px;height:3px;border-radius:2px;background:#00A5CF"></span>JEPX spot スポット</span>
+                  <span style="{{ drJkmLegS }}" onClick="{{ tJkm }}"><span style="width:20px;height:3px;border-radius:2px;background:#E76F51"></span>JKM</span>
+                  <span style="{{ drNclLegS }}" onClick="{{ tNcl }}"><span style="width:20px;height:3px;border-radius:2px;background:#B08968"></span>Newcastle 石炭</span>
+                  <span style="{{ drFxLegS }}" onClick="{{ tFx }}"><span style="width:20px;height:3px;border-radius:2px;background:#8AB17D"></span>USD/JPY</span>
+                  <span style="margin-left:auto;font-size:11px;color:var(--mut)">Click legend to toggle · 凡例クリックで切替</span>
+                </div>
+              </div>
+
+              <!-- Driver detail panel -->
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column;min-width:0">
+                <div style="font-size:16px;font-weight:600">Driver Detail <span style="font-size:12.5px;font-weight:400;color:var(--mut)">ドライバー詳細</span></div>
+                <div style="font-size:12px;color:var(--mut);margin-top:1px">Last close · Δ1d · 30d trend · correlation vs spot</div>
+                <div style="display:flex;flex-direction:column;margin-top:6px">
+                  <sc-for list="{{ drPanel }}" as="p" hint-placeholder-count="3">
+                    <div style="padding:12px 0;border-bottom:1px solid var(--dv)">
+                      <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                        <span style="{{ p.dotS }}"></span>
+                        <span style="font-size:13px;font-weight:600;white-space:nowrap">{{ p.name }}</span>
+                        <span style="font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.sub }}</span>
+                        <span style="margin-left:auto;font-size:16px;font-weight:700;font-feature-settings:'tnum' 1;white-space:nowrap">{{ p.last }} <span style="font-size:10.5px;font-weight:500;color:var(--mut)">{{ p.unit }}</span></span>
+                      </div>
+                      <div style="display:flex;align-items:center;gap:10px;margin-top:7px">
+                        <span style="{{ p.chipS }}">{{ p.chip }}</span>
+                        <svg viewBox="0 0 64 18" style="width:64px;height:18px;margin-left:auto;flex-shrink:0"><polyline points="{{ p.spark }}" fill="none" stroke="{{ p.color }}" stroke-width="1.5"></polyline></svg>
+                      </div>
+                      <div style="display:flex;align-items:center;gap:8px;margin-top:9px">
+                        <span style="font-size:11px;color:var(--mut);white-space:nowrap">90d corr 相関</span>
+                        <span style="flex:1;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden"><span style="{{ p.corrBar }}"></span></span>
+                        <span style="font-size:11.5px;font-weight:600;font-feature-settings:'tnum' 1">{{ p.corr }}</span>
+                      </div>
+                    </div>
+                  </sc-for>
+                </div>
+                <div style="font-size:11.5px;color:var(--mut);line-height:1.6;margin-top:12px">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
+                  LNG fuel costs pass through to spot with a 3–6 month lag under long-term contracts — JKM is the marginal-cargo signal. · 長期契約のLNG燃料費は3〜6ヶ月遅れて反映。JKMは限界カーゴのシグナル。
+                </div>
+              </div>
+            </div>
+          </div>
+        </sc-if>
+
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <sc-if value="{{ toastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;bottom:24px;right:24px;background:var(--bg1);border-left:3px solid var(--ac);border-radius:12px;box-shadow:var(--sh2a);padding:12px 18px;font-size:13px;color:var(--tx);z-index:100;max-width:420px">{{ toastMsg }}</div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;lang&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;en&quot;, &quot;ja&quot;], &quot;default&quot;: &quot;en&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Localization&quot; },
+  &quot;theme&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;light&quot;, &quot;dark&quot;], &quot;default&quot;: &quot;light&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Appearance&quot; },
+  &quot;showHeatmap&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Content&quot; }
+}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    let st = null, sl = null;
+    try { st = localStorage.getItem('jema-theme'); sl = localStorage.getItem('jema-lang'); } catch (e) {}
+    this.state = { theme: st, lang: sl, view: 'wholesale', range: '60D', gran: 'Daily', sel: { hokkaido: true, tohoku: true, tepco: true }, closed: {}, toast: null, drRange: '90D', drOn: { jkm: true, ncl: true, fx: true } };
+    this._toastT = null;
+
+    const G = (t, c, w) => Math.exp(-((t - c) * (t - c)) / w);
+    const mk = f => Array.from({ length: 48 }, (_, i) => f(i, i / 2));
+
+    this.today = mk((i, t) => 9.6 + 3.1 * G(t, 8.1, 2.4) - 4.2 * G(t, 12.6, 7.5) + 12.1 * G(t, 18.7, 2.9) + 0.38 * Math.sin(i * 1.63) + 0.24 * Math.sin(i * 0.71 + 2.1));
+
+    this.areaDefs = [
+      { key: 'hokkaido', en: 'Hokkaido', ja: '北海道', off: 0.85, ph: 1.1, peak: 5210, solarF: 0.55 },
+      { key: 'tohoku', en: 'Tohoku', ja: '東北', off: -0.12, ph: 3.9, peak: 14890, solarF: 0.8 },
+      { key: 'tepco', en: 'Tokyo', ja: '東京', off: 1.32, ph: 0.4, peak: 55340, solarF: 0.7 },
+      { key: 'chubu', en: 'Chubu', ja: '中部', off: 0.38, ph: 3.0, peak: 26120, solarF: 0.9 },
+      { key: 'hokuriku', en: 'Hokuriku', ja: '北陸', off: -0.35, ph: 4.7, peak: 5230, solarF: 0.7 },
+      { key: 'kansai', en: 'Kansai', ja: '関西', off: 0.55, ph: 2.2, peak: 28460, solarF: 0.8 },
+      { key: 'chugoku', en: 'Chugoku', ja: '中国', off: 0.08, ph: 5.5, peak: 11020, solarF: 1.0 },
+      { key: 'shikoku', en: 'Shikoku', ja: '四国', off: -0.22, ph: 0.9, peak: 5060, solarF: 1.2 },
+      { key: 'kyushu', en: 'Kyushu', ja: '九州', off: -0.55, solar: -2.2, ph: 1.7, peak: 16210, solarF: 1.5 }
+    ];
+    this.areas = this.areaDefs.map(a => ({
+      ...a,
+      intraday: mk((i, t) => this.today[i] + a.off + (a.solar ? a.solar * G(t, 12.5, 6) : 0) + 0.18 * Math.sin(i * 0.83 + a.ph)),
+      dailyAvg: Array.from({ length: 365 }, (_, d) => 11 + a.off + 1.8 * Math.sin(d / 58) + 1.1 * Math.sin(d / 9.7 + a.ph) + 0.7 * Math.sin(d / 3.1 + a.ph * 2)),
+      dailyMax: Array.from({ length: 365 }, (_, d) => 11 + a.off + 1.8 * Math.sin(d / 58) + 1.1 * Math.sin(d / 9.7 + a.ph) + 5.6 + 2.6 * Math.abs(Math.sin(d / 7.3 + a.ph))),
+      dailyMin: Array.from({ length: 365 }, (_, d) => Math.max(0.05, 11 + a.off + 1.8 * Math.sin(d / 58) + 1.1 * Math.sin(d / 9.7 + a.ph) - 4.3 - 1.7 * Math.abs(Math.sin(d / 11 + a.ph))))
+    }));
+
+    this.balProducts = [
+      { jp: '一次調整力', en: 'Primary (FCR)', price: '6.84', proc: '1,208', off: '1,542', ach: 78, c: '#7B2D8E', cd: '#C77BD8' },
+      { jp: '二次調整力①', en: 'Secondary I', price: '7.12', proc: '1,046', off: '1,180', ach: 89, c: '#E76F51', cd: '#E76F51' },
+      { jp: '二次調整力②', en: 'Secondary II', price: '5.63', proc: '892', off: '1,004', ach: 89, c: '#2A9D8F', cd: '#2A9D8F' },
+      { jp: '三次調整力①', en: 'Tertiary I', price: '4.98', proc: '2,315', off: '2,780', ach: 83, c: '#4A6FA5', cd: '#7C9CD1' },
+      { jp: '三次調整力②', en: 'Tertiary II', price: '3.41', proc: '3,860', off: '4,510', ach: 86, c: '#00A5CF', cd: '#1FB6DC' }
+    ];
+
+    // interconnectors — util(t) = base + solar-driven + evening-ramp components
+    this.icDefs = [
+      { key: 'hh', ja: '北海道本州間連系設備', en: 'Hokkaido–Honshu HVDC', from: 'hokkaido', to: 'tohoku', cap: 900, base: .50, sol: .28, eve: .30, ph: .5, short: 'Hokkaido–Tohoku 北本' },
+      { key: 'st', ja: '相馬双葉幹線ほか', en: 'Tohoku–Tokyo', from: 'tohoku', to: 'tepco', cap: 6050, base: .68, sol: .30, eve: .22, ph: 1.2, short: 'Tohoku–Tokyo 相双' },
+      { key: 'fc', ja: '周波数変換設備（FC）', en: 'Tokyo–Chubu 50/60Hz FC', from: 'chubu', to: 'tepco', cap: 2100, base: .82, sol: .28, eve: .18, ph: 2.0, short: 'FC Tokyo–Chubu 周波数変換' },
+      { key: 'kc', ja: '三重東近江線ほか', en: 'Kansai–Chubu', from: 'kansai', to: 'chubu', cap: 2500, base: .40, sol: .22, eve: .18, ph: 2.8, short: 'Kansai–Chubu' },
+      { key: 'hc', ja: '南福光連系所', en: 'Hokuriku–Chubu', from: 'hokuriku', to: 'chubu', cap: 300, base: .30, sol: .14, eve: .10, ph: 3.4, short: 'Hokuriku–Chubu 南福光' },
+      { key: 'hk', ja: '越前嶺南線ほか', en: 'Hokuriku–Kansai', from: 'hokuriku', to: 'kansai', cap: 1900, base: .34, sol: .15, eve: .12, ph: 4.1, short: 'Hokuriku–Kansai' },
+      { key: 'ck', ja: '山崎智頭線ほか', en: 'Chugoku–Kansai', from: 'chugoku', to: 'kansai', cap: 4160, base: .46, sol: .20, eve: .16, ph: 4.9, short: 'Chugoku–Kansai' },
+      { key: 'sk', ja: '阿南紀北直流幹線', en: 'Shikoku–Kansai HVDC', from: 'shikoku', to: 'kansai', cap: 1400, base: .56, sol: .22, eve: .14, ph: 5.6, short: 'Shikoku–Kansai 阿南紀北' },
+      { key: 'cs', ja: '本四連系線', en: 'Chugoku–Shikoku', from: 'chugoku', to: 'shikoku', cap: 1200, base: .18, sol: .11, eve: .08, ph: .9, short: 'Chugoku–Shikoku 本四' },
+      { key: 'kq', ja: '関門連系線', en: 'Kyushu–Chugoku (Kanmon)', from: 'kyushu', to: 'chugoku', cap: 2780, base: .72, sol: .42, eve: .10, ph: 1.6, short: 'Kyushu–Chugoku 関門' }
+    ];
+    this.icUtil = this.icDefs.map(l => mk((i, t) => Math.min(1, Math.max(.04, l.base + l.sol * G(t, 13, 4.5) + l.eve * G(t, 18.6, 4) + .02 * Math.sin(i * .9 + l.ph)))));
+
+    // drivers — daily closes, index 0 = most recent
+    this.drv = {
+      spot: Array.from({ length: 365 }, (_, d) => 11 + 1.8 * Math.sin(d / 58) + .5 * Math.sin(d / 72 + 1) + 1.1 * Math.sin(d / 9.7 + 2) + .6 * Math.sin(d / 3.3)),
+      jkm: Array.from({ length: 365 }, (_, d) => 11.9 + 1.6 * Math.sin(d / 72 + 1) + .8 * Math.sin(d / 13 + .5) + .35 * Math.sin(d / 4.1)),
+      ncl: Array.from({ length: 365 }, (_, d) => 138 + 9 * Math.sin(d / 85 + 2.2) + 4 * Math.sin(d / 16 + 1.1) + 1.8 * Math.sin(d / 5.2)),
+      fx: Array.from({ length: 365 }, (_, d) => 155.5 + 3.2 * Math.sin(d / 95 + .4) + 1.2 * Math.sin(d / 21 + 2.4) + .5 * Math.sin(d / 6.3))
+    };
+    this.drDefs = [
+      { key: 'jkm', en: 'JKM LNG', ja: 'JKM（LNG）', unit: '$/MMBtu', src: 'ICE · yfinance', color: '#E76F51', corr: .72, dec: 2 },
+      { key: 'ncl', en: 'Newcastle coal', ja: 'NC石炭', unit: '$/t', src: 'ICE · yfinance', color: '#B08968', corr: .41, dec: 1 },
+      { key: 'fx', en: 'USD/JPY', ja: 'ドル円', unit: '', src: 'TTM · yfinance', color: '#8AB17D', corr: .33, dec: 2 }
+    ];
+  }
+
+  toast(msg) {
+    clearTimeout(this._toastT);
+    this.setState({ toast: msg });
+    this._toastT = setTimeout(() => this.setState({ toast: null }), 3800);
+  }
+
+  theme() { return this.state.theme ?? this.props.theme ?? 'light'; }
+
+  slotLabel(i) { return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00'); }
+
+  dateLabel(daysAgo) {
+    const d = new Date(2026, 6, 2);
+    d.setDate(d.getDate() - daysAgo);
+    const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    return MO[d.getMonth()] + ' ' + d.getDate();
+  }
+
+  chip(d, p) {
+    const base = { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1" };
+    if (Math.abs(p) < 0.05) return { txt: '— ±0.0%', style: { ...base, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } };
+    const up = d > 0, s = up ? '+' : '−';
+    return {
+      txt: (up ? '▲ ' : '▼ ') + s + Math.abs(d).toFixed(2) + ' (' + s + Math.abs(p).toFixed(1) + '%)',
+      style: { ...base, background: up ? 'var(--upBg)' : 'var(--dnBg)', color: up ? 'var(--up)' : 'var(--dn)' }
+    };
+  }
+
+  // ---- handlers ----
+  setLangEn = () => { try { localStorage.setItem('jema-lang', 'en'); } catch (e) {} this.setState({ lang: 'en' }); };
+  setLangJa = () => { try { localStorage.setItem('jema-lang', 'ja'); } catch (e) {} this.setState({ lang: 'ja' }); };
+  toggleTheme = () => {
+    const next = this.theme() === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('jema-theme', next); } catch (e) {}
+    this.setState({ theme: next });
+  };
+  goOverview = () => { window.location.href = 'market-overview.html'; };
+  goPolicy = () => { window.location.href = 'policy-deep-dive.html'; };
+  viewWholesale = () => this.setState({ view: 'wholesale' });
+  viewBalancing = () => this.setState({ view: 'balancing' });
+  range7 = () => this.setState({ range: '7D' });
+  range30 = () => this.setState({ range: '30D' });
+  range60 = () => this.setState({ range: '60D' });
+  range1y = () => this.setState({ range: '1Y' });
+  granN = () => { this.setState({ gran: 'Native' }); this.toast('Native 30-min granularity — charts keep daily aggregates in this prototype · 本プロトタイプでは日次集計を表示'); };
+  granD = () => this.setState({ gran: 'Daily' });
+  granW = () => { this.setState({ gran: 'Weekly' }); this.toast('Weekly aggregation applied to exports; charts stay daily in this prototype'); };
+  granM = () => { this.setState({ gran: 'Monthly' }); this.toast('Monthly aggregation applied to exports; charts stay daily in this prototype'); };
+  resetAll = () => this.setState({ range: '60D', gran: 'Daily', sel: { hokkaido: true, tohoku: true, tepco: true }, closed: {} });
+  tExport = () => this.toast('CSV export of current selection queued · 現在の選択をCSVで出力します');
+  tCompare = () => this.toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外');
+  viewInterco = () => this.setState({ view: 'interco' });
+  viewDrivers = () => this.setState({ view: 'drivers' });
+  dr30 = () => this.setState({ drRange: '30D' });
+  dr90 = () => this.setState({ drRange: '90D' });
+  dr1y = () => this.setState({ drRange: '1Y' });
+  tJkm = () => this.setState(s => ({ drOn: { ...s.drOn, jkm: !s.drOn.jkm } }));
+  tNcl = () => this.setState(s => ({ drOn: { ...s.drOn, ncl: !s.drOn.ncl } }));
+  tFx = () => this.setState(s => ({ drOn: { ...s.drOn, fx: !s.drOn.fx } }));
+  tLine = () => this.toast('Line drill-down (hourly flows & spread history) — not in this prototype · 連系線ドリルダウンは対象外');
+  goCapacity = () => { window.location.href = 'capacity-auctions.html'; };
+  tSystem = () => this.toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中');
+  tPin = () => this.toast('Pin area to top = PROPOSED · エリアのピン留めは提案中');
+  tProduct = () => this.toast('Product drill-down (per-slot prices & offers) — not in this prototype · 商品別ドリルダウンは対象外');
+  tNotif = () => this.toast('Notifications live on the Overview screen · 通知は概況画面にあります');
+  tNav = () => this.toast('Placeholder destination in this prototype · 本プロトタイプ対象外');
+  tRefresh = () => this.toast('Data refreshed · データを更新しました');
+  tCollapse = () => this.toast('Collapse state persists per user (Settings) · 折りたたみ状態は保存されます');
+
+  toggleArea(key) {
+    this.setState(s => {
+      const sel = { ...s.sel };
+      if (sel[key]) delete sel[key]; else sel[key] = true;
+      return { sel };
+    });
+  }
+  toggleSec(key) {
+    this.setState(s => ({ closed: { ...s.closed, [key]: !s.closed[key] } }));
+  }
+
+  renderVals() {
+    const L = this.state.lang ?? this.props.lang ?? 'en';
+    const dark = this.theme() === 'dark';
+    const sel = this.state.sel;
+    const selAreas = this.areas.filter(a => sel[a.key]);
+    const range = this.state.range;
+    const N = { '7D': 7, '30D': 30, '60D': 60, '1Y': 365 }[range];
+    const step = range === '1Y' ? 6 : 1;
+
+    const segBase = on => ({ padding: '4px 13px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: on ? 'var(--ac)' : 'transparent', color: on ? '#FFFFFF' : 'var(--mut)', transition: 'all .15s', whiteSpace: 'nowrap' });
+    const chipBase = on => ({ fontSize: 11.5, fontWeight: 600, padding: '3px 11px', borderRadius: 999, cursor: 'pointer', border: on ? '1px solid var(--ac)' : '1px solid var(--bd2)', background: on ? 'var(--acTint)' : 'var(--bg1)', color: on ? 'var(--acT)' : 'var(--mut)', whiteSpace: 'nowrap' });
+
+    // ---- window slices ----
+    const win = a => {
+      const idx = [];
+      for (let d = N - 1; d >= 0; d -= step) idx.push(d);
+      return { avg: idx.map(d => a.dailyAvg[d]), max: idx.map(d => a.dailyMax[d]), min: idx.map(d => a.dailyMin[d]), days: idx };
+    };
+    const mean = arr => arr.reduce((x, y) => x + y, 0) / arr.length;
+
+    // ---- KPIs ----
+    const act = selAreas.length ? selAreas : this.areas;
+    const curAvgs = act.map(a => mean(a.dailyAvg.slice(0, N)));
+    const prevAvgs = act.map(a => mean(a.dailyAvg.slice(N, N * 2)));
+    const kAvgV = mean(curAvgs), kAvgP = mean(prevAvgs);
+    let pk = { v: -1, area: null, d: 0 };
+    act.forEach(a => { for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d }; });
+    const pkPrev = Math.max(...act.map(a => Math.max(...a.dailyMax.slice(N, N * 2))));
+    const demV = act.reduce((s, a) => s + a.peak, 0);
+    const kAvgC = this.chip(kAvgV - kAvgP, (kAvgV - kAvgP) / kAvgP * 100);
+    const kPeakC = this.chip(pk.v - pkPrev, (pk.v - pkPrev) / pkPrev * 100);
+    const kDemC = this.chip(demV * 0.018 / 1000, 1.8);
+    kDemC.txt = '▲ +1.8% vs prior period';
+
+    // ---- heatmap ----
+    const heatCol = v => v < 8 ? '#9FE1CB' : v < 11 ? '#5DCAA5' : v < 14 ? '#FAC775' : v < 18 ? '#EF9F27' : '#E24B4A';
+    const heatRows = this.areas.map(a => {
+      const on = !!sel[a.key];
+      return {
+        label: L === 'ja' ? (a.ja + ' ' + a.en) : (a.en + ' ' + a.ja),
+        labS: { width: 104, flexShrink: 0, fontSize: 12, fontWeight: on ? 600 : 500, color: on ? 'var(--tx)' : 'var(--fnt)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
+        click: () => this.toggleArea(a.key),
+        cells: a.intraday.map((v, i) => ({
+          s: { height: 16, borderRadius: 2, background: heatCol(v), opacity: on ? 1 : (dark ? 0.22 : 0.3) },
+          t: a.en + ' ' + this.slotLabel(i) + ' · ¥' + v.toFixed(2)
+        }))
+      };
+    });
+
+    // ---- area chips ----
+    const areaChips = this.areas.map(a => ({
+      label: L === 'ja' ? a.ja : a.en,
+      s: chipBase(!!sel[a.key]),
+      click: () => this.toggleArea(a.key)
+    }));
+
+    // ---- per-area sections ----
+    const X = (i, n) => 8 + i / (n - 1) * 464;
+    const pts = (arr, y) => arr.map((v, i) => X(i, arr.length).toFixed(1) + ',' + y(v).toFixed(1)).join(' ');
+    const G = (t, c, w) => Math.exp(-((t - c) * (t - c)) / w);
+
+    const sections = selAreas.map(a => {
+      const w = win(a);
+      const n = w.avg.length;
+      const lo = Math.min(...w.min) * 0.92, hi = Math.max(...w.max) * 1.05;
+      const py = v => 150 - (v - lo) / (hi - lo) * 135;
+      const band = pts(w.max, py) + ' ' + w.min.map((v, i) => X(n - 1 - i, n).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ');
+
+      // generation mix (48 slots)
+      const P = a.peak;
+      const dem = Array.from({ length: 48 }, (_, i) => { const t = i / 2; return P * (0.60 + 0.15 * G(t, 9.5, 6) + 0.24 * G(t, 18.5, 5) + 0.015 * Math.sin(i * 0.9 + a.ph)); });
+      const solar = Array.from({ length: 48 }, (_, i) => { const t = i / 2; return P * 0.30 * (a.solarF || 1) * G(t, 12.5, 5.5); });
+      const base = Array.from({ length: 48 }, (_, i) => P * (0.33 + 0.008 * Math.sin(i * 0.5 + a.ph)));
+      const c1 = base;
+      const c3 = dem;
+      const c2 = dem.map((v, i) => Math.max(base[i], v - solar[i]));
+      const ymax = P * 1.12;
+      const my = v => 152 - v / ymax * 140;
+      const fwd = arr => pts(arr, my);
+      const rev = arr => arr.map((v, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ');
+      const mix1 = fwd(c1) + ' 472,152 8,152';
+      const mix2 = fwd(c2) + ' ' + rev(c1);
+      const mix3 = fwd(c3) + ' ' + rev(c2);
+      const demandLine = pts(dem.map(v => v * 1.018), my);
+
+      const open = !this.state.closed[a.key];
+      return {
+        title: L === 'ja' ? (a.ja + ' / ' + a.en) : (a.en + ' / ' + a.ja),
+        sub: '', meta: 'latest slot ¥' + a.intraday[29].toFixed(2) + ' · ' + range + ' · ' + this.state.gran,
+        open, closed: !open,
+        toggle: () => this.toggleSec(a.key),
+        mix1, mix2, mix3, demand: demandLine, peakMW: P.toLocaleString('en-US'),
+        band, pMax: pts(w.max, py), pAvg: pts(w.avg, py), pMin: pts(w.min, py),
+        vMax: Math.max(...w.max).toFixed(1), vAvg: mean(w.avg).toFixed(1), vMin: Math.min(...w.min).toFixed(1),
+        rangeLabel: range,
+        d0: this.dateLabel(w.days[0]), d1: this.dateLabel(w.days[Math.floor((n - 1) / 2)]), d2: this.dateLabel(w.days[n - 1])
+      };
+    });
+
+    const hiddenCount = 9 - selAreas.length;
+    const hiddenNote = hiddenCount > 0
+      ? (hiddenCount + ' deselected area' + (hiddenCount > 1 ? 's' : '') + ' hidden — toggle chips or heatmap rows to show · 非選択エリアは非表示（チップまたはヒートマップ行で切替）')
+      : 'All 9 areas shown · 全9エリア表示中';
+
+    // ---- balancing rows ----
+    const balRows = this.balProducts.map(b => ({
+      jp: b.jp, en: b.en, price: b.price, proc: b.proc, off: b.off, ach: b.ach,
+      dot: { width: 8, height: 8, borderRadius: 999, background: dark ? b.cd : b.c, flexShrink: 0 },
+      bar: { display: 'block', width: b.ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c }
+    }));
+    const chipNeutral = { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1" };
+
+    // ---- interconnectors ----
+    const pxN = {}; this.areas.forEach(a => { pxN[a.key] = a.intraday[29]; });
+    const icPx = {}; this.areas.forEach(a => { icPx[a.key] = a.intraday[29].toFixed(2); });
+    const fmtMW = n => Math.round(n).toLocaleString('en-US');
+    const icF = {};
+    let icFlowSum = 0, icCapSum = 0, icCongN = 0, icMaxUv = 0;
+    const uColor = v => v >= .97 ? '#E24B4A' : v >= .85 ? '#EF9F27' : v >= .55 ? '#FAC775' : v >= .35 ? '#5DCAA5' : '#9FE1CB';
+    const icRows = this.icDefs.map((l, li) => {
+      const u = this.icUtil[li];
+      const uNow = u[29];
+      const flow = uNow * l.cap;
+      icF[l.key] = fmtMW(flow);
+      icFlowSum += flow; icCapSum += l.cap;
+      if (uNow >= .97) icCongN++;
+      if (uNow > icMaxUv) icMaxUv = uNow;
+      const cong = u.filter(v => v >= .97).length;
+      const A = k => this.areaDefs.find(a => a.key === k);
+      const nm = k => L === 'ja' ? A(k).ja : A(k).en;
+      const spread = pxN[l.to] - pxN[l.from];
+      const pc = Math.round(uNow * 100);
+      return {
+        n1: L === 'ja' ? l.ja : l.en, n2: L === 'ja' ? l.en : l.ja, short: l.short,
+        route: nm(l.from) + ' → ' + nm(l.to),
+        flow: fmtMW(flow), cap: fmtMW(l.cap), pct: pc + '%',
+        barS: { display: 'block', width: pc + '%', height: '100%', borderRadius: 3, background: uColor(uNow) },
+        spread: (spread >= 0 ? '+¥' : '−¥') + Math.abs(spread).toFixed(2),
+        congTxt: cong + ' / 48',
+        congS: cong > 0
+          ? { fontSize: 11, fontWeight: 600, background: 'var(--warnBg)', color: 'var(--warnTx)', borderRadius: 6, padding: '1px 8px', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }
+          : { fontSize: 11.5, color: 'var(--fnt)', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' },
+        strip: u.map((v, i) => ({
+          s: { height: 14, borderRadius: 2, background: uColor(v) },
+          t: l.en + ' ' + this.slotLabel(i) + ' · ' + Math.round(v * 100) + '% · ' + fmtMW(v * l.cap) + ' MW'
+        }))
+      };
+    });
+    const chipNeutral2 = { display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1" };
+
+    // ---- drivers ----
+    const drRange = this.state.drRange;
+    const drN = { '30D': 30, '90D': 90, '1Y': 365 }[drRange];
+    const drStep = drRange === '1Y' ? 3 : 1;
+    const drOn = this.state.drOn;
+    const drIdx = []; for (let d = drN - 1; d >= 0; d -= drStep) drIdx.push(d);
+    const reb = arr => { const b = arr[drIdx[0]]; return drIdx.map(d => arr[d] / b * 100); };
+    const rSpot = reb(this.drv.spot), rJkm = reb(this.drv.jkm), rNcl = reb(this.drv.ncl), rFx = reb(this.drv.fx);
+    const visVals = [...rSpot];
+    if (drOn.jkm) visVals.push(...rJkm);
+    if (drOn.ncl) visVals.push(...rNcl);
+    if (drOn.fx) visVals.push(...rFx);
+    const drLo = Math.min(...visVals) - 2, drHi = Math.max(...visVals) + 2;
+    const dX = i => 46 + i / (drIdx.length - 1) * 898;
+    const dY = r => 14 + (drHi - r) / (drHi - drLo) * 276;
+    const dPts = arr => arr.map((r, i) => dX(i).toFixed(1) + ',' + dY(r).toFixed(1)).join(' ');
+    const gVal = y => (drHi - (y - 14) / 276 * (drHi - drLo)).toFixed(0);
+    const y100 = dY(100);
+    const drLeg = on => ({ display: 'inline-flex', alignItems: 'center', gap: 7, fontSize: 12, color: 'var(--tx2)', cursor: 'pointer', opacity: on ? 1 : 0.4, textDecoration: on ? 'none' : 'line-through' });
+    const drK = arr => { const d = arr[0] - arr[1]; return this.chip(d, d / arr[1] * 100); };
+    const kJ = drK(this.drv.jkm), kN = drK(this.drv.ncl), kF = drK(this.drv.fx);
+    const drPanel = this.drDefs.map(dd => {
+      const arr = this.drv[dd.key];
+      const d = arr[0] - arr[1];
+      const c = this.chip(d, d / arr[1] * 100);
+      const s30 = []; for (let d2 = 29; d2 >= 0; d2--) s30.push(arr[d2]);
+      const mn = Math.min(...s30), mx = Math.max(...s30);
+      const spark = s30.map((v, i) => (i / 29 * 64).toFixed(1) + ',' + (15.5 - (v - mn) / (mx - mn || 1) * 13).toFixed(1)).join(' ');
+      return {
+        name: L === 'ja' ? dd.ja : dd.en, sub: dd.src, unit: dd.unit, last: arr[0].toFixed(dd.dec), color: dd.color,
+        chip: c.txt, chipS: { ...c.style, marginTop: 0, padding: '2px 8px' },
+        dotS: { width: 8, height: 8, borderRadius: 999, background: dd.color, flexShrink: 0 },
+        spark, corr: dd.corr.toFixed(2),
+        corrBar: { display: 'block', width: (dd.corr * 100) + '%', height: '100%', borderRadius: 3, background: dd.color }
+      };
+    });
+
+    const view = this.state.view;
+    return {
+      // interconnectors
+      icCong: icCongN, icMaxU: Math.round(icMaxUv * 100), icSpread: (pxN.tepco - pxN.kyushu).toFixed(2),
+      icFlowTot: fmtMW(icFlowSum), icCapTot: fmtMW(icCapSum), icUtilTot: Math.round(icFlowSum / icCapSum * 100),
+      icPx, icF, icRows, tLine: this.tLine,
+      icWarnChip: { ...chipNeutral2, background: 'var(--dnBg)', color: 'var(--dn)' },
+      icChipN: { ...chipNeutral2, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' },
+      // drivers
+      dr30: this.dr30, dr90: this.dr90, dr1y: this.dr1y,
+      dr30S: segBase(drRange === '30D'), dr90S: segBase(drRange === '90D'), dr1yS: segBase(drRange === '1Y'),
+      drSpotPts: dPts(rSpot), drJkmPts: dPts(rJkm), drNclPts: dPts(rNcl), drFxPts: dPts(rFx),
+      drJkmOp: drOn.jkm ? 1 : 0, drNclOp: drOn.ncl ? 1 : 0, drFxOp: drOn.fx ? 1 : 0,
+      tJkm: this.tJkm, tNcl: this.tNcl, tFx: this.tFx,
+      drJkmLegS: drLeg(drOn.jkm), drNclLegS: drLeg(drOn.ncl), drFxLegS: drLeg(drOn.fx),
+      drG1: gVal(69), drG2: gVal(138), drG3: gVal(207), drG4: gVal(276),
+      dr100y: Math.round(y100 * 10) / 10, dr100op: (y100 >= 14 && y100 <= 290) ? 0.8 : 0,
+      drX0: this.dateLabel(drN - 1), drX1: this.dateLabel(Math.floor(drN / 2)), drX2: this.dateLabel(0),
+      drJkmV: this.drv.jkm[0].toFixed(2), drJkmC: kJ.txt,
+      drNclV: this.drv.ncl[0].toFixed(1), drNclC: kN.txt, drNclCS: kN.style,
+      drFxV: this.drv.fx[0].toFixed(2), drFxC: kF.txt, drFxCS: kF.style,
+      drPanel,
+      goCapacity: this.goCapacity,
+      isDark: dark ? 'true' : 'false', isDarkB: dark, isLightB: !dark,
+      toggleTheme: this.toggleTheme,
+      setLangEn: this.setLangEn, setLangJa: this.setLangJa,
+      langJaS: segBase(L === 'ja'), langEnS: segBase(L === 'en'),
+      goOverview: this.goOverview, goPolicy: this.goPolicy,
+      tNav: this.tNav, tRefresh: this.tRefresh, tCollapse: this.tCollapse, tNotif: this.tNotif,
+      tExport: this.tExport, tCompare: this.tCompare, viewInterco: this.viewInterco, viewDrivers: this.viewDrivers,
+      tSystem: this.tSystem, tPin: this.tPin, tProduct: this.tProduct, resetAll: this.resetAll,
+      viewWholesale: this.viewWholesale, viewBalancing: this.viewBalancing,
+      vwWS: segBase(view === 'wholesale'), vwBS: segBase(view === 'balancing'),
+      vwIS: segBase(view === 'interco'), vwDS: segBase(view === 'drivers'),
+      isWholesale: view === 'wholesale', isBalancing: view === 'balancing',
+      isInterco: view === 'interco', isDrivers: view === 'drivers',
+      isSpotBal: view === 'wholesale' || view === 'balancing',
+      range7: this.range7, range30: this.range30, range60: this.range60, range1y: this.range1y,
+      r7S: segBase(range === '7D'), r30S: segBase(range === '30D'), r60S: segBase(range === '60D'), r1yS: segBase(range === '1Y'),
+      granN: this.granN, granD: this.granD, granW: this.granW, granM: this.granM,
+      gNS: segBase(this.state.gran === 'Native'), gDS: segBase(this.state.gran === 'Daily'), gWS: segBase(this.state.gran === 'Weekly'), gMS: segBase(this.state.gran === 'Monthly'),
+      areaChips,
+      kAvg: kAvgV.toFixed(2), kAvgSub: (selAreas.length || 9) + ' areas · ' + range + ' · vs prior ' + range, kAvgD: kAvgC.txt,
+      kPeak: pk.v.toFixed(2), kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + this.dateLabel(pk.d) + ' · vs prior period', kPeakD: kPeakC.txt, kPeakDS: kPeakC.style,
+      kDem: demV.toLocaleString('en-US'), kDemSub: 'sum of selected-area peaks · 17:30 slot', kDemD: kDemC.txt, kDemDS: kDemC.style,
+      showHeat: this.props.showHeatmap ?? true,
+      heatRows, sections, hiddenNote,
+      balRows,
+      balD1S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' },
+      balD2S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' },
+      toastOn: !!this.state.toast, toastMsg: this.state.toast
+    };
+  }
+}
+</script>
+</body>
+</html>
