@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
 import { maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
+import { useCapacityLive } from './CapacityAuctions.live'
 
 type View = 'main' | 'ltda'
 
@@ -38,8 +39,13 @@ export function CapacityAuctionsScreen() {
       whiteSpace: 'nowrap',
     }) as React.CSSProperties
 
+  // Live curated capacity data (fixtures as loading fallback).
+  const cap = useCapacityLive()
+  const maSrc = cap.ready ? cap.ma : maData
+  const ltdaSrc = cap.ready ? cap.ltda : ltdaData
+
   // Derived row data
-  const maRows = maData.map((m) => ({
+  const maRows = maSrc.map((m) => ({
     ...m,
     bar: {
       display: 'block',
@@ -50,7 +56,68 @@ export function CapacityAuctionsScreen() {
     } as React.CSSProperties,
   }))
 
-  const ltdaRows = ltdaData.map((t) => ({
+  // ---- Main-auction KPI + price-chart model, derived from the live rows so
+  // the cards and bar chart always agree with the results table. ----
+  const numOf = (v: string | number | undefined): number => {
+    if (typeof v === 'number') return v
+    const n = Number(String(v ?? '').replace(/[^0-9.]/g, ''))
+    return Number.isFinite(n) ? n : NaN
+  }
+  const CH_Y0 = 270
+  const CH_TOP = 14
+  const CH_VMAX = 15000
+  const yOf = (v: number) => CH_TOP + ((CH_VMAX - v) / CH_VMAX) * (CH_Y0 - CH_TOP)
+  // Fixed x-slots per delivery-year column; zonal bars appear for FY2027+.
+  const chSlots = [
+    { x: 100.8, zonal: false },
+    { x: 250.5, zonal: false },
+    { x: 400.2, zonal: false },
+    { x: 523.8, zonal: true },
+    { x: 673.5, zonal: true },
+    { x: 823.2, zonal: true },
+  ]
+  const maChart = maSrc.slice(0, 6).map((m, i) => {
+    const slot = chSlots[i] ?? { x: 100.8 + i * 149.7, zonal: false }
+    const nat = numOf(m.natl)
+    const hok = numOf(m.hok)
+    const kyu = numOf(m.kyu)
+    return {
+      fy: m.fy,
+      x: slot.x,
+      zonal: slot.zonal && Number.isFinite(hok) && Number.isFinite(kyu),
+      nat,
+      hok,
+      kyu,
+      natY: yOf(nat),
+      natH: CH_Y0 - yOf(nat),
+      hokY: yOf(hok),
+      hokH: CH_Y0 - yOf(hok),
+      kyuY: yOf(kyu),
+      kyuH: CH_Y0 - yOf(kyu),
+      natLabel: Number.isFinite(nat) ? nat.toLocaleString('en-US') : '—',
+    }
+  })
+  const maLast = maSrc[maSrc.length - 1]
+  const maPrev = maSrc[maSrc.length - 2]
+  const deltaChip = (cur: number, prev: number) => {
+    const d = cur - prev
+    const pct = prev ? (d / prev) * 100 : 0
+    const up = d >= 0
+    return {
+      txt:
+        (up ? '▲ +' : '▼ −') +
+        Math.abs(Math.round(d)).toLocaleString('en-US') +
+        ' (' + (up ? '+' : '−') + Math.abs(pct).toFixed(1) + '%)',
+      style: (up
+        ? { background: 'var(--upBg)', color: 'var(--up)' }
+        : { background: 'var(--dnBg)', color: 'var(--dn)' }) as React.CSSProperties,
+    }
+  }
+  const hdDelta = deltaChip(numOf(maLast?.natl), numOf(maPrev?.natl))
+  const hokDelta = deltaChip(numOf(maLast?.hok), numOf(maPrev?.hok))
+  const kyuDelta = deltaChip(numOf(maLast?.kyu), numOf(maPrev?.kyu))
+
+  const ltdaRows = ltdaSrc.map((t) => ({
     n1: L === 'ja' ? t.ja : t.en,
     n2: L === 'ja' ? t.en : t.ja,
     r1: t.r1,
@@ -251,28 +318,28 @@ export function CapacityAuctionsScreen() {
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>FY2029 clearing price<br />約定価格（全国）</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>8,190 <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kW·year</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>main auction Jan 2026 · vs FY2028</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▼ −558 (−6.4%)</span>
+                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>{maLast?.fy} clearing price<br />約定価格（全国）</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.natl).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kW·year</span></div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>main auction {maLast?.held} · vs {maPrev?.fy}</div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{hdDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured capacity<br />調達容量</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>166.2 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>target 168.0 GW · FY2029 delivery</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>98.9% of target 目標比</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.proc).toFixed(1)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery</div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{maLast?.ach}% of target 目標比</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Hokkaido zone<br />北海道エリア</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>12,050 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.hok).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
                     <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>separate zone · limited TTC north</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--dnBg);color:var(--dn)")}>▼ −640 (−5.0%)</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...hokDelta.style }}>{hokDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Kyushu zone<br />九州エリア</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>7,410 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.kyu).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
                     <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>separate zone · solar-heavy south</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--dnBg);color:var(--dn)")}>▼ −570 (−7.1%)</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...kyuDelta.style }}>{kyuDelta.txt}</span>
                   </div>
                 </div>
 
@@ -303,26 +370,24 @@ export function CapacityAuctionsScreen() {
                       <text x="719.5" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2028</text>
                       <text x="869.2" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2029</text>
                     </g>
-                    <rect x="100.8" y="28.7" width="40" height="241.3" rx="4" fill="#00A5CF"><title>FY2024 · National ¥14,137/kW</title></rect>
-                    <rect x="250.5" y="180.5" width="40" height="89.5" rx="4" fill="#00A5CF"><title>FY2025 · National ¥5,242/kW</title></rect>
-                    <rect x="400.2" y="170.5" width="40" height="99.5" rx="4" fill="#00A5CF"><title>FY2026 · National ¥5,832/kW</title></rect>
-                    <rect x="523.8" y="106.9" width="40" height="163.1" rx="4" fill="#00A5CF"><title>FY2027 · National ¥9,555/kW</title></rect>
-                    <rect x="569.8" y="42.1" width="18" height="227.9" rx="3" fill="#4A6FA5"><title>FY2027 · Hokkaido ¥13,357/kW</title></rect>
-                    <rect x="591.8" y="125.6" width="18" height="144.4" rx="3" fill="#8AB17D"><title>FY2027 · Kyushu ¥8,462/kW</title></rect>
-                    <rect x="673.5" y="120.7" width="40" height="149.3" rx="4" fill="#00A5CF"><title>FY2028 · National ¥8,748/kW</title></rect>
-                    <rect x="719.5" y="53.4" width="18" height="216.6" rx="3" fill="#4A6FA5"><title>FY2028 · Hokkaido ¥12,690/kW</title></rect>
-                    <rect x="741.5" y="133.8" width="18" height="136.2" rx="3" fill="#8AB17D"><title>FY2028 · Kyushu ¥7,980/kW</title></rect>
-                    <rect x="823.2" y="130.2" width="40" height="139.8" rx="4" fill="#00A5CF"><title>FY2029 · National ¥8,190/kW</title></rect>
-                    <rect x="869.2" y="64.3" width="18" height="205.7" rx="3" fill="#4A6FA5"><title>FY2029 · Hokkaido ¥12,050/kW</title></rect>
-                    <rect x="891.2" y="143.5" width="18" height="126.5" rx="3" fill="#8AB17D"><title>FY2029 · Kyushu ¥7,410/kW</title></rect>
-                    <g fontSize="10.5" fontWeight="600" textAnchor="middle" style={s('fill:var(--tx2)')}>
-                      <text x="120.8" y="22">14,137</text>
-                      <text x="270.5" y="174">5,242</text>
-                      <text x="420.2" y="164">5,832</text>
-                      <text x="543.8" y="100">9,555</text>
-                      <text x="693.5" y="114">8,748</text>
-                      <text x="843.2" y="124">8,190</text>
-                    </g>
+                    {maChart.map((c) => (
+                      <g key={c.fy}>
+                        <rect x={c.x} y={c.natY} width="40" height={c.natH} rx="4" fill="#00A5CF">
+                          <title>{`${c.fy} · National ¥${c.natLabel}/kW`}</title>
+                        </rect>
+                        {c.zonal && (
+                          <>
+                            <rect x={c.x + 46} y={c.hokY} width="18" height={c.hokH} rx="3" fill="#4A6FA5">
+                              <title>{`${c.fy} · Hokkaido ¥${c.hok.toLocaleString('en-US')}/kW`}</title>
+                            </rect>
+                            <rect x={c.x + 68} y={c.kyuY} width="18" height={c.kyuH} rx="3" fill="#8AB17D">
+                              <title>{`${c.fy} · Kyushu ¥${c.kyu.toLocaleString('en-US')}/kW`}</title>
+                            </rect>
+                          </>
+                        )}
+                        <text x={c.x + 20} y={c.natY - 6} fontSize="10.5" fontWeight="600" textAnchor="middle" style={{ fill: 'var(--tx2)' }}>{c.natLabel}</text>
+                      </g>
+                    ))}
                   </svg>
                   <div style={s('display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)')}>
                     <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#00A5CF')}></span>National 全国</span>
@@ -345,7 +410,7 @@ export function CapacityAuctionsScreen() {
                     <span>DELIVERY 年度</span><span>HELD 実施</span><span style={s('text-align:right')}>NATIONAL 全国</span><span style={s('text-align:right')}>HOKKAIDO</span><span style={s('text-align:right')}>KYUSHU</span><span style={s('text-align:right')}>PROCURED 調達</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span>
                   </div>
                   {maRows.map((m) => (
-                    <Hoverable key={m.fy} base="display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={tRow}>
+                    <Hoverable key={m.fy} base="display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={() => (m.source ? window.open(m.source, '_blank', 'noopener') : tRow())}>
                       <span style={s("font-size:13px;font-weight:600;font-feature-settings:'tnum' 1")}>{m.fy}</span>
                       <span style={s("font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.held}</span>
                       <span style={s("text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1")}>{m.natl}</span>

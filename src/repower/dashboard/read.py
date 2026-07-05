@@ -685,3 +685,20 @@ def _records(df: pd.DataFrame) -> list[dict]:
     if "datetime" in out.columns:
         out["datetime"] = pd.to_datetime(out["datetime"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
     return out.to_dict("records")
+
+
+# ── Capacity market (curated; see repower.dashboard.capacity_data) ───────────
+# OCCTO publishes the capacity-market summary only as PDF / Excel, so these read
+# from the curated, source-cited source-of-truth module rather than the DB. They
+# are plain functions (no DB / no cache) and return the web MaRow / LtdaRow shape.
+
+def load_capacity_ma() -> list[dict]:
+    """Main-auction results per delivery fiscal year (curated)."""
+    from repower.dashboard import capacity_data
+    return capacity_data.main_auction_rows()
+
+
+def load_capacity_ltda() -> list[dict]:
+    """LTDA (long-term decarbonization auction) technology breakdown (curated)."""
+    from repower.dashboard import capacity_data
+    return capacity_data.ltda_rows()

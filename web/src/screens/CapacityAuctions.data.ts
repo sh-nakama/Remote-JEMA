@@ -8,6 +8,8 @@ export interface MaRow {
   kyu: string
   proc: string
   ach: number
+  /** OCCTO source URL for this year's figures (live data only). */
+  source?: string
 }
 
 export const maData: MaRow[] = [

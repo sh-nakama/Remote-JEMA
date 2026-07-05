@@ -643,6 +643,27 @@ def export_policy(out: Path, db_path: str | None = None) -> dict:
     }
 
 
+def export_capacity(out: Path) -> dict:
+    """Export curated capacity-market snapshots (main auction + LTDA).
+
+    OCCTO publishes the summary only as PDF/Excel, so these come from the
+    curated, source-cited ``capacity_data`` module (see its docstring). Shapes
+    match ``web/src/screens/CapacityAuctions.data.ts`` exactly.
+    """
+    from repower.dashboard.read import load_capacity_ltda, load_capacity_ma
+
+    total = 0
+    total += _write_json(
+        out / "capacity" / "main_auction.json",
+        {"schema": SCHEMA_VERSION, "results": load_capacity_ma()},
+    )
+    total += _write_json(
+        out / "capacity" / "ltda.json",
+        {"schema": SCHEMA_VERSION, "rows": load_capacity_ltda()},
+    )
+    return {"files": 2, "bytes": total}
+
+
 def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None = None) -> dict:
     """Export all web snapshots to *out_dir*; write ``manifest.json``; return it.
 
@@ -672,5 +693,6 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
     manifest["datasets"]["tieline"] = export_tieline(out, anchor)
     manifest["datasets"]["drivers"] = export_drivers(out, anchor, db_path)
     manifest["datasets"]["policy"] = export_policy(out, db_path)
+    manifest["datasets"]["capacity"] = export_capacity(out)
     _write_json(out / "manifest.json", manifest)
     return manifest
