@@ -536,6 +536,7 @@ def balancing_period_stats(
     return {
         "avg_demand_mw": avg_demand,
         "avg_contracted_mw": avg_contracted,
+        "avg_bid_volume_mw": means.get("bid_volume_mw"),
         "avg_unprocured_mw": avg_unprocured,
         "avg_price": means.get("price_avg"),
         "avg_max_price": means.get("price_max"),

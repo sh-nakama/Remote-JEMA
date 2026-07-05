@@ -11,9 +11,12 @@ import pandas as pd
 
 from repower.dashboard.export_web import (
     AREAS,
+    BALANCING_PRODUCTS,
     LEVELS,
+    PAIR_TO_IC,
     SLOTS,
     _anchor_date,
+    _norm_pair,
     _slot_col,
     _write_json,
 )
@@ -50,6 +53,21 @@ def test_slots_are_48_halfhour_labels():
     assert SLOTS[0] == "00:00"
     assert SLOTS[29] == "14:30"
     assert SLOTS[-1] == "23:30"
+
+
+def test_balancing_products_are_five_coded():
+    codes = [c for c, _ in BALANCING_PRODUCTS]
+    assert codes == ["1-0", "2-1", "2-2", "3-1", "3-2"]
+    assert ("1-0", "Primary") in BALANCING_PRODUCTS
+
+
+def test_norm_pair_and_interconnector_mapping():
+    # arrow " → " pairs normalise, and the 7 clean lines map to icDef keys
+    assert _norm_pair("Hokkaido → Tohoku") == "Hokkaido->Tohoku"
+    assert PAIR_TO_IC[_norm_pair("Tokyo → Chubu")] == "fc"
+    assert PAIR_TO_IC[_norm_pair("Chugoku → Kyushu")] == "kq"
+    # combined-zone pairs have no clean 1:1 line → not mapped (fixture fallback)
+    assert _norm_pair("Chubu-Hokuriku → Kansai") not in PAIR_TO_IC
 
 
 def test_slot_col_fills_missing_slots_with_none():

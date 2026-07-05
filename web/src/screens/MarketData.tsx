@@ -13,7 +13,14 @@ import {
   drDefs,
   gaussian as G,
 } from './MarketData.data'
-import { useWholesaleLive, windowLive } from './MarketData.live'
+import {
+  useWholesaleLive,
+  windowLive,
+  useDriversLive,
+  useBalancingLive,
+  BAL_CODES,
+  useTielineLive,
+} from './MarketData.live'
 
 type View = 'wholesale' | 'balancing' | 'interco' | 'drivers'
 type Range = '7D' | '30D' | '60D' | '1Y'
@@ -141,6 +148,9 @@ export function MarketDataScreen() {
 
   const selectedKeys = areas.filter((a) => sel[a.key]).map((a) => a.key)
   const live = useWholesaleLive(selectedKeys, gran)
+  const driversLive = useDriversLive()
+  const balLive = useBalancingLive()
+  const tielineLive = useTielineLive('DAM')
 
   // ---- computed (mirror of renderVals) ----
   const v = useMemo(() => {
@@ -340,16 +350,23 @@ export function MarketDataScreen() {
         : 'All 9 areas shown · 全9エリア表示中'
 
     // ---- balancing rows ----
-    const balRows = balProducts.map((b) => ({
-      jp: b.jp,
-      en: b.en,
-      price: b.price,
-      proc: b.proc,
-      off: b.off,
-      ach: b.ach,
-      dot: { width: 8, height: 8, borderRadius: 999, background: dark ? b.cd : b.c, flexShrink: 0 } as CSS,
-      bar: { display: 'block', width: b.ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
-    }))
+    const balRows = balProducts.map((b, bi) => {
+      const lv = balLive.ready ? balLive.rows[BAL_CODES[bi]] : null
+      const price = lv && lv.price != null ? lv.price.toFixed(2) : b.price
+      const proc = lv ? Math.round(lv.proc).toLocaleString('en-US') : b.proc
+      const off = lv ? Math.round(lv.off).toLocaleString('en-US') : b.off
+      const ach = lv && lv.ach != null ? Math.round(lv.ach) : b.ach
+      return {
+        jp: b.jp,
+        en: b.en,
+        price,
+        proc,
+        off,
+        ach,
+        dot: { width: 8, height: 8, borderRadius: 999, background: dark ? b.cd : b.c, flexShrink: 0 } as CSS,
+        bar: { display: 'block', width: ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
+      }
+    })
     const chipNeutral: CSS = {
       display: 'inline-flex',
       alignItems: 'center',
@@ -380,12 +397,14 @@ export function MarketDataScreen() {
     const uColor = (val: number) =>
       val >= 0.97 ? '#E24B4A' : val >= 0.85 ? '#EF9F27' : val >= 0.55 ? '#FAC775' : val >= 0.35 ? '#5DCAA5' : '#9FE1CB'
     const icRows = icDefs.map((l, li) => {
-      const u = icUtil[li]
-      const uNow = u[29]
-      const flow = uNow * l.cap
+      const tl = tielineLive.ready ? tielineLive.byKey[l.key] : undefined
+      const u = tl ? tl.util : icUtil[li]
+      const capN = tl && tl.ttc != null ? tl.ttc : l.cap
+      const uNow = tl && tl.utilNow != null ? tl.utilNow : u[29]
+      const flow = uNow * capN
       icF[l.key] = fmtMW(flow)
       icFlowSum += flow
-      icCapSum += l.cap
+      icCapSum += capN
       if (uNow >= 0.97) icCongN++
       if (uNow > icMaxUv) icMaxUv = uNow
       const cong = u.filter((x) => x >= 0.97).length
@@ -400,7 +419,7 @@ export function MarketDataScreen() {
         short: l.short,
         route: nm(l.from) + ' → ' + nm(l.to),
         flow: fmtMW(flow),
-        cap: fmtMW(l.cap),
+        cap: fmtMW(capN),
         pct: pc + '%',
         barS: { display: 'block', width: pc + '%', height: '100%', borderRadius: 3, background: uColor(uNow) } as CSS,
         spread: (spread >= 0 ? '+¥' : '−¥') + Math.abs(spread).toFixed(2),
@@ -419,7 +438,7 @@ export function MarketDataScreen() {
           : { fontSize: 11.5, color: 'var(--fnt)', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }) as CSS,
         strip: u.map((val, i) => ({
           s: { height: 14, borderRadius: 2, background: uColor(val) } as CSS,
-          t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * l.cap) + ' MW',
+          t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * capN) + ' MW',
         })),
       }
     })
@@ -435,19 +454,24 @@ export function MarketDataScreen() {
       fontFeatureSettings: "'tnum' 1",
     }
 
-    // ---- drivers ----
-    const drN = { '30D': 30, '90D': 90, '1Y': 365 }[drRange]
+    // ---- drivers (live fuels/FX when loaded, else fixtures) ----
+    const dvLive = driversLive.ready
+    const D: { spot: number[]; jkm: number[]; ncl: number[]; fx: number[] } = dvLive
+      ? { spot: driversLive.spot, jkm: driversLive.jkm, ncl: driversLive.ncl, fx: driversLive.fx }
+      : drv
+    const drAvail = Math.min(D.spot.length, D.jkm.length, D.ncl.length, D.fx.length)
+    const drN = Math.min({ '30D': 30, '90D': 90, '1Y': 365 }[drRange], drAvail)
     const drStep = drRange === '1Y' ? 3 : 1
     const drIdx: number[] = []
     for (let d = drN - 1; d >= 0; d -= drStep) drIdx.push(d)
     const reb = (arr: number[]) => {
-      const b = arr[drIdx[0]]
+      const b = arr[drIdx[0]] || 1
       return drIdx.map((d) => (arr[d] / b) * 100)
     }
-    const rSpot = reb(drv.spot)
-    const rJkm = reb(drv.jkm)
-    const rNcl = reb(drv.ncl)
-    const rFx = reb(drv.fx)
+    const rSpot = reb(D.spot)
+    const rJkm = reb(D.jkm)
+    const rNcl = reb(D.ncl)
+    const rFx = reb(D.fx)
     const visVals = [...rSpot]
     if (drOn.jkm) visVals.push(...rJkm)
     if (drOn.ncl) visVals.push(...rNcl)
@@ -473,11 +497,16 @@ export function MarketDataScreen() {
       const d = arr[0] - arr[1]
       return makeChip(d, (d / arr[1]) * 100)
     }
-    const kJ = drK(drv.jkm)
-    const kN = drK(drv.ncl)
-    const kF = drK(drv.fx)
+    const kJ = drK(D.jkm)
+    const kN = drK(D.ncl)
+    const kF = drK(D.fx)
+    const drCorr: Record<'jkm' | 'ncl' | 'fx', number> = {
+      jkm: dvLive && driversLive.corr.jkm != null ? driversLive.corr.jkm : drDefs[0].corr,
+      ncl: dvLive && driversLive.corr.ncl != null ? driversLive.corr.ncl : drDefs[1].corr,
+      fx: dvLive && driversLive.corr.fx != null ? driversLive.corr.fx : drDefs[2].corr,
+    }
     const drPanel = drDefs.map((dd) => {
-      const arr = drv[dd.key]
+      const arr = D[dd.key]
       const d = arr[0] - arr[1]
       const c = makeChip(d, (d / arr[1]) * 100)
       const s30: number[] = []
@@ -498,8 +527,8 @@ export function MarketDataScreen() {
         chipS: { ...c.style, marginTop: 0, padding: '2px 8px' } as CSS,
         dotS: { width: 8, height: 8, borderRadius: 999, background: dd.color, flexShrink: 0 } as CSS,
         spark,
-        corr: dd.corr.toFixed(2),
-        corrBar: { display: 'block', width: dd.corr * 100 + '%', height: '100%', borderRadius: 3, background: dd.color } as CSS,
+        corr: drCorr[dd.key].toFixed(2),
+        corrBar: { display: 'block', width: Math.max(0, drCorr[dd.key]) * 100 + '%', height: '100%', borderRadius: 3, background: dd.color } as CSS,
       }
     })
 
@@ -537,12 +566,12 @@ export function MarketDataScreen() {
       drX0: dateLabel(drN - 1),
       drX1: dateLabel(Math.floor(drN / 2)),
       drX2: dateLabel(0),
-      drJkmV: drv.jkm[0].toFixed(2),
+      drJkmV: D.jkm[0].toFixed(2),
       drJkmC: kJ.txt,
-      drNclV: drv.ncl[0].toFixed(1),
+      drNclV: D.ncl[0].toFixed(1),
       drNclC: kN.txt,
       drNclCS: kN.style,
-      drFxV: drv.fx[0].toFixed(2),
+      drFxV: D.fx[0].toFixed(2),
       drFxC: kF.txt,
       drFxCS: kF.style,
       drPanel,
@@ -582,10 +611,12 @@ export function MarketDataScreen() {
       sections,
       hiddenNote,
       balRows,
+      balProcTot: balLive.ready ? Math.round(balLive.procTot).toLocaleString('en-US') : '9,321',
+      balAvgPrice: balLive.ready && balLive.avgPrice != null ? balLive.avgPrice.toFixed(2) : '4.87',
       balD1S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
       balD2S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
     }
-  }, [view, range, gran, sel, closed, drRange, drOn, L, dark, live])
+  }, [view, range, gran, sel, closed, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive])
 
   const isDarkB = dark
   const isLightB = !dark
@@ -891,13 +922,13 @@ export function MarketDataScreen() {
                 <div style={s('display:grid;grid-template-columns:repeat(3,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Weighted avg ΔkW price<br />加重平均ΔkW価格</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>4.87 <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/ΔkW·30min</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · 2026-07-01</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balAvgPrice} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/ΔkW·30min</span></div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · nationwide</div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▼ −0.32 (−6.2%)</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured volume<br />調達量合計</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>9,321 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balProcTot} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
                     <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>5 products · vs prior day</div>
                     <span style={v.balD1S}>▲ +214 (+2.4%)</span>
                   </div>

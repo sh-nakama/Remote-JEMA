@@ -55,6 +55,39 @@ SCHEMA_VERSION = 1
 
 # 48 half-hour slot labels "00:00" .. "23:30" (JEPX 30-min grid).
 SLOTS: list[str] = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
+SLOT_INDEX: dict[str, int] = {s: i for i, s in enumerate(SLOTS)}
+
+# Balancing products to export: (url-safe code, `product` value in the parquet).
+# 5 of 7 — skips "1-1" (Primary offline) and "4-0" (Composite).
+BALANCING_PRODUCTS: list[tuple[str, str]] = [
+    ("1-0", "Primary"),
+    ("2-1", "Secondary 1"),
+    ("2-2", "Secondary 2"),
+    ("3-1", "Tertiary 1"),
+    ("3-2", "Tertiary 2"),
+]
+
+# Fuel/FX drivers: (frontend key, fuels_daily ticker). NG=F (Henry Hub gas) and
+# BZ=F (Brent crude) are PROXIES for JKM LNG / Newcastle coal (data-quality caveat).
+DRIVERS: list[tuple[str, str]] = [("jkm", "NG=F"), ("ncl", "BZ=F"), ("fx", "JPY=X")]
+
+# EPRX tieline markets and pair->interconnector-key mapping. Pair strings use " → ".
+# 7 of 10 pairs map cleanly to the frontend `icDefs`; the 3 Chubu/Hokuriku/Kansai
+# combined-zone pairs have no 1:1 line and fall back to the fixture (key=None).
+TIELINE_MARKETS: list[str] = ["DAM", "DCM"]
+PAIR_TO_IC: dict[str, str] = {
+    "Hokkaido->Tohoku": "hh",
+    "Tohoku->Tokyo": "st",
+    "Tokyo->Chubu": "fc",
+    "Kansai->Chugoku": "ck",
+    "Kansai->Shikoku": "sk",
+    "Chugoku->Shikoku": "cs",
+    "Chugoku->Kyushu": "kq",
+}
+
+
+def _norm_pair(pair: str) -> str:
+    return pair.replace(" ", "").replace("→", "->")
 
 
 def _write_json(path: Path, obj: object) -> int:
@@ -213,6 +246,174 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
     return {"files": 1, "bytes": n}
 
 
+def export_balancing(out: Path, anchor: date) -> dict:
+    """Write ``balancing/{code}/{area}/{level}.json`` + ``balancing_stats/{code}/{area}.json``
+    for the 5 exported adjustment-power products (需給調整市場 / EPRX)."""
+    files = 0
+    total_bytes = 0
+    for code, name in BALANCING_PRODUCTS:
+        for area in AREAS:
+            for level in LEVELS:
+                start = anchor - timedelta(days=LEVEL_WINDOW_DAYS[level])
+                grid = read.load_balancing_grid(name, area, start, anchor, level)
+                payload = {
+                    "schema": SCHEMA_VERSION,
+                    "product_code": code,
+                    "product": name,
+                    "area": area,
+                    "level": level,
+                    "start": start.isoformat(),
+                    "end": anchor.isoformat(),
+                    "volume": grid["volume"],
+                    "price": grid["price"],
+                }
+                total_bytes += _write_json(out / "balancing" / code / area / f"{level}.json", payload)
+                files += 1
+            s_start = anchor - timedelta(days=STATS_WINDOW_DAYS)
+            stats = read.balancing_period_stats(name, area, s_start, anchor)
+            total_bytes += _write_json(
+                out / "balancing_stats" / code / f"{area}.json",
+                {
+                    "schema": SCHEMA_VERSION,
+                    "product_code": code,
+                    "product": name,
+                    "area": area,
+                    "window_days": STATS_WINDOW_DAYS,
+                    "start": s_start.isoformat(),
+                    "end": anchor.isoformat(),
+                    **stats,
+                },
+            )
+            files += 1
+    return {"files": files, "bytes": total_bytes}
+
+
+def export_drivers(out: Path, anchor: date, db_path: str | None = None) -> dict:
+    """Write ``drivers.json``: daily fuel/FX series (JKM/Newcastle proxies + USD/JPY)
+    aligned with the daily-mean JEPX system price + their Pearson correlation.
+
+    Series are chronological (oldest→newest); the frontend adapter reverses them.
+    """
+    eng = get_engine(db_path)
+    with eng.connect() as con:
+        fuels = pd.read_sql_query(
+            text("SELECT date, ticker, close FROM fuels_daily WHERE date <= :a ORDER BY date"),
+            con,
+            params={"a": anchor.isoformat()},
+        )
+        spot = pd.read_sql_query(
+            text(
+                "SELECT date, AVG(system_price) AS spot FROM jepx_spot_30m "
+                "WHERE date <= :a GROUP BY date ORDER BY date"
+            ),
+            con,
+            params={"a": anchor.isoformat()},
+        )
+    payload: dict = {
+        "schema": SCHEMA_VERSION,
+        "start": None,
+        "end": None,
+        "dates": [],
+        "spot": [],
+        "jkm": [],
+        "ncl": [],
+        "fx": [],
+        "corr": {"jkm": None, "ncl": None, "fx": None},
+        "units": {"jkm": "$/MMBtu", "ncl": "$/bbl", "fx": ""},
+        "sources": {key: ticker for key, ticker in DRIVERS},
+    }
+    if not fuels.empty:
+        fuels["date"] = fuels["date"].astype(str)
+        wide = fuels.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
+        wide = wide.rename(columns={ticker: key for key, ticker in DRIVERS}).sort_index()
+        if not spot.empty:
+            spot["date"] = spot["date"].astype(str)
+            wide = wide.join(spot.set_index("date")["spot"], how="left")
+        dates = list(wide.index)
+
+        def col(name: str) -> list[float | None]:
+            if name not in wide.columns:
+                return [None] * len(dates)
+            return [None if pd.isna(v) else round(float(v), 4) for v in wide[name]]
+
+        def corr(name: str) -> float | None:
+            if name not in wide.columns or "spot" not in wide.columns:
+                return None
+            sub = wide[[name, "spot"]].dropna()
+            if len(sub) < 3:
+                return None
+            c = sub[name].corr(sub["spot"])
+            return None if pd.isna(c) else round(float(c), 3)
+
+        payload.update(
+            {
+                "start": dates[0] if dates else None,
+                "end": dates[-1] if dates else None,
+                "dates": dates,
+                "spot": col("spot"),
+                "jkm": col("jkm"),
+                "ncl": col("ncl"),
+                "fx": col("fx"),
+                "corr": {"jkm": corr("jkm"), "ncl": corr("ncl"), "fx": corr("fx")},
+            }
+        )
+    n = _write_json(out / "drivers.json", payload)
+    return {"files": 1, "bytes": n}
+
+
+def export_tieline(out: Path, anchor: date) -> dict:
+    """Write ``tieline/{market}.json``: per interconnector pair, the latest day's
+    48-slot reserved/TTC utilisation + TTC, mapped to frontend `icDefs` keys.
+
+    Uses the real EPRX reserved (fwd) vs upper-limit (TTC); reserved is typically a
+    small fraction of TTC, i.e. these lines are mostly uncongested in the DA market.
+    """
+    files = 0
+    total_bytes = 0
+    # Wide lookback: the global anchor follows supply (which has forecast rows past
+    # the tieline data's end), so a narrow window can miss the latest tieline day.
+    start = anchor - timedelta(days=60)
+    for market in TIELINE_MARKETS:
+        recs = read.load_tieline(market, start, anchor, "Native")
+        by_pair: dict[str, list] = {}
+        for r in recs:
+            by_pair.setdefault(r["pair"], []).append(r)
+        lines = []
+        for pair, rows in sorted(by_pair.items()):
+            rows.sort(key=lambda r: r["datetime"])
+            last_date = rows[-1]["datetime"][:10]
+            util: list[float | None] = [None] * 48
+            ttc: float | None = None
+            for r in rows:
+                if r["datetime"][:10] != last_date:
+                    continue
+                t = r["datetime"][11:16]
+                idx = SLOT_INDEX.get(t)
+                if idx is None:
+                    continue
+                ul = r.get("upper_limit_fwd")
+                rv = r.get("reserved_fwd")
+                if ul not in (None, 0) and rv is not None:
+                    util[idx] = round(min(1.0, max(0.0, rv / ul)), 4)
+                if ul is not None and (ttc is None or ul > ttc):
+                    ttc = ul
+            util_now = next((x for x in reversed(util) if x is not None), None)
+            lines.append(
+                {
+                    "key": PAIR_TO_IC.get(_norm_pair(pair)),
+                    "pair": pair,
+                    "date": last_date,
+                    "ttc": None if ttc is None else round(float(ttc), 1),
+                    "util": util,
+                    "util_now": util_now,
+                }
+            )
+        payload = {"schema": SCHEMA_VERSION, "market": market, "slots": SLOTS, "lines": lines}
+        total_bytes += _write_json(out / "tieline" / f"{market}.json", payload)
+        files += 1
+    return {"files": files, "bytes": total_bytes}
+
+
 def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None = None) -> dict:
     """Export all web snapshots to *out_dir*; write ``manifest.json``; return it.
 
@@ -238,5 +439,8 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
     }
     manifest["datasets"]["wholesale"] = export_wholesale(out, anchor)
     manifest["datasets"]["system"] = export_system(out, anchor, db_path)
+    manifest["datasets"]["balancing"] = export_balancing(out, anchor)
+    manifest["datasets"]["tieline"] = export_tieline(out, anchor)
+    manifest["datasets"]["drivers"] = export_drivers(out, anchor, db_path)
     _write_json(out / "manifest.json", manifest)
     return manifest
