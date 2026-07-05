@@ -3,13 +3,14 @@ import { useState } from 'react'
 import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import {
-  committees,
-  meetings,
-  untracked,
-  upcoming,
+  committees as fxCommittees,
+  meetings as fxMeetings,
+  untracked as fxUntracked,
+  upcoming as fxUpcoming,
   type Meeting,
   type Upcoming,
 } from './PolicyDeepDive.data'
+import { usePolicyLive } from './PolicyDeepDive.live'
 
 type AnyMeeting = Meeting | Upcoming
 
@@ -36,6 +37,13 @@ export function PolicyDeepDiveScreen() {
 
   // showAudioCard default prop = true
   const showAudioCard = true
+
+  // ---- live policy data (falls back to fixtures while loading) ----
+  const pol = usePolicyLive()
+  const committees = pol.ready ? pol.committees : fxCommittees
+  const meetings = pol.ready ? pol.meetings : fxMeetings
+  const untracked: Meeting[] = pol.ready ? [] : fxUntracked
+  const upcoming: Upcoming[] = pol.ready ? [] : fxUpcoming
 
   // ---- handlers ----
   const selAll = () => setCommittee('all')
@@ -158,6 +166,7 @@ export function PolicyDeepDiveScreen() {
     } else {
       if (!(selCom === 'all' || m.com === selCom)) return false
       if (fOnly && m.com && !followedSet[m.com]) return false
+      if (coverage === 'tracked' && !qNorm && m.status === 'pending') return false
     }
     if (qNorm) {
       const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', m.com ? comOrg[m.com] : m.org || '']
@@ -254,17 +263,27 @@ export function PolicyDeepDiveScreen() {
   const dJp = hasDigest && dM.jp ? dM.jp : []
   const dRefs = hasDigest && dM.refs ? dM.refs : []
   const dDocs = d.docs
+  const dComUrl = committees.find((c) => c.key === d.com)?.url || ''
+  const openUrl = (url: string) => window.open(url, '_blank', 'noopener,noreferrer')
   const showAudio = showAudioCard && !hasAgenda
 
   const feedNote = qNorm
     ? 'Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')
     : feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
 
-  const newCards = [
-    { title: 'EGMSC · 第58回 🏁', meta: '2026-06-24 · summarised 06-26', preview: L === 'ja' ? '託送料金制度見直しの中間とりまとめを採択。' : 'Adopted the interim report on the wheeling-charge review.', click: () => selectMeeting('egmsc58') },
-    { title: 'Basic Policy · 第84回', meta: '2026-06-27 · summarised 06-29', preview: L === 'ja' ? '長期蓄電池の容量市場連携を審議。' : 'Debated capacity-market linkage for long-duration storage.', click: () => selectMeeting('basic84') },
-    { title: 'Renewable Integration · 第63回', meta: '2026-06-05 · summarised 06-08', preview: L === 'ja' ? 'ノンファーム接続の全国展開方針を確認。' : 'Confirmed nationwide non-firm connection rollout from FY2027.', click: () => selectMeeting('renew63') },
-  ]
+  const doneList = meetings.filter((m) => m.status === 'done')
+  const newCards = pol.ready
+    ? doneList.slice(0, 3).map((m) => ({
+        title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
+        meta: m.date + ' · ' + (L === 'ja' ? '要約済み' : 'summarised'),
+        preview: (L === 'ja' ? m.prevJa : m.prevEn) || '',
+        click: () => selectMeeting(m.key),
+      }))
+    : [
+        { title: 'EGMSC · 第58回 🏁', meta: '2026-06-24 · summarised 06-26', preview: L === 'ja' ? '託送料金制度見直しの中間とりまとめを採択。' : 'Adopted the interim report on the wheeling-charge review.', click: () => selectMeeting('egmsc58') },
+        { title: 'Basic Policy · 第84回', meta: '2026-06-27 · summarised 06-29', preview: L === 'ja' ? '長期蓄電池の容量市場連携を審議。' : 'Debated capacity-market linkage for long-duration storage.', click: () => selectMeeting('basic84') },
+        { title: 'Renewable Integration · 第63回', meta: '2026-06-05 · summarised 06-08', preview: L === 'ja' ? 'ノンファーム接続の全国展開方針を確認。' : 'Confirmed nationwide non-firm connection rollout from FY2027.', click: () => selectMeeting('renew63') },
+      ]
 
   const langJaS = segBase(L === 'ja')
   const langEnS = segBase(L === 'en')
@@ -499,7 +518,7 @@ export function PolicyDeepDiveScreen() {
                     </div>
                     <div style={s("font-size:12px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{dSub}</div>
                   </div>
-                  <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" hover="color:var(--ac)" onClick={tSource}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`} />METI page · 元ページ</Hoverable>
+                  <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" hover="color:var(--ac)" onClick={() => (dComUrl ? openUrl(dComUrl) : tSource())}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`} />METI page · 元ページ</Hoverable>
                 </div>
 
                 {hasDigest && (
@@ -601,7 +620,7 @@ export function PolicyDeepDiveScreen() {
                   <div style={s('font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>SOURCE MATERIALS · 配布資料</div>
                   <div style={s('display:flex;flex-direction:column;gap:2px;margin-top:6px')}>
                     {dDocs.map((doc, di) => (
-                      <Hoverable key={di} base="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={tDoc}>
+                      <Hoverable key={di} base="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={() => (doc.url ? openUrl(doc.url) : tDoc())}>
                         <span style={s('display:inline-flex;align-items:center;gap:9px;min-width:0;font-size:12.5px;color:var(--tx2)')}>
                           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:var(--mut);flex-shrink:0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`} />
                           <span style={s('white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{doc.name}</span>

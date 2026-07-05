@@ -16,9 +16,13 @@ from repower.dashboard.export_web import (
     PAIR_TO_IC,
     SLOTS,
     _anchor_date,
+    _doc_name,
+    _doc_size,
     _norm_pair,
     _slot_col,
     _write_json,
+    parse_briefing,
+    parse_digest_answer,
 )
 
 
@@ -68,6 +72,41 @@ def test_norm_pair_and_interconnector_mapping():
     assert PAIR_TO_IC[_norm_pair("Chugoku → Kyushu")] == "kq"
     # combined-zone pairs have no clean 1:1 line → not mapped (fixture fallback)
     assert _norm_pair("Chubu-Hokuriku → Kansai") not in PAIR_TO_IC
+
+
+def test_parse_digest_answer_splits_sections_and_strips_markdown():
+    answer = (
+        "Lead paragraph summarising the meeting [1].\n\n"
+        "### Key Decisions\n"
+        "*   **Bold label:** decided something with a $\\geq$6h rule [2].\n"
+        "*   Second decision.\n\n"
+        "### Action Items\n"
+        "*   Do the thing [3]."
+    )
+    secs, lead = parse_digest_answer(answer)
+    heads = [s["h"] for s in secs]
+    assert heads == ["Summary", "Key Decisions", "Action Items"]
+    assert lead.startswith("Lead paragraph")
+    # bold markers stripped, LaTeX \geq rendered
+    assert "**" not in secs[1]["items"][0]
+    assert "≥6h" in secs[1]["items"][0]
+    assert len(secs[1]["items"]) == 2
+
+
+def test_parse_briefing_keeps_title_and_sections():
+    md = "# 第100回 テスト委員会\n\n本会合の概要。\n\n## 1. 主要な論点\n・論点A\n・論点B\n\n## 2. 結論\n決定事項。"
+    secs, title, lead = parse_briefing(md)
+    assert title == "第100回 テスト委員会"
+    heads = [s["h"] for s in secs]
+    assert "1. 主要な論点" in heads and "2. 結論" in heads
+    assert lead  # non-empty preview
+
+
+def test_doc_size_and_name():
+    assert _doc_size("資料1 議事次第（PDF形式：58KB）") == "58 KB"
+    assert _doc_size("資料3-1 約定結果（PDF形式：6,197KB）") == "6.1 MB"
+    assert _doc_size("no size here") == "—"
+    assert _doc_name("資料1　議事次第（PDF形式：58KB）") == "資料1　議事次第"
 
 
 def test_slot_col_fills_missing_slots_with_none():

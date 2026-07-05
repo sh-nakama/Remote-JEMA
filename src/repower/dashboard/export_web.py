@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -414,6 +415,234 @@ def export_tieline(out: Path, anchor: date) -> dict:
     return {"files": files, "bytes": total_bytes}
 
 
+# ── Policy (committees / meetings / materials) ──────────────────────────────
+
+ORG_RANK = {"METI": 0, "OCCTO": 1, "EGC": 2}
+
+
+def _md_clean(t: str) -> str:
+    """Strip the bits of Markdown/LaTeX that shouldn't render as plain text."""
+    t = re.sub(r"\$\\?geq\$", "≥", t)
+    t = re.sub(r"\$\\?leq\$", "≤", t)
+    t = re.sub(r"\$\\?Delta\$", "Δ", t)
+    t = re.sub(r"\$[^$]*\$", "", t)
+    return t.replace("**", "").replace("`", "").strip()
+
+
+def parse_digest_answer(answer: str | None) -> tuple[list[dict], str]:
+    """Split the English digest Markdown into ``[{h, items[]}]`` + a lead preview.
+
+    The answer is a lead paragraph followed by ``### Section`` headers with
+    ``* bullet`` items (see policy_meeting.digest_en_json.answer).
+    """
+    sections: list[dict] = []
+    cur: dict = {"h": "Summary", "items": []}
+    lead = ""
+    for raw in (answer or "").split("\n"):
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if cur["items"]:
+                sections.append(cur)
+            cur = {"h": _md_clean(line.lstrip("#").strip()), "items": []}
+        elif line[0] in "*-•":
+            item = _md_clean(line.lstrip("*-• ").strip())
+            if item:
+                cur["items"].append(item)
+        else:
+            item = _md_clean(line)
+            if item:
+                lead = lead or item
+                cur["items"].append(item)
+    if cur["items"]:
+        sections.append(cur)
+    return sections, lead
+
+
+def parse_briefing(md: str | None) -> tuple[list[dict], str, str]:
+    """Split the Japanese briefing Markdown into ``[{h, t}]`` + (title, lead).
+
+    Keeps the leading intro/basic-info as an 概要 section, one section per ``##``
+    header, drops Markdown tables, and flattens bullets/sub-headers into text.
+    """
+    sections: list[dict] = []
+    cur: dict = {"h": "概要 · Overview", "t": ""}
+    title = ""
+    lead = ""
+    for raw in (md or "").split("\n"):
+        st = raw.strip()
+        if not st:
+            cur["t"] += "\n"
+            continue
+        if st.startswith("## "):
+            if cur["t"].strip():
+                sections.append(cur)
+            cur = {"h": _md_clean(st.lstrip("#").strip()), "t": ""}
+        elif st.startswith("# "):
+            title = _md_clean(st.lstrip("#").strip())
+        elif st.startswith("---") or st.startswith("|"):
+            continue
+        elif st.startswith("###"):
+            cur["t"] += "\n【" + _md_clean(st.lstrip("#").strip()) + "】\n"
+        elif st[0] in "*-•⚫":
+            body = _md_clean(st.lstrip("*-•⚫ ").strip())
+            cur["t"] += "・" + body + "\n"
+            lead = lead or body
+        else:
+            body = _md_clean(st)
+            cur["t"] += body + "\n"
+            if body and not body.startswith("【"):
+                lead = lead or body
+    if cur["t"].strip():
+        sections.append(cur)
+    for s in sections:
+        s["t"] = s["t"].strip()[:1800]
+    return [s for s in sections if s["t"]], title, lead
+
+
+def _doc_size(title: str) -> str:
+    m = re.search(r"([\d,]+)\s*KB", title or "")
+    if not m:
+        return "—"
+    kb = int(m.group(1).replace(",", ""))
+    return f"{kb / 1024:.1f} MB" if kb >= 1024 else f"{kb} KB"
+
+
+def _doc_name(title: str) -> str:
+    return re.sub(r"（PDF形式[:：][^）]*）", "", title or "").strip() or "資料"
+
+
+def _committee_tier(c: dict) -> str:
+    p = c["priority"]
+    if isinstance(p, int) and p <= 1:
+        return "Tier 1"
+    return "Tier 1" if (c["source_count"] or 0) >= 8 else "Tier 2"
+
+
+def export_policy(out: Path, db_path: str | None = None) -> dict:
+    """Write ``policy/committees.json`` + ``policy/meetings.json`` from the policy
+    tables (committees, meetings with parsed EN digest + JP briefing, materials).
+
+    Uses raw SQL (the ORM models don't map every DB column). Meetings are the
+    summarised (``done``) ones plus any with detected materials (``pending``);
+    meeting_date is not populated upstream, so the updated/detected date is used.
+    """
+    eng = get_engine(db_path)
+    with eng.connect() as con:
+        committees = con.execute(
+            text(
+                "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
+                "source_count, enabled, priority FROM policy_committee"
+            )
+        ).mappings().all()
+        meetings = con.execute(
+            text(
+                "SELECT id, committee_key, meeting_num, briefing_md, digest_en_json, has_minutes, "
+                "has_torimatome, state, updated_at, detected_at FROM policy_meeting"
+            )
+        ).mappings().all()
+        materials = con.execute(
+            text("SELECT committee_key, meeting_num, kind, url, title FROM policy_material")
+        ).mappings().all()
+
+    mats_by_mtg: dict[tuple, list] = {}
+    for x in materials:
+        mats_by_mtg.setdefault((x["committee_key"], x["meeting_num"]), []).append(x)
+    com_by_key = {c["committee_key"]: c for c in committees}
+
+    committees_data = [
+        {
+            "key": c["committee_key"],
+            "org": c["source"] or "METI",
+            "en": c["name_en"] or c["committee_key"],
+            "ja": c["name_ja"] or "",
+            "tier": _committee_tier(c),
+            "followed": bool(c["enabled"]),
+            "last": ("第" + str(c["latest_meeting"]) + "回") if c["latest_meeting"] else "—",
+            "url": c["url"] or "",
+            "latest_meeting": c["latest_meeting"],
+            "source_count": c["source_count"] or 0,
+        }
+        for c in committees
+    ]
+    committees_data.sort(key=lambda x: (ORG_RANK.get(x["org"], 3), -(x["source_count"] or 0)))
+
+    def build_meeting(m: dict) -> dict:
+        c = com_by_key.get(m["committee_key"])
+        org = (c["source"] if c else None) or "METI"
+        name_en = (c["name_en"] if c else None) or m["committee_key"]
+        name_ja = (c["name_ja"] if c else None) or m["committee_key"]
+        num = m["meeting_num"]
+        upd = (str(m["updated_at"] or m["detected_at"] or ""))[:10]
+        mats = mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])
+        docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": x["url"] or ""} for x in mats]
+        has_digest = m["state"] == "done" and bool(m["digest_en_json"])
+        out_m: dict = {
+            "key": "m" + str(m["id"]),
+            "com": m["committee_key"],
+            "num": num,
+            "org": org,
+            "en": name_en + " · No. " + str(num),
+            "ja": name_ja + " · 第" + str(num) + "回",
+            "date": upd,
+            "status": "done" if has_digest else "pending",
+            "tori": bool(m["has_torimatome"]),
+            "title": name_en + " — No. " + str(num),
+            "titleJa": name_ja + " 第" + str(num) + "回",
+            "sub": name_ja + " · 第" + str(num) + "回 · " + org
+            + (" · とりまとめ" if m["has_torimatome"] else "")
+            + (" · 議事録" if m["has_minutes"] else "")
+            + (" · " + upd if upd else ""),
+            "docs": docs,
+        }
+        if has_digest:
+            try:
+                digest = json.loads(m["digest_en_json"])
+            except (ValueError, TypeError):
+                digest = {}
+            secs, lead_en = parse_digest_answer(digest.get("answer"))
+            jp_secs, _title, lead_ja = parse_briefing(m["briefing_md"])
+            refs = []
+            for r in (digest.get("references") or [])[:16]:
+                n = r.get("citation_number")
+                ct = (r.get("cited_text") or "").strip()
+                refs.append(f"[{n}] {ct[:22]}" if ct else f"[{n}]")
+            out_m["digest"] = secs
+            out_m["jp"] = jp_secs
+            out_m["refs"] = refs
+            out_m["prevEn"] = lead_en[:180]
+            out_m["prevJa"] = lead_ja[:110]
+        else:
+            out_m["emptyTitle"] = "Summary pending · 要約待ち"
+            out_m["emptySub"] = (
+                f"{len(docs)} materials detected · queued for the next catch-up run · 資料取得済み・要約待ち"
+            )
+        return out_m
+
+    kept = [
+        m
+        for m in meetings
+        if (m["state"] == "done" and m["digest_en_json"]) or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
+    ]
+    kept.sort(key=lambda m: (0 if (m["state"] == "done" and m["digest_en_json"]) else 1, -(m["meeting_num"] or 0)))
+    meetings_data = [build_meeting(m) for m in kept]
+
+    files = 0
+    total = 0
+    total += _write_json(out / "policy" / "committees.json", {"schema": SCHEMA_VERSION, "committees": committees_data})
+    files += 1
+    total += _write_json(out / "policy" / "meetings.json", {"schema": SCHEMA_VERSION, "meetings": meetings_data})
+    files += 1
+    return {
+        "files": files,
+        "bytes": total,
+        "committees": len(committees_data),
+        "meetings": len(meetings_data),
+        "summarised": sum(1 for m in meetings_data if m["status"] == "done"),
+    }
+
+
 def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None = None) -> dict:
     """Export all web snapshots to *out_dir*; write ``manifest.json``; return it.
 
@@ -442,5 +671,6 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
     manifest["datasets"]["balancing"] = export_balancing(out, anchor)
     manifest["datasets"]["tieline"] = export_tieline(out, anchor)
     manifest["datasets"]["drivers"] = export_drivers(out, anchor, db_path)
+    manifest["datasets"]["policy"] = export_policy(out, db_path)
     _write_json(out / "manifest.json", manifest)
     return manifest

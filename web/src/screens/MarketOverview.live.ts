@@ -6,7 +6,7 @@
 
 import { useEffect, useState } from 'react'
 import { getSnapshot } from '../lib/data'
-import { X, Y } from './MarketOverview.data'
+import { X, Y, type Meeting } from './MarketOverview.data'
 
 export interface SystemSnapshot {
   schema: number
@@ -68,6 +68,85 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
     areasNow: snap.areas_now || {},
     now: snap.now || { system: null, tokyo: null, slot: null },
   }
+}
+
+// ── Policy committee radar (live done meetings) ─────────────────────────────
+
+interface PComSnap {
+  key: string
+  org: 'METI' | 'OCCTO' | 'EGC'
+  en: string
+  ja: string
+  followed: boolean
+}
+interface PMtgSnap {
+  com: string
+  num: number
+  org: string
+  date: string
+  status: string
+  tori: boolean
+  prevEn?: string
+  prevJa?: string
+}
+
+export interface PolicyMeetingsLive {
+  ready: boolean
+  meetings: Meeting[]
+}
+
+/** The most recently summarised committee meetings, mapped to the Overview radar's
+ * Meeting shape. No relevance score exists upstream, so the radar is ranked by
+ * recency (newest = top / longest bar); the date shown is the summary date. */
+export function usePolicyMeetings(): PolicyMeetingsLive {
+  const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, meetings: [] })
+  useEffect(() => {
+    let alive = true
+    Promise.all([
+      getSnapshot<{ committees: PComSnap[] }>('policy/committees.json'),
+      getSnapshot<{ meetings: PMtgSnap[] }>('policy/meetings.json'),
+    ])
+      .then(([c, m]) => {
+        if (!alive) return
+        const com: Record<string, PComSnap> = {}
+        for (const x of c.committees || []) com[x.key] = x
+        const done = (m.meetings || []).filter((x) => x.status === 'done')
+        // newest first (date desc, then meeting number desc)
+        done.sort((a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : (b.num || 0) - (a.num || 0)))
+        // one row per committee (its latest summarised meeting) — a committee radar
+        const seen = new Set<string>()
+        const reps: PMtgSnap[] = []
+        for (const x of done) {
+          if (seen.has(x.com)) continue
+          seen.add(x.com)
+          reps.push(x)
+        }
+        const meetings: Meeting[] = reps.slice(0, 8).map((x, i) => {
+          const cc = com[x.com]
+          const d = x.date || ''
+          return {
+            en: cc ? cc.en : x.com,
+            ja: cc ? cc.ja : x.com,
+            tier: (x.org as 'METI' | 'OCCTO' | 'EGC') || 'METI',
+            no: x.num,
+            m: d ? parseInt(d.slice(5, 7), 10) : 0,
+            day: d ? parseInt(d.slice(8, 10), 10) : 0,
+            score: Math.max(45, 92 - i * 6),
+            tori: x.tori,
+            followed: cc ? cc.followed : false,
+            done: true,
+            sEn: x.prevEn || '',
+            sJa: x.prevJa || '',
+          }
+        })
+        setState({ ready: true, meetings })
+      })
+      .catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [])
+  return state
 }
 
 const r1 = (n: number) => Math.round(n * 10) / 10

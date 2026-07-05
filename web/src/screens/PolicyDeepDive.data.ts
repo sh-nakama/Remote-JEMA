@@ -8,6 +8,7 @@ export interface Committee {
   tier: string
   followed: boolean
   last: string
+  url?: string
   nextNo?: number
   nextDate?: string
 }
@@ -25,6 +26,7 @@ export interface JpSection {
 export interface DocRef {
   name: string
   size: string
+  url?: string
 }
 
 export interface Meeting {

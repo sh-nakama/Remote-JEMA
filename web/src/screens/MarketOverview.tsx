@@ -9,7 +9,7 @@ import {
   paths as fxPaths,
   X,
   Y,
-  meetings,
+  meetings as fxMeetings,
   upcomingMeetings,
   freshData,
   MO,
@@ -18,7 +18,7 @@ import {
   calRows,
   type Meeting,
 } from './MarketOverview.data'
-import { useSystemLive, buildPaths } from './MarketOverview.live'
+import { useSystemLive, buildPaths, usePolicyMeetings } from './MarketOverview.live'
 
 const NOW = 29 // 14:30 slot
 
@@ -118,6 +118,8 @@ export function MarketOverviewScreen() {
     () => (liveSys.ready ? buildPaths(today, yday, avg7) : fxPaths),
     [liveSys.ready, today, yday, avg7],
   )
+  const polMtg = usePolicyMeetings()
+  const meetings = polMtg.ready ? polMtg.meetings : fxMeetings
 
   // ---- handlers ----
   const tMarket = () => setScreen('market')
