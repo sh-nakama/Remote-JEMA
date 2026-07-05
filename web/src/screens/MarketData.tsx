@@ -1,5 +1,5 @@
 // Ported from screens/market-data.html — the Market Data screen.
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
@@ -99,13 +99,13 @@ function dateLabel(daysAgo: number): string {
 }
 
 export function MarketDataScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch } = useApp()
   const L = lang
   const dark = theme === 'dark'
 
   const [view, setView] = useState<View>('wholesale')
   const [range, setRange] = useState<Range>('60D')
-  const [gran, setGran] = useState<Gran>('Daily')
+  const [gran, setGran] = useState<Gran>(defaultGran)
   const [sel, setSel] = useState<Record<string, boolean>>({ hokkaido: true, tohoku: true, tepco: true })
   const [closed, setClosed] = useState<Record<string, boolean>>({})
   const [drRange, setDrRange] = useState<DrRange>('90D')
@@ -128,6 +128,15 @@ export function MarketDataScreen() {
     setClosed({})
   }
 
+  // The ⌘K palette / Watchlist can ask us to focus a specific area: switch to
+  // the wholesale view and ensure that area is selected, then clear the request.
+  useEffect(() => {
+    if (!focusArea) return
+    setView('wholesale')
+    setSel((prev) => ({ ...prev, [focusArea]: true }))
+    clearFocusArea()
+  }, [focusArea, clearFocusArea])
+
   // ---- handlers (toasts) ----
   const granN = () => setGran('Native')
   const granD = () => setGran('Daily')
@@ -137,12 +146,10 @@ export function MarketDataScreen() {
   const tCompare = () => toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外')
   const tLine = () => toast('Line drill-down (hourly flows & spread history) — not in this prototype · 連系線ドリルダウンは対象外')
   const tSystem = () => toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中')
-  const tPin = () => toast('Pin area to top = PROPOSED · エリアのピン留めは提案中')
   const tProduct = () => toast('Product drill-down (per-slot prices & offers) — not in this prototype · 商品別ドリルダウンは対象外')
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
   const tNav = () => toast('Placeholder destination in this prototype · 本プロトタイプ対象外')
   const tRefresh = () => toast('Data refreshed · データを更新しました')
-  const tCollapse = () => toast('Collapse state persists per user (Settings) · 折りたたみ状態は保存されます')
   const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
   const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
@@ -660,7 +667,7 @@ export function MarketDataScreen() {
   return (
     <>
       {/* ============ SIDEBAR ============ */}
-      <div style={s('width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);display:flex;flex-direction:column;padding:22px 16px 16px;overflow-y:auto')}>
+      <div style={s(`width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);flex-direction:column;padding:22px 16px 16px;overflow-y:auto;${collapsed ? 'display:none' : 'display:flex'}`)}>
         <div style={s('padding:0 8px')}>
           <div style={s('display:flex;align-items:center;gap:7px')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:23px;height:23px;color:var(--ac);flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>`} />
@@ -692,22 +699,24 @@ export function MarketDataScreen() {
 
         <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:22px 8px 8px')}>GENERAL · 全般</div>
         <div style={s('display:flex;flex-direction:column;gap:3px')}>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNav}>
+          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('watchlist')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /><span>Watchlist</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>5</span>
+            {watch.length > 0 && (
+              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{watch.length}</span>
+            )}
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNav}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} /><span>Notifications</span>
             <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>2</span>
           </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNav}>
+          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} /><span>Settings</span>
           </Hoverable>
         </div>
 
         <div style={s('flex:1')}></div>
 
-        <Hoverable base="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" hover="background:var(--bg2);color:var(--tx2)" onClick={tCollapse}>
+        <Hoverable base="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" hover="background:var(--bg2);color:var(--tx2)" onClick={toggleCollapsed}>
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path></svg>`} /><span>Collapse · 折りたたむ</span>
         </Hoverable>
 
@@ -727,9 +736,9 @@ export function MarketDataScreen() {
         {/* Top bar */}
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Data <span style={s('color:var(--fnt3)')}>·</span> マーケットデータ</div>
-          <div style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut)')}>
+          <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
-            <input placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0')} />
+            <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
           </div>
           <div style={s('flex:1')}></div>
@@ -902,7 +911,7 @@ export function MarketDataScreen() {
                         {sec.open && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M18 15l-6-6-6 6"></path></svg>`} />)}
                         {sec.closed && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M6 9l6 6 6-6"></path></svg>`} />)}
                       </Hoverable>
-                      <Hoverable as="span" base="width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--fnt);cursor:pointer" hover="background:var(--bg2)" onClick={tPin} title="Pin area = PROPOSED · ピン留めは提案中"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M12 17v5"></path><path d="M9 10.76V7a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3.76a2 2 0 0 0 .59 1.42l1.82 1.82H5.59l1.82-1.82A2 2 0 0 0 8 10.76z"></path></svg>`} /></Hoverable>
+                      <Hoverable as="span" base={`width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${isWatched('area:' + sec.key) ? 'var(--ac)' : 'var(--fnt)'}`} hover="background:var(--bg2)" onClick={() => { const am = areas.find((x) => x.key === sec.key); toggleWatch({ id: 'area:' + sec.key, kind: 'area', en: am?.en || sec.key, ja: am?.ja || sec.key, screen: 'market' }) }} title={isWatched('area:' + sec.key) ? 'Remove from watchlist · ウォッチリストから削除' : 'Add to watchlist · ウォッチリストに追加'}><RawSvg html={`<svg viewBox="0 0 24 24" fill="${isWatched('area:' + sec.key) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /></Hoverable>
                       <span style={s("font-size:11.5px;color:var(--mut);margin-left:auto;font-feature-settings:'tnum' 1")}>{sec.meta}</span>
                     </div>
                     {sec.open && (

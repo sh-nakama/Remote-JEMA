@@ -1,4 +1,5 @@
 import { AppProvider, useApp } from './lib/app'
+import { Overlays, SidebarExpander } from './lib/menus'
 import { s } from './lib/style'
 import { MarketOverviewScreen } from './screens/MarketOverview'
 import { MarketDataScreen } from './screens/MarketData'
@@ -42,6 +43,8 @@ function Root() {
       style={s(ROOT)}
     >
       <CurrentScreen />
+      <SidebarExpander />
+      <Overlays />
       <Toast />
     </div>
   )
