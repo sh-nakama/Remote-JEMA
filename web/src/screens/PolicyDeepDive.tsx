@@ -175,7 +175,12 @@ export function PolicyDeepDiveScreen() {
       if (!hay.includes(qNorm)) return false
     }
     return true
-  }).sort((a, b) => (b.date < a.date ? -1 : 1))
+  }).sort((a, b) => {
+    // Chronological within a committee: meeting_date is null upstream, so order by
+    // meeting number (newest first). Fall back to the summary date for fixtures.
+    if (typeof a.num === 'number' && typeof b.num === 'number' && a.num !== b.num) return b.num - a.num
+    return b.date < a.date ? -1 : 1
+  })
 
   const mapFeed = (m: AnyMeeting) => {
     const on = selMtg === m.key

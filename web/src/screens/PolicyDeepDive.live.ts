@@ -23,6 +23,7 @@ interface CommitteeSnap {
 interface MeetingSnap {
   key: string
   com: string
+  num: number
   org: string
   en: string
   ja: string
@@ -71,6 +72,7 @@ export function usePolicyLive(): PolicyLive {
         const meetings: Meeting[] = (m.meetings || []).map((x) => ({
           key: x.key,
           com: x.com,
+          num: x.num,
           org: x.org,
           en: x.en,
           ja: x.ja,

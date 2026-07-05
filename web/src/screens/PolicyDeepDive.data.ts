@@ -32,6 +32,7 @@ export interface DocRef {
 export interface Meeting {
   key: string
   com?: string
+  num?: number
   org?: string
   untracked?: boolean
   en: string
