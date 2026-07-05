@@ -5,6 +5,9 @@ dist-ssr
 .DS_Store
 .vite
 
+# generated web-data snapshots (produced by `repower export-web`)
+public/data/
+
 # tsc -b build outputs (emitted from vite.config.ts / tsconfig references)
 *.tsbuildinfo
 vite.config.js

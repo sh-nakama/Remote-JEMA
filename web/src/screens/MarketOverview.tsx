@@ -2,11 +2,11 @@ import React, { useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
 import {
-  today,
-  yday,
-  avg7,
+  today as fxToday,
+  yday as fxYday,
+  avg7 as fxAvg7,
   areas,
-  paths,
+  paths as fxPaths,
   X,
   Y,
   meetings,
@@ -18,6 +18,7 @@ import {
   calRows,
   type Meeting,
 } from './MarketOverview.data'
+import { useSystemLive, buildPaths } from './MarketOverview.live'
 
 const NOW = 29 // 14:30 slot
 
@@ -107,6 +108,16 @@ export function MarketOverviewScreen() {
   const chartRef = useRef<HTMLDivElement>(null)
 
   const showBrief = false // props.showAiBrief default
+
+  // ---- live system-price data (falls back to fixtures while loading) ----
+  const liveSys = useSystemLive(fxToday, fxYday, fxAvg7)
+  const today = liveSys.today
+  const yday = liveSys.yday
+  const avg7 = liveSys.avg7
+  const paths = useMemo(
+    () => (liveSys.ready ? buildPaths(today, yday, avg7) : fxPaths),
+    [liveSys.ready, today, yday, avg7],
+  )
 
   // ---- handlers ----
   const tMarket = () => setScreen('market')
@@ -212,7 +223,7 @@ export function MarketOverviewScreen() {
   // ---- pulse rows ----
   const pulse = useMemo(() => {
     return [...areas]
-      .map((a) => ({ ...a, latest: a.series[NOW], prev: yday[NOW] + a.off }))
+      .map((a) => ({ ...a, latest: liveSys.areasNow[a.key] ?? a.series[NOW], prev: yday[NOW] + a.off }))
       .sort((a, b) => b.latest - a.latest)
       .map((a, i) => {
         const mn = Math.min(...a.series)
@@ -256,7 +267,7 @@ export function MarketOverviewScreen() {
           } as React.CSSProperties,
         }
       })
-  }, [L, dark])
+  }, [L, dark, liveSys, yday])
 
   // ---- radar rows ----
   const tierColors: Record<string, string> = {
@@ -434,8 +445,9 @@ export function MarketOverviewScreen() {
 
   // computed top-bar / pulse header values
   const sysNow = today[NOW].toFixed(2)
-  const tokyoNow = areas[0].series[NOW].toFixed(2)
-  const spread = (today[NOW] - areas[0].series[NOW]).toFixed(2)
+  const tokyoNowV = liveSys.areasNow[areas[0].key] ?? areas[0].series[NOW]
+  const tokyoNow = tokyoNowV.toFixed(2)
+  const spread = (today[NOW] - tokyoNowV).toFixed(2)
 
   return (
     <>

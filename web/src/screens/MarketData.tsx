@@ -13,6 +13,7 @@ import {
   drDefs,
   gaussian as G,
 } from './MarketData.data'
+import { useWholesaleLive, windowLive } from './MarketData.live'
 
 type View = 'wholesale' | 'balancing' | 'interco' | 'drivers'
 type Range = '7D' | '30D' | '60D' | '1Y'
@@ -120,19 +121,10 @@ export function MarketDataScreen() {
   }
 
   // ---- handlers (toasts) ----
-  const granN = () => {
-    setGran('Native')
-    toast('Native 30-min granularity — charts keep daily aggregates in this prototype · 本プロトタイプでは日次集計を表示')
-  }
+  const granN = () => setGran('Native')
   const granD = () => setGran('Daily')
-  const granW = () => {
-    setGran('Weekly')
-    toast('Weekly aggregation applied to exports; charts stay daily in this prototype')
-  }
-  const granM = () => {
-    setGran('Monthly')
-    toast('Monthly aggregation applied to exports; charts stay daily in this prototype')
-  }
+  const granW = () => setGran('Weekly')
+  const granM = () => setGran('Monthly')
   const tExport = () => toast('CSV export of current selection queued · 現在の選択をCSVで出力します')
   const tCompare = () => toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外')
   const tLine = () => toast('Line drill-down (hourly flows & spread history) — not in this prototype · 連系線ドリルダウンは対象外')
@@ -146,6 +138,9 @@ export function MarketDataScreen() {
   const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
   const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
+
+  const selectedKeys = areas.filter((a) => sel[a.key]).map((a) => a.key)
+  const live = useWholesaleLive(selectedKeys, gran)
 
   // ---- computed (mirror of renderVals) ----
   const v = useMemo(() => {
@@ -163,22 +158,67 @@ export function MarketDataScreen() {
         days: idx,
       }
     }
+    // fixture window with date labels (fallback while live data loads)
+    const winLabeled = (a: (typeof areas)[number]) => {
+      const b = win(a)
+      const m = Math.floor((b.days.length - 1) / 2)
+      return {
+        avg: b.avg,
+        max: b.max,
+        min: b.min,
+        labels: [dateLabel(b.days[0]), dateLabel(b.days[m]), dateLabel(b.days[b.days.length - 1])] as [
+          string,
+          string,
+          string,
+        ],
+      }
+    }
     const mean = (arr: number[]) => arr.reduce((x, y) => x + y, 0) / arr.length
+    const finite = (arr: number[]) => arr.filter((x) => Number.isFinite(x))
+    const meanF = (arr: number[]) => (arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : 0)
 
-    // ---- KPIs ----
+    // Live data is used only once every selected area's snapshot has loaded;
+    // otherwise the fixtures render (loading fallback).
+    const useLive = live.ready && selAreas.length > 0 && selAreas.every((a) => !!live.areas[a.key])
+
+    // ---- KPIs (live daily series when loaded, else fixtures) ----
     const act = selAreas.length ? selAreas : areas
-    const curAvgs = act.map((a) => mean(a.dailyAvg.slice(0, N)))
-    const prevAvgs = act.map((a) => mean(a.dailyAvg.slice(N, N * 2)))
-    const kAvgV = mean(curAvgs)
-    const kAvgP = mean(prevAvgs)
+    let kAvgV: number
+    let kAvgP: number
+    let pkPrev: number
+    let demV: number
     let pk: { v: number; area: (typeof areas)[number] | null; d: number } = { v: -1, area: null, d: 0 }
-    act.forEach((a) => {
-      for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d }
-    })
-    const pkPrev = Math.max(...act.map((a) => Math.max(...a.dailyMax.slice(N, N * 2))))
-    const demV = act.reduce((sum, a) => sum + a.peak, 0)
-    const kAvgC = makeChip(kAvgV - kAvgP, ((kAvgV - kAvgP) / kAvgP) * 100)
-    const kPeakC = makeChip(pk.v - pkPrev, ((pk.v - pkPrev) / pkPrev) * 100)
+    if (useLive) {
+      const curAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(0, N))))
+      const prevAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(N, N * 2))))
+      kAvgV = meanF(curAvgs)
+      kAvgP = meanF(prevAvgs)
+      act.forEach((a) => {
+        const dm = live.areas[a.key].dMax
+        for (let d = 0; d < Math.min(N, dm.length); d++)
+          if (Number.isFinite(dm[d]) && dm[d] > pk.v) pk = { v: dm[d], area: a, d }
+      })
+      pkPrev = Math.max(
+        0,
+        ...act.map((a) => {
+          const w = finite(live.areas[a.key].dMax.slice(N, N * 2))
+          return w.length ? Math.max(...w) : 0
+        }),
+      )
+      demV = act.reduce((sum, a) => sum + (live.areas[a.key].peakMW ?? 0), 0)
+    } else {
+      const curAvgs = act.map((a) => mean(a.dailyAvg.slice(0, N)))
+      const prevAvgs = act.map((a) => mean(a.dailyAvg.slice(N, N * 2)))
+      kAvgV = mean(curAvgs)
+      kAvgP = mean(prevAvgs)
+      act.forEach((a) => {
+        for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d }
+      })
+      pkPrev = Math.max(...act.map((a) => Math.max(...a.dailyMax.slice(N, N * 2))))
+      demV = act.reduce((sum, a) => sum + a.peak, 0)
+    }
+    const kAvgC = makeChip(kAvgV - kAvgP, kAvgP ? ((kAvgV - kAvgP) / kAvgP) * 100 : 0)
+    const kPeakC = makeChip(pk.v - pkPrev, pkPrev ? ((pk.v - pkPrev) / pkPrev) * 100 : 0)
     const kDemC = makeChip((demV * 0.018) / 1000, 1.8)
     kDemC.txt = '▲ +1.8% vs prior period'
 
@@ -220,7 +260,8 @@ export function MarketDataScreen() {
       arr.map((val, i) => X(i, arr.length).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
 
     const sections = selAreas.map((a) => {
-      const w = win(a)
+      const la = useLive ? live.areas[a.key] : null
+      const w = la ? windowLive(la, gran, range) : winLabeled(a)
       const n = w.avg.length
       const lo = Math.min(...w.min) * 0.92
       const hi = Math.max(...w.max) * 1.05
@@ -261,7 +302,13 @@ export function MarketDataScreen() {
         key: a.key,
         title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
         sub: '',
-        meta: 'latest slot ¥' + a.intraday[29].toFixed(2) + ' · ' + range + ' · ' + gran,
+        meta:
+          'latest ¥' +
+          (la && la.latest != null ? la.latest.toFixed(2) : a.intraday[29].toFixed(2)) +
+          ' · ' +
+          range +
+          ' · ' +
+          gran,
         open,
         closed: !open,
         mix1,
@@ -277,9 +324,9 @@ export function MarketDataScreen() {
         vAvg: mean(w.avg).toFixed(1),
         vMin: Math.min(...w.min).toFixed(1),
         rangeLabel: range,
-        d0: dateLabel(w.days[0]),
-        d1: dateLabel(w.days[Math.floor((n - 1) / 2)]),
-        d2: dateLabel(w.days[n - 1]),
+        d0: w.labels[0],
+        d1: w.labels[1],
+        d2: w.labels[2],
       }
     })
 
@@ -538,7 +585,7 @@ export function MarketDataScreen() {
       balD1S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
       balD2S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
     }
-  }, [view, range, gran, sel, closed, drRange, drOn, L, dark])
+  }, [view, range, gran, sel, closed, drRange, drOn, L, dark, live])
 
   const isDarkB = dark
   const isLightB = !dark

@@ -224,6 +224,21 @@ def pull_hf():
 
 
 @app.command()
+def export_web(out: str = "web/public/data/web"):
+    """Export static JSON snapshots for the web frontend (served at /data/web/**)."""
+    from repower.dashboard.export_web import export_web as run_export
+    manifest = run_export(out)
+    ds = manifest["datasets"]
+    files = sum(d.get("files", 0) for d in ds.values())
+    kib = sum(d.get("bytes", 0) for d in ds.values()) // 1024
+    typer.echo(
+        f"Exported web snapshots -> {out}  (anchor {manifest['anchor']}, "
+        f"{files} files, {kib} KiB across {sorted(ds)})"
+    )
+    typer.echo(f"Sources: {manifest['sources']}")
+
+
+@app.command()
 def init_db_cmd():
     """Initialize the database (create tables)."""
     from repower.db import init_db
