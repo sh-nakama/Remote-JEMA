@@ -16,6 +16,7 @@ import {
 import {
   useWholesaleLive,
   windowLive,
+  windowSupply,
   useDriversLive,
   useBalancingLive,
   BAL_CODES,
@@ -281,31 +282,63 @@ export function MarketDataScreen() {
         ' ' +
         w.min.map((_val, i) => X(n - 1 - i, n).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
 
-      // generation mix (48 slots)
-      const P = a.peak
-      const dem = Array.from({ length: 48 }, (_, i) => {
-        const t = i / 2
-        return P * (0.6 + 0.15 * G(t, 9.5, 6) + 0.24 * G(t, 18.5, 5) + 0.015 * Math.sin(i * 0.9 + a.ph))
-      })
-      const solar = Array.from({ length: 48 }, (_, i) => {
-        const t = i / 2
-        return P * 0.3 * (a.solarF || 1) * G(t, 12.5, 5.5)
-      })
-      const base = Array.from({ length: 48 }, (_, i) => P * (0.33 + 0.008 * Math.sin(i * 0.5 + a.ph)))
-      const c1 = base
-      const c3 = dem
-      const c2 = dem.map((val, i) => Math.max(base[i], val - solar[i]))
-      const ymax = P * 1.12
-      const my = (val: number) => 152 - (val / ymax) * 140
-      const fwd = (arr: number[]) => pts(arr, my)
-      const rev = (arr: number[]) => arr.map((_val, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ')
-      const mix1 = fwd(c1) + ' 472,152 8,152'
-      const mix2 = fwd(c2) + ' ' + rev(c1)
-      const mix3 = fwd(c3) + ' ' + rev(c2)
-      const demandLine = pts(
-        dem.map((val) => val * 1.018),
-        my,
-      )
+      // generation mix — real windowed supply when live (gran-responsive), else synthetic "today"
+      const supW = la ? windowSupply(la, gran, range) : null
+      let mix1: string
+      let mix2: string
+      let mix3: string
+      let mix4: string
+      let demandLine: string
+      let peakMWStr: string
+      let mixMeta: string
+      if (supW) {
+        const c1 = supW.baseload
+        const c2 = c1.map((b, i) => b + supW.thermal[i])
+        const c3 = c2.map((val, i) => val + supW.solar[i])
+        const c4 = c3.map((val, i) => val + supW.other[i])
+        const nS = Math.max(2, c1.length)
+        const Xs = (i: number) => 8 + (i / (nS - 1)) * 464
+        const my = (val: number) => 152 - (val / supW.ymax) * 140
+        const fwd = (arr: number[]) => arr.map((v, i) => Xs(i).toFixed(1) + ',' + my(v).toFixed(1)).join(' ')
+        const rev = (arr: number[]) =>
+          arr.map((_v, i) => Xs(nS - 1 - i).toFixed(1) + ',' + my(arr[nS - 1 - i]).toFixed(1)).join(' ')
+        mix1 = fwd(c1) + ' ' + Xs(nS - 1).toFixed(1) + ',152 ' + Xs(0).toFixed(1) + ',152'
+        mix2 = fwd(c2) + ' ' + rev(c1)
+        mix3 = fwd(c3) + ' ' + rev(c2)
+        mix4 = fwd(c4) + ' ' + rev(c3)
+        demandLine = fwd(supW.demand)
+        peakMWStr = Math.round(Math.max(1, ...supW.demand)).toLocaleString('en-US')
+        mixMeta = range + ' · ' + gran + ' · grouped MW'
+      } else {
+        const P = a.peak
+        const dem = Array.from({ length: 48 }, (_, i) => {
+          const t = i / 2
+          return P * (0.6 + 0.15 * G(t, 9.5, 6) + 0.24 * G(t, 18.5, 5) + 0.015 * Math.sin(i * 0.9 + a.ph))
+        })
+        const solar = Array.from({ length: 48 }, (_, i) => {
+          const t = i / 2
+          return P * 0.3 * (a.solarF || 1) * G(t, 12.5, 5.5)
+        })
+        const base = Array.from({ length: 48 }, (_, i) => P * (0.33 + 0.008 * Math.sin(i * 0.5 + a.ph)))
+        const c1 = base
+        const c3 = dem
+        const c2 = dem.map((val, i) => Math.max(base[i], val - solar[i]))
+        const ymax = P * 1.12
+        const my = (val: number) => 152 - (val / ymax) * 140
+        const fwd = (arr: number[]) => pts(arr, my)
+        const rev = (arr: number[]) =>
+          arr.map((_val, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ')
+        mix1 = fwd(c1) + ' 472,152 8,152'
+        mix2 = fwd(c2) + ' ' + rev(c1)
+        mix3 = fwd(c3) + ' ' + rev(c2)
+        mix4 = ''
+        demandLine = pts(
+          dem.map((val) => val * 1.018),
+          my,
+        )
+        peakMWStr = P.toLocaleString('en-US')
+        mixMeta = 'today · 14 fuels grouped · MW'
+      }
 
       const open = !closed[a.key]
       return {
@@ -324,8 +357,10 @@ export function MarketDataScreen() {
         mix1,
         mix2,
         mix3,
+        mix4,
+        mixMeta,
         demand: demandLine,
-        peakMW: P.toLocaleString('en-US'),
+        peakMW: peakMWStr,
         band,
         pMax: pts(w.max, py),
         pAvg: pts(w.avg, py),
@@ -875,18 +910,20 @@ export function MarketDataScreen() {
                         <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px;box-shadow:var(--sh1)')}>
                           <div style={s('display:flex;justify-content:space-between;align-items:baseline')}>
                             <span style={s('font-size:14px;font-weight:600')}>Generation mix <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>電源構成</span></span>
-                            <span style={s('font-size:11px;color:var(--mut)')}>today · 14 fuels grouped · MW</span>
+                            <span style={s('font-size:11px;color:var(--mut)')}>{sec.mixMeta}</span>
                           </div>
                           <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
                             <polygon points={sec.mix1} fill="#2A9D8F" fillOpacity="0.78"></polygon>
                             <polygon points={sec.mix2} fill="#4A6FA5" fillOpacity="0.72"></polygon>
                             <polygon points={sec.mix3} fill="#E9C46A" fillOpacity="0.82"></polygon>
+                            {sec.mix4 ? <polygon points={sec.mix4} fill="#9AA5B5" fillOpacity="0.6"></polygon> : null}
                             <g style={s('color:var(--tx)')}><polyline points={sec.demand} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline></g>
                           </svg>
                           <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
-                            <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar 太陽光</span>
+                            <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar/Wind 太陽光・風力</span>
+                            {sec.mix4 ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Demand 需要</span>
                             <span style={s("margin-left:auto;font-feature-settings:'tnum' 1;color:var(--mut)")}>peak {sec.peakMW} MW</span>
                           </div>

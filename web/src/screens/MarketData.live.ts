@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react'
 import { getSnapshot } from '../lib/data'
-import type { WholesaleSnapshot, WholesaleStats } from '../lib/types'
+import type { SupplyRecord, WholesaleSnapshot, WholesaleStats } from '../lib/types'
 
 export type Gran = 'Native' | 'Daily' | 'Weekly' | 'Monthly'
 export type Range = '7D' | '30D' | '60D' | '1Y'
@@ -24,6 +24,11 @@ export interface LiveArea {
   peakMW: number | null // stats.peak_demand_mw
   avgPrice: number | null // stats.avg_price
   latest: number | null // latest period price_avg
+  // grouped generation mix at the requested gran, newest-first (MW)
+  supBase: number[] // nuclear + hydro + geothermal + biomass
+  supTherm: number[] // coal + lng + oil + thermal_other
+  supSolar: number[] // solar + wind
+  supDemand: number[] // area demand
 }
 
 export interface LiveState {
@@ -65,6 +70,11 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
         ])
         const price = snap.price
         const dsrc = (daily ?? snap).price
+        const sup = snap.supply
+        const g = (r: SupplyRecord, k: keyof SupplyRecord): number => {
+          const v = r[k]
+          return typeof v === 'number' && Number.isFinite(v) ? v : 0
+        }
         const la: LiveArea = {
           key,
           avg: rev(price.map((p) => nn(p.price_avg))),
@@ -76,6 +86,10 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
           peakMW: stats?.peak_demand_mw ?? null,
           avgPrice: stats?.avg_price ?? null,
           latest: price.length ? nn(price[price.length - 1].price_avg) : null,
+          supBase: rev(sup.map((r) => g(r, 'nuclear') + g(r, 'hydro') + g(r, 'geothermal') + g(r, 'biomass'))),
+          supTherm: rev(sup.map((r) => g(r, 'coal') + g(r, 'lng') + g(r, 'oil') + g(r, 'thermal_other'))),
+          supSolar: rev(sup.map((r) => g(r, 'solar_actual') + g(r, 'wind_actual'))),
+          supDemand: rev(sup.map((r) => g(r, 'area_demand_mw'))),
         }
         return [key, la] as const
       }),
@@ -335,4 +349,35 @@ export function windowLive(la: LiveArea, gran: Gran, range: Range): Windowed {
     n ? fmtDate(dts[n - 1]) : '',
   ]
   return { avg, max, min, labels }
+}
+
+export interface SupplyWindow {
+  baseload: number[] // oldest -> newest
+  thermal: number[]
+  solar: number[]
+  other: number[] // residual to demand (net imports + storage), >= 0
+  demand: number[]
+  ymax: number
+}
+
+/** Window the grouped generation mix for (gran, range), oldest→newest, on the same
+ * budget as the price line. `other` fills the gap up to demand so the 4 bands stack
+ * to area demand (imports/storage); 0 when domestic generation already exceeds it. */
+export function windowSupply(la: LiveArea, gran: Gran, range: Range): SupplyWindow {
+  const len = la.supDemand.length
+  const want = Math.min(PERIODS[gran][range], len)
+  const step = Math.max(1, Math.ceil(want / MAX_POINTS))
+  const order: number[] = []
+  for (let i = want - 1; i >= 0; i -= step) order.push(i)
+  const pick = (arr: number[]) => order.map((i) => (Number.isFinite(arr[i]) ? arr[i] : 0))
+  const baseload = pick(la.supBase)
+  const thermal = pick(la.supTherm)
+  const solar = pick(la.supSolar)
+  const demand = pick(la.supDemand)
+  const other = demand.map((d, i) => Math.max(0, d - baseload[i] - thermal[i] - solar[i]))
+  let ymax = 1
+  for (let i = 0; i < demand.length; i++) {
+    ymax = Math.max(ymax, demand[i], baseload[i] + thermal[i] + solar[i] + other[i])
+  }
+  return { baseload, thermal, solar, other, demand, ymax: ymax * 1.08 }
 }
