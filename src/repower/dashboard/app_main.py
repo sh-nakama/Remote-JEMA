@@ -795,6 +795,7 @@ def _policy_meetings(key: str, _cache_buster: int) -> list[dict]:
                 "has_torimatome": bool(r.has_torimatome),
                 "briefing_md": r.briefing_md,
                 "digest_en_json": r.digest_en_json,
+                "gen_requested": bool(r.gen_requested),
             }
             for r in rows
         ]
@@ -811,10 +812,261 @@ def _policy_digest_answer(blob: str | None) -> str | None:
         return None
 
 
+# ── Policy management + generation helpers ───────────────────────────────────
+
+_SOURCES = ["METI", "OCCTO", "EGC"]
+
+
+def _policy_reset_and_rerun() -> None:
+    """Clear caches (so registry/summary edits show) and rerun.
+
+    Also drops the data-editor's widget state so it re-syncs to the fresh DB rows
+    (its edit-deltas are keyed by row position, which changes when priority edits
+    re-sort the table).
+    """
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    st.session_state["cache_buster"] = st.session_state.get("cache_buster", 0) + 1
+    st.session_state.pop("policy_committee_editor", None)
+    st.rerun()
+
+
+def _run_generation(key: str, lang: str, meeting_num: int | None = None) -> None:
+    """Summarise a committee's latest (or a given) meeting — direct if auth is
+    fresh, otherwise queue it (the "both" flow).
+
+    Steps: auth-free detect (so the newest meeting is on the worklist) → pick the
+    target meeting → flag it requested (so it's queued and sorts first) → if
+    NotebookLM auth is fresh, run the pipeline in-process; else leave it queued.
+    """
+    from repower.config import DB_PATH
+    from repower.policy import store
+
+    db = str(DB_PATH)
+
+    # 1) Prime the worklist (auth-free). Best-effort: a 304/offline is fine if the
+    # meeting is already recorded.
+    try:
+        with st.spinner(T("policy_detecting", lang)):
+            from repower.policy.detect import detect
+            detect([key], db_path=db)
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning("policy detect from UI failed: %s", exc)
+
+    # 2) Choose the target meeting.
+    pend = store.pending_meetings(key, db_path=db)
+    if meeting_num is None:
+        if not pend:
+            st.info(T("policy_gen_none", lang))
+            return
+        meeting_num = pend[0]["meeting_num"]  # newest pending for this committee
+    store.request_generation(key, meeting_num, db_path=db)
+
+    # 3) Auth gate → direct vs queue.
+    try:
+        from repower.policy.notebook import auth_ok
+        ok = auth_ok()
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        st.warning(T("policy_auth_stale", lang))
+        st.info(T("policy_gen_queued", lang))
+        _policy_reset_and_rerun()
+        return
+
+    # 4) Run in-process.
+    try:
+        with st.spinner(T("policy_generating", lang)):
+            from repower.policy.pipeline import run as pipeline_run
+            summary = pipeline_run([key], max_per_run=1, db_path=db)
+    except Exception as exc:  # noqa: BLE001
+        st.error(T("policy_gen_error", lang, err=str(exc)))
+        return
+    if summary.get("rate_limited"):
+        st.warning(T("policy_gen_rate_limited", lang))
+    else:
+        st.success(T("policy_gen_done", lang, n=summary.get("done", 0)))
+    _policy_reset_and_rerun()
+
+
+def _render_committee_editor(rows: list[dict], lang: str, db: str) -> None:
+    """Editable table of tracked committees: toggle tracking + set priority."""
+    import pandas as _pd
+    from repower.policy import store
+
+    st.markdown(f"**{T('policy_tracked_editor', lang)}**")
+    df = _pd.DataFrame([
+        {
+            "key": r["committee_key"],
+            "enabled": r["enabled"],
+            "priority": r["priority"],
+            "name_en": r["name_en"],
+            "name_ja": r["name_ja"],
+            "source": r["source"],
+            "latest": r["latest_meeting"],
+        }
+        for r in rows
+    ])
+    edited = st.data_editor(
+        df,
+        key="policy_committee_editor",
+        width="stretch",
+        hide_index=True,
+        column_order=["enabled", "priority", "name_en", "name_ja", "source", "latest", "key"],
+        column_config={
+            "enabled": st.column_config.CheckboxColumn(T("policy_col_enabled", lang)),
+            "priority": st.column_config.NumberColumn(
+                T("policy_col_priority", lang), min_value=1, max_value=999, step=1),
+            "name_en": st.column_config.TextColumn(T("policy_col_name_en", lang), disabled=True),
+            "name_ja": st.column_config.TextColumn(T("policy_col_name_ja", lang), disabled=True),
+            "source": st.column_config.TextColumn(T("policy_col_source", lang), disabled=True),
+            "latest": st.column_config.NumberColumn(T("policy_col_latest_num", lang), disabled=True),
+            "key": st.column_config.TextColumn(T("policy_col_key", lang), disabled=True),
+        },
+    )
+    if st.button(T("policy_apply_changes", lang), key="policy_apply_committee_edits"):
+        orig = {r["committee_key"]: r for r in rows}
+        n = 0
+        for _, r in edited.iterrows():
+            o = orig.get(r["key"])
+            if o is None:
+                continue
+            if bool(r["enabled"]) != bool(o["enabled"]):
+                store.set_committee_enabled(r["key"], bool(r["enabled"]), db_path=db)
+                n += 1
+            new_prio = int(r["priority"]) if _pd.notna(r["priority"]) else o["priority"]
+            if new_prio != o["priority"]:
+                store.set_committee_priority(r["key"], new_prio, db_path=db)
+                n += 1
+        if n:
+            st.success(T("policy_changes_saved", lang, n=n))
+            _policy_reset_and_rerun()
+        else:
+            st.info(T("policy_no_changes", lang))
+
+    # Removal is only offered for user-added committees (code committees are
+    # disabled, never deleted, so the registry can't drift from the config).
+    user_rows = [r for r in rows if r["user_added"]]
+    if user_rows:
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            rk = st.selectbox(
+                T("policy_remove", lang),
+                options=[r["committee_key"] for r in user_rows],
+                format_func=lambda k: next(
+                    (f"{r['name_ja']} ({k})" for r in user_rows if r["committee_key"] == k), k),
+                key="policy_remove_select",
+                label_visibility="collapsed",
+            )
+        with c2:
+            if st.button(T("policy_remove", lang), key="policy_remove_btn"):
+                nm = next((r["name_ja"] for r in user_rows if r["committee_key"] == rk), rk)
+                store.delete_committee(rk, db_path=db)
+                st.success(T("policy_removed", lang, name=nm))
+                _policy_reset_and_rerun()
+
+
+def _render_committee_discovery(lang: str, db: str) -> None:
+    """Search the web for new committees + a paste-a-URL add form."""
+    from repower.policy import discover, store
+
+    st.markdown("---")
+    st.markdown(f"**{T('policy_discover', lang)}**")
+    q = st.text_input(T("policy_search_label", lang), key="policy_discover_query")
+    if st.button(T("policy_search_btn", lang), key="policy_discover_btn"):
+        try:
+            with st.spinner(T("policy_searching", lang)):
+                cands = discover.discover_committees(q, db_path=db)
+            st.session_state["policy_discover_results"] = [c.__dict__ for c in cands]
+        except Exception as exc:  # noqa: BLE001
+            st.error(str(exc))
+            st.session_state["policy_discover_results"] = []
+
+    results = st.session_state.get("policy_discover_results")
+    if results is not None:
+        if not results:
+            st.caption(T("policy_no_candidates", lang))
+        for i, c in enumerate(results):
+            col1, col2 = st.columns([5, 1])
+            with col1:
+                st.markdown(f"**{c['name_ja']}**  ·  `{c['source']}`  \n[{c['url']}]({c['url']})")
+            with col2:
+                if c["already_tracked"]:
+                    st.caption(T("policy_already_tracked", lang))
+                elif st.button(T("policy_track_btn", lang), key=f"policy_track_{i}"):
+                    store.add_committee(
+                        key=c["key"], name_ja=c["name_ja"], name_en=c["name_en"] or c["key"],
+                        url=c["url"], source=c["source"], db_path=db,
+                    )
+                    st.success(T("policy_added", lang, name=c["name_ja"]))
+                    st.session_state.pop("policy_discover_results", None)
+                    _policy_reset_and_rerun()
+
+    # ── Add-by-URL ──
+    st.markdown("---")
+    st.markdown(f"**{T('policy_add_by_url', lang)}**")
+    url = st.text_input(T("policy_url_label", lang), key="policy_add_url")
+    if st.button(T("policy_probe_btn", lang), key="policy_probe_btn"):
+        try:
+            with st.spinner(T("policy_checking_url", lang)):
+                cand = discover.probe_url(url, db_path=db, validate=True)
+            st.session_state["policy_probe_cand"] = cand.__dict__ if cand else None
+        except Exception as exc:  # noqa: BLE001
+            st.session_state["policy_probe_cand"] = None
+            st.error(str(exc))
+
+    if "policy_probe_cand" in st.session_state:
+        cand = st.session_state["policy_probe_cand"]
+        if cand is None:
+            st.warning(T("policy_add_failed", lang))
+        else:
+            if cand.get("note"):
+                st.caption(cand["note"])
+            fk = st.text_input(T("policy_field_key", lang), value=cand["key"], key="policy_form_key")
+            fja = st.text_input(T("policy_col_name_ja", lang), value=cand["name_ja"], key="policy_form_ja")
+            fen = st.text_input(T("policy_field_name_en", lang), value=cand["name_en"], key="policy_form_en")
+            src = st.selectbox(
+                T("policy_field_source", lang), _SOURCES,
+                index=_SOURCES.index(cand["source"]) if cand["source"] in _SOURCES else 0,
+                key="policy_form_src")
+            prio = st.number_input(
+                T("policy_field_priority", lang), min_value=1, max_value=999, value=100, step=1,
+                key="policy_form_prio")
+            if st.button(T("policy_add_btn", lang), key="policy_form_add"):
+                store.add_committee(
+                    key=fk, name_ja=fja or fk, name_en=fen or fk, url=cand["url"],
+                    source=src, priority=int(prio), db_path=db,
+                )
+                st.success(T("policy_added", lang, name=fja or fk))
+                for k in ("policy_probe_cand", "policy_form_key", "policy_form_ja",
+                          "policy_form_en", "policy_form_src", "policy_form_prio", "policy_add_url"):
+                    st.session_state.pop(k, None)
+                _policy_reset_and_rerun()
+
+
+def _render_committee_manager(cfg: dict) -> None:
+    """The 'Manage tracked committees' expander: edit registry + discover/add."""
+    lang = cfg.get("lang", DEFAULT_LANG)
+    from repower.config import DB_PATH
+    from repower.policy import store
+
+    db = str(DB_PATH)
+    with st.expander(T("policy_manage", lang), expanded=False):
+        st.caption(T("policy_manage_help", lang))
+        rows = store.list_committees(db_path=db)
+        if rows:
+            _render_committee_editor(rows, lang, db)
+        _render_committee_discovery(lang, db)
+
+
 def render_policy(cfg: dict) -> None:
     """Policy observer view: per-committee running document + per-meeting briefings."""
     lang = cfg.get("lang", DEFAULT_LANG)
     st.header(T("policy_header", lang))
+
+    # Committee management (search / enable-disable / add) — available even before
+    # anything has been summarised.
+    _render_committee_manager(cfg)
 
     committees = _policy_committees(cfg["cache_buster"])
     if not committees:
@@ -840,6 +1092,15 @@ def render_policy(cfg: dict) -> None:
     row = next(c for c in committees if c["committee_key"] == key)
     latest = f"第{row['latest_meeting']}回" if row["latest_meeting"] else "—"
     st.caption(f"{row['source']} · {T('policy_latest', lang)}: {latest} · {row['url']}")
+
+    # Generate the latest meeting's summary on command (direct if auth is fresh,
+    # otherwise queued — see _run_generation).
+    gc1, gc2 = st.columns([1, 3])
+    with gc1:
+        if st.button(T("policy_generate_latest", lang), key=f"policy_gen_latest_{key}"):
+            _run_generation(key, lang)
+    with gc2:
+        st.caption(T("policy_gen_local_note", lang))
 
     # Download the full running document (regenerated from the DB).
     try:
@@ -875,6 +1136,8 @@ def render_policy(cfg: dict) -> None:
             title += " 🏁"
         if m["state"] != "done":
             title += f"  ·  {m['state']}"
+        if m.get("gen_requested"):
+            title += f"  ·  ⏳ {T('policy_gen_requested', lang)}"
         with st.expander(title, expanded=False):
             en = _policy_digest_answer(m["digest_en_json"])
             if en:
@@ -884,6 +1147,11 @@ def render_policy(cfg: dict) -> None:
                 st.markdown(m["briefing_md"])
             elif not en:
                 st.caption(f"({m['state']}; not yet summarised)")
+            # Summarise (or re-summarise) this specific meeting on command.
+            if m["state"] != "done":
+                if st.button(T("policy_generate_meeting", lang),
+                             key=f"policy_gen_meeting_{key}_{m['meeting_num']}"):
+                    _run_generation(key, lang, meeting_num=m["meeting_num"])
 
 
 # ── Main entry ───────────────────────────────────────────────────────────────

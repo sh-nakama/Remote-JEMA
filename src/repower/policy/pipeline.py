@@ -27,9 +27,10 @@ import httpx
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
 from repower.policy import notebook as nb
-from repower.policy.committees import Committee, committee_by_key
+from repower.policy.committees import Committee
 from repower.policy.scraper import _UA, list_materials
 from repower.policy.store import (
+    clear_generation_request,
     get_committee,
     mark_synthesized,
     meeting_materials,
@@ -37,6 +38,7 @@ from repower.policy.store import (
     pending_meetings,
     record_meeting,
     regenerate_running_doc,
+    resolve_committee,
     update_committee,
     update_meeting,
 )
@@ -349,7 +351,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     rate_limited = False
     touched_committees: set[str] = set()
     for item in work:
-        committee = committee_by_key(item["committee_key"])
+        committee = resolve_committee(item["committee_key"], db_path=db_path)
         try:
             state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
         except nb.NotebookLMRateLimitError:
@@ -357,6 +359,9 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             rate_limited = True
             break
         touched_committees.add(item["committee_key"])
+        # Clear any queued dashboard request once the meeting has been processed.
+        if state in ("done", "error"):
+            clear_generation_request(item["committee_key"], item["meeting_num"], db_path=db_path)
         if state == "done":
             done += 1
         elif state == "error":
@@ -367,7 +372,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     if not rate_limited:
         for key in sorted(touched_committees):
             try:
-                if synthesize_committee(committee_by_key(key), db_path=db_path):
+                if synthesize_committee(resolve_committee(key, db_path=db_path), db_path=db_path):
                     synthesized += 1
             except nb.NotebookLMRateLimitError:
                 logger.warning("NotebookLM rate limit during synthesis of %s — deferring", key)
