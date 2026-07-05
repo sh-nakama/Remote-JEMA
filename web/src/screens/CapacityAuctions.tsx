@@ -4,6 +4,7 @@ import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
 import { maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
+import { downloadCsv } from '../lib/download'
 
 type View = 'main' | 'ltda'
 
@@ -22,7 +23,20 @@ export function CapacityAuctionsScreen() {
   // Placeholder / toast handlers
   const tRefresh = () => toast('Checked for new publications — none since 2026-06-27 · 新規公表なし')
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
-  const tExport = () => toast('CSV export of auction results queued · 約定結果をCSVで出力します')
+  const tExport = () => {
+    const rows = maSrc.map((m) => ({
+      'Delivery FY': m.fy,
+      'Auction held': m.held,
+      'National (¥/kW)': m.natl,
+      'Hokkaido (¥/kW)': m.hok,
+      'Kyushu (¥/kW)': m.kyu,
+      Procured: m.proc,
+      'Achievement %': m.ach,
+      Source: m.source ?? '',
+    }))
+    downloadCsv('jema-capacity-main-auction.csv', rows)
+    toast('Downloaded main-auction results (CSV) · 約定結果をCSVで保存しました')
+  }
   const tRow = () => toast('Full OCCTO publication (per-project detail) — not in this prototype · 公表資料の詳細は対象外')
 
   // Segmented-control button style

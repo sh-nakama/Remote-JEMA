@@ -11,6 +11,7 @@ import {
   type Upcoming,
 } from './PolicyDeepDive.data'
 import { usePolicyLive } from './PolicyDeepDive.live'
+import { downloadIcs } from '../lib/download'
 
 type AnyMeeting = Meeting | Upcoming
 
@@ -73,7 +74,6 @@ export function PolicyDeepDiveScreen() {
   const tRetry = () => toast('Re-queued with high-accuracy OCR — will run on next catch-up · 高精度OCRで再実行キューに追加')
   const tExpand = () => toast('Nav rail auto-collapses on this screen to fit three panes · 3ペイン表示のためナビは自動折りたたみ')
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
-  const tIcsOne = () => toast('.ics export for this meeting — not wired in this prototype · この会合のICS出力は対象外')
   const tNotifyMe = () => toast('Alert armed — you will be notified when the digest is ready · 要約完了時に通知します')
 
   // ---- computed (mirrors renderVals) ----
@@ -583,7 +583,7 @@ export function PolicyDeepDiveScreen() {
                       <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" hover="background:var(--acT)" onClick={tNotifyMe}>
                         <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />Notify me when summarised · 要約時に通知
                       </Hoverable>
-                      <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--bd2);color:var(--tx2);border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" hover="border-color:var(--ac);color:var(--acT)" onClick={tIcsOne}>
+                      <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--bd2);color:var(--tx2);border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" hover="border-color:var(--ac);color:var(--acT)" onClick={() => { const n = downloadIcs(`jema-${d.key}.ics`, [{ uid: d.key, date: d.date, summary: dTitle || d.key, description: ((L === 'ja' ? dM.ja : dM.en) || 'METI') + (dM.org ? ' · ' + dM.org : '') }]); toast(n ? (L === 'ja' ? 'カレンダー(.ics)を保存しました' : 'Saved calendar file (.ics)') : (L === 'ja' ? '日付が未定のため出力できません' : 'No date available to export')) }}>
                         <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`} />Add to calendar · ICS
                       </Hoverable>
                     </div>

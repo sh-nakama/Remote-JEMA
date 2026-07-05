@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
+import { downloadCsv } from '../lib/download'
 import {
   areas,
   areaDefs,
@@ -142,7 +143,32 @@ export function MarketDataScreen() {
   const granD = () => setGran('Daily')
   const granW = () => setGran('Weekly')
   const granM = () => setGran('Monthly')
-  const tExport = () => toast('CSV export of current selection queued · 現在の選択をCSVで出力します')
+  const tExport = () => {
+    if (!live.ready) {
+      toast('Data still loading — try again in a moment · データ読込中です')
+      return
+    }
+    const rows: Record<string, unknown>[] = []
+    for (const key of selectedKeys) {
+      const a = live.areas[key]
+      if (!a) continue
+      const label = areas.find((x) => x.key === key)?.en || key
+      for (let i = 0; i < a.dt.length; i++) {
+        rows.push({
+          datetime: a.dt[i],
+          area: label,
+          avg_price_yen_kwh: a.dAvg[i],
+          max_price_yen_kwh: a.dMax[i],
+        })
+      }
+    }
+    if (!rows.length) {
+      toast('Nothing to export for the current selection · 対象データがありません')
+      return
+    }
+    downloadCsv(`jema-wholesale-${gran}.csv`, rows)
+    toast(`Downloaded ${rows.length.toLocaleString('en-US')} rows (CSV) · CSVで保存しました`)
+  }
   const tCompare = () => toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外')
   const tLine = () => toast('Line drill-down (hourly flows & spread history) — not in this prototype · 連系線ドリルダウンは対象外')
   const tSystem = () => toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中')

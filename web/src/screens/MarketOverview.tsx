@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
+import { downloadIcs } from '../lib/download'
 import {
   today as fxToday,
   yday as fxYday,
@@ -126,7 +127,18 @@ export function MarketOverviewScreen() {
   const tPolicy = () => setScreen('policy')
   const tCapacity = () => setScreen('capacity')
   const tRefresh = () => toast('Data refreshed · データを更新しました')
-  const tIcs = () => toast('.ics export of upcoming meetings — not wired in this prototype · ICS出力は本プロトタイプ対象外')
+  const tIcs = () => {
+    const n = downloadIcs(
+      'jema-upcoming-meetings.ics',
+      upcomingMeetings.map((m) => ({
+        uid: `${m.tier}-${m.no}-${m.m}-${m.day}`,
+        date: new Date(2026, m.m - 1, m.day),
+        summary: `${L === 'ja' ? m.ja : m.en} · No.${m.no}`,
+        description: (L === 'ja' ? m.sJa : m.sEn) || '',
+      })),
+    )
+    toast(L === 'ja' ? `${n}件をカレンダー(.ics)に保存しました` : `Saved ${n} meeting(s) to calendar (.ics)`)
+  }
   const toggleGhost = () => setGhostOn((g) => !g)
   const toggleWhy = () => setShowWhy((w) => !w)
   const toggleNotif = () => setShowNotif((n) => !n)
