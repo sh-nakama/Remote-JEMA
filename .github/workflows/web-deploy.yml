@@ -1,0 +1,90 @@
+name: Deploy Web (JEMA)
+
+# Builds the JEMA web frontend with live snapshots and publishes it to GitHub
+# Pages. The snapshots are generated at build time by `repower export-web` after
+# pulling the latest DB from the Hugging Face dataset, so the deployed site is a
+# self-contained static bundle (app + data/web/**) with no runtime server.
+#
+# Prerequisites (one-time):
+#   • Repo Settings → Pages → Build and deployment → Source = "GitHub Actions".
+#   • Repo secrets HF_TOKEN + HF_DATASET_REPO (same as the daily workflow) so the
+#     build can pull the DB — required, since the wholesale/balancing/policy
+#     exporters read it (only the capacity dataset is curated in-repo).
+#
+# Host note: this targets GitHub Pages. A project site is served under /<repo>/,
+# so VITE_BASE defaults to that; set the repo variable VITE_BASE (e.g. "/" for a
+# custom domain, or the Space path for an HF static Space) to retarget.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "src/repower/dashboard/**"
+      - ".github/workflows/web-deploy.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; newer pushes supersede in-flight builds.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      VITE_BASE: ${{ vars.VITE_BASE || format('/{0}/', github.event.repository.name) }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install Python package
+        run: pip install -e .
+
+      - name: Pull latest DB from Hugging Face
+        run: python -m repower.cli pull-hf
+        continue-on-error: true # first run / missing secrets: fall back to curated data
+
+      - name: Export web snapshots
+        run: python -m repower.cli export-web --out web/public/data/web
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm --prefix web ci
+
+      - name: Build web (Vite)
+        run: npm --prefix web run build
+
+      - name: Disable Jekyll processing
+        run: touch web/dist/.nojekyll
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
