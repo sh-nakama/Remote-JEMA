@@ -294,7 +294,10 @@ const PERIODS: Record<Gran, Record<Range, number>> = {
   Weekly: { '7D': 2, '30D': 5, '60D': 9, '1Y': 53 },
   Monthly: { '7D': 1, '30D': 2, '60D': 3, '1Y': 12 },
 }
-const MAX_POINTS = 90
+// Plot budget per price line. High enough that Native (30-min) renders a visibly
+// denser, oscillating line than the aggregated levels instead of aliasing into a
+// coarse daily-looking shape when a wide range is downsampled to a single line.
+const MAX_POINTS = 720
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 function fmtDate(iso: string): string {

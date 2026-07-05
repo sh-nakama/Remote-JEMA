@@ -334,6 +334,7 @@ export function MarketDataScreen() {
         vAvg: mean(w.avg).toFixed(1),
         vMin: Math.min(...w.min).toFixed(1),
         rangeLabel: range,
+        granLabel: gran,
         d0: w.labels[0],
         d1: w.labels[1],
         d2: w.labels[2],
@@ -893,7 +894,7 @@ export function MarketDataScreen() {
                         <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px;box-shadow:var(--sh1)')}>
                           <div style={s('display:flex;justify-content:space-between;align-items:baseline')}>
                             <span style={s('font-size:14px;font-weight:600')}>Price <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>価格</span></span>
-                            <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · max / avg / min · ¥/kWh</span>
+                            <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · {sec.granLabel} · max / avg / min · ¥/kWh</span>
                           </div>
                           <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
                             <polygon points={sec.band} fill="#00A5CF" fillOpacity="0.10"></polygon>
