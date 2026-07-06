@@ -1,0 +1,2448 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// GENERATED from dc-runtime/src/*.ts — do not edit. Rebuild with `cd dc-runtime && bun run build`.
+"use strict";
+(() => {
+  var __defProp = Object.defineProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+  // src/react.ts
+  function getReact() {
+    const R = window.React;
+    if (!R) throw new Error("dc-runtime: window.React is not available yet");
+    return R;
+  }
+  function getReactDOM() {
+    const RD = window.ReactDOM;
+    if (!RD) throw new Error("dc-runtime: window.ReactDOM is not available yet");
+    return RD;
+  }
+  var h = ((...args) => getReact().createElement(
+    ...args
+  ));
+
+  // src/parse.ts
+  function parseDcDocument(doc) {
+    const dc = doc.querySelector("x-dc");
+    if (!dc) return null;
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template: dc.innerHTML,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDcText(src) {
+    const openMatch = /<x-dc(?:\s[^>]*)?>/.exec(src);
+    if (!openMatch) return null;
+    const close = src.lastIndexOf("</x-dc>");
+    if (close === -1 || close < openMatch.index) return null;
+    const template = src.slice(openMatch.index + openMatch[0].length, close);
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDataProps(raw) {
+    if (!raw) return { props: null, preview: null };
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { props: null, preview: null };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { props: null, preview: null };
+    }
+    const obj = parsed;
+    const preview = obj.$preview && typeof obj.$preview === "object" ? obj.$preview : null;
+    const rest = {};
+    for (const k of Object.keys(obj)) {
+      if (k[0] !== "$") rest[k] = obj[k];
+    }
+    return { props: Object.keys(rest).length ? rest : null, preview };
+  }
+  function dcNameFromPath(pathname) {
+    let p = pathname || "";
+    try {
+      p = decodeURIComponent(p);
+    } catch {
+    }
+    const base = p.split("/").pop() || "Root";
+    return base.replace(/\.dc\.html$/, "").replace(/\.html?$/, "") || "Root";
+  }
+
+  // src/boot.ts
+  var BASE_CSS = `
+    .sc-placeholder{background:color-mix(in srgb,currentColor 8%,transparent);
+      border:1px solid color-mix(in srgb,currentColor 50%,transparent);
+      border-radius:2px;box-sizing:border-box;overflow:hidden}
+    @keyframes sc-shine{0%{background-position:100% 50%}100%{background-position:0% 50%}}
+    html.sc-dc-streaming .sc-placeholder,
+    html.sc-dc-streaming .sc-interp.sc-missing{position:relative;
+      background:color-mix(in srgb,currentColor 5%,transparent);
+      border-color:transparent}
+    html.sc-dc-streaming .sc-placeholder::before,
+    html.sc-dc-streaming .sc-interp.sc-missing::before{content:'';
+      position:absolute;inset:0;pointer-events:none;
+      background:linear-gradient(90deg,rgba(217,119,87,0) 25%,rgba(247,225,211,.95) 37%,rgba(217,119,87,0) 63%);
+      background-size:400% 100%;animation:sc-shine 1.4s ease infinite}
+    html.sc-dc-streaming .sc-placeholder:nth-child(n+9 of .sc-placeholder)::before,
+    html.sc-dc-streaming .sc-interp.sc-missing:nth-child(n+9 of .sc-interp.sc-missing)::before{animation:none;
+      background:color-mix(in srgb,currentColor 8%,transparent)}
+    .sc-placeholder-error{padding:4px 8px;font:11px/1.4 ui-monospace,monospace;
+      color:color-mix(in srgb,currentColor 70%,transparent);word-break:break-word}
+    .sc-interp.sc-missing{display:inline-block;width:2em;height:1em;overflow:hidden;
+      vertical-align:text-bottom;background:rgba(255,255,255,.3);border:1px solid rgba(0,0,0,.5);
+      border-radius:2px;box-sizing:border-box;color:transparent;
+      user-select:none}
+    .sc-interp.sc-unresolved{font-family:ui-monospace,monospace;font-size:.85em;
+      color:color-mix(in srgb,currentColor 50%,transparent);
+      background:color-mix(in srgb,currentColor 10%,transparent);border-radius:3px;
+      padding:0 3px}
+    .sc-host.sc-has-error{position:relative}
+    .sc-logic-error{position:absolute;top:8px;left:8px;z-index:2147483647;max-width:60ch;
+      padding:6px 10px;background:#b00020;color:#fff;font:12px/1.4 ui-monospace,monospace;
+      border-radius:4px;white-space:pre-wrap;pointer-events:none}
+    /* Mirrors PRINT_BASELINE_CSS in apps/web deck-stage-export.ts \u2014 keep both
+       in sync until dc-runtime regains a build step. */
+    @media print {
+      @page { margin: 0.5cm; }
+      figure, table { break-inside: avoid; }
+      #dc-root, #dc-root > .sc-host { height: auto; }
+      *, *::before, *::after {
+        print-color-adjust: exact; -webkit-print-color-adjust: exact;
+        backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+        animation-delay: -99s !important; animation-duration: .001s !important;
+        animation-iteration-count: 1 !important; animation-fill-mode: both !important;
+        animation-play-state: running !important; transition-duration: 0s !important;
+      }
+    }
+  `;
+  var FULL_PAGE_CSS = "html,body{height:100%;margin:0}#dc-root,#dc-root>.sc-host{height:100%}";
+  function rootNameForDocument(doc, loc) {
+    let bootPath = loc.pathname || "";
+    if (!/\.dc\.html?$/i.test(safeDecode(bootPath))) {
+      try {
+        bootPath = new URL(doc.baseURI || "/").pathname;
+      } catch {
+      }
+    }
+    return dcNameFromPath(bootPath);
+  }
+  function safeDecode(s) {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  }
+  function boot(runtime, doc = document) {
+    const parsed = parseDcDocument(doc);
+    if (!parsed) return null;
+    const React = getReact();
+    const rootName = rootNameForDocument(doc, location);
+    runtime.markFetched(rootName);
+    runtime.setRootName(rootName);
+    runtime.adoptParsed(rootName, parsed);
+    fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
+      const raw = t ? parseDcText(t) : null;
+      if (raw?.template) runtime.updateHtml(rootName, raw.template);
+    }).catch(() => {
+    });
+    const dc = doc.querySelector("x-dc");
+    const hostEl = doc.createElement("div");
+    hostEl.id = "dc-root";
+    dc.replaceWith(hostEl);
+    if (!parsed.preview) {
+      const s = doc.createElement("style");
+      s.textContent = FULL_PAGE_CSS;
+      doc.head.appendChild(s);
+    }
+    const Root = runtime.getDC(rootName);
+    const entry = runtime.registry.get(rootName);
+    function StandaloneRoot() {
+      const [, setTick] = React.useState(0);
+      React.useEffect(() => {
+        const sub = () => setTick((n) => n + 1);
+        entry.subs.add(sub);
+        return () => {
+          entry.subs.delete(sub);
+        };
+      }, []);
+      const defaults = React.useMemo(() => {
+        const d = {};
+        for (const k in entry.propsMeta || {}) {
+          const v = entry.propsMeta?.[k]?.default;
+          if (v !== void 0) d[k] = v;
+        }
+        return d;
+      }, [entry.propsMeta]);
+      return h(Root, { ...defaults, ...entry.propOverrides || {} });
+    }
+    const ReactDOM = getReactDOM();
+    if (ReactDOM.createRoot)
+      ReactDOM.createRoot(hostEl).render(h(StandaloneRoot));
+    else ReactDOM.render(h(StandaloneRoot), hostEl);
+    return rootName;
+  }
+
+  // src/expr.ts
+  var IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+  var NUMBER_RE = /^-?\d+(\.\d+)?$/;
+  function resolve(vals, src) {
+    const expr = String(src).trim();
+    if (!expr) return void 0;
+    if (expr[0] === "(" && expr[expr.length - 1] === ")" && parensWrapWhole(expr)) {
+      return resolve(vals, expr.slice(1, -1));
+    }
+    const eq = findTopLevelEquality(expr);
+    if (eq) {
+      const lv = resolve(vals, expr.slice(0, eq.index));
+      const rv = resolve(vals, expr.slice(eq.index + eq.op.length));
+      switch (eq.op) {
+        case "===":
+          return lv === rv;
+        case "!==":
+          return lv !== rv;
+        case "==":
+          return lv == rv;
+        default:
+          return lv != rv;
+      }
+    }
+    if (expr[0] === "!") return !resolve(vals, expr.slice(1));
+    if (expr === "true") return true;
+    if (expr === "false") return false;
+    if (expr === "null") return null;
+    if (expr === "undefined") return void 0;
+    if (NUMBER_RE.test(expr)) return Number(expr);
+    if (expr.length >= 2 && (expr[0] === '"' || expr[0] === "'") && expr[expr.length - 1] === expr[0]) {
+      return expr.slice(1, -1);
+    }
+    return resolvePath(vals, expr);
+  }
+  function parensWrapWhole(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length - 1; i++) {
+      if (expr[i] === "(") depth++;
+      else if (expr[i] === ")") {
+        depth--;
+        if (depth === 0) return false;
+      }
+    }
+    return true;
+  }
+  function findTopLevelEquality(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length; i++) {
+      const c = expr[i];
+      if (c === "[" || c === "(") depth++;
+      else if (c === "]" || c === ")") depth--;
+      else if (depth === 0 && (c === "=" || c === "!") && expr[i + 1] === "=") {
+        if (i > 0 && (expr[i - 1] === "=" || expr[i - 1] === "!")) continue;
+        if (!expr.slice(0, i).trim()) continue;
+        const op = expr[i + 2] === "=" ? c + "==" : c + "=";
+        return { index: i, op };
+      }
+    }
+    return null;
+  }
+  function resolvePath(vals, expr) {
+    const head = expr.match(IDENT_RE);
+    if (!head) return void 0;
+    let cur = vals == null ? void 0 : vals[head[0]];
+    let i = head[0].length;
+    while (i < expr.length) {
+      if (expr[i] === ".") {
+        const m = expr.slice(i + 1).match(IDENT_RE) || expr.slice(i + 1).match(/^\d+/);
+        if (!m) return void 0;
+        cur = cur == null ? void 0 : cur[m[0]];
+        i += 1 + m[0].length;
+      } else if (expr[i] === "[") {
+        let depth = 1;
+        let j = i + 1;
+        while (j < expr.length && depth > 0) {
+          if (expr[j] === "[") depth++;
+          else if (expr[j] === "]") {
+            depth--;
+            if (depth === 0) break;
+          }
+          j++;
+        }
+        if (depth !== 0) return void 0;
+        const key = resolve(vals, expr.slice(i + 1, j));
+        cur = cur == null ? void 0 : cur[key];
+        i = j + 1;
+      } else {
+        return void 0;
+      }
+    }
+    return cur;
+  }
+
+  // src/encode.ts
+  var CAMEL_ATTR = "sc-camel-";
+  var INLINE_TEXT_TAGS = new Set(
+    "a abbr b bdi bdo br cite code del dfn em i ins kbd mark q s samp small span strike strong sub sup u var wbr".split(
+      " "
+    )
+  );
+  var RAW_WRAP = {
+    select: "sc-raw-select",
+    table: "sc-raw-table",
+    tbody: "sc-raw-tbody",
+    thead: "sc-raw-thead",
+    tfoot: "sc-raw-tfoot",
+    tr: "sc-raw-tr",
+    td: "sc-raw-td",
+    th: "sc-raw-th",
+    caption: "sc-raw-caption"
+  };
+  var RAW_UNWRAP = Object.fromEntries(
+    Object.entries(RAW_WRAP).map(([k, v]) => [v, k])
+  );
+  var EVENT_MAP = {
+    onclick: "onClick",
+    onchange: "onChange",
+    oninput: "onInput",
+    onsubmit: "onSubmit",
+    onkeydown: "onKeyDown",
+    onkeyup: "onKeyUp",
+    onkeypress: "onKeyPress",
+    onmousedown: "onMouseDown",
+    onmouseup: "onMouseUp",
+    onmouseenter: "onMouseEnter",
+    onmouseleave: "onMouseLeave",
+    onfocus: "onFocus",
+    onblur: "onBlur",
+    ondoubleclick: "onDoubleClick",
+    oncontextmenu: "onContextMenu"
+  };
+  var ATTRS = `(?:[^>"']|"[^"]*"|'[^']*')*`;
+  var IMPORT_SELF_CLOSE_RE = new RegExp(
+    "<(x-import|dc-import)(" + ATTRS + ")/>",
+    "gi"
+  );
+  var CAMEL_ATTR_RE = /(\s)([a-z]+[A-Z][A-Za-z0-9]*)(\s*=)/g;
+  function encodeCase(html) {
+    html = html.replace(
+      IMPORT_SELF_CLOSE_RE,
+      (_, t, a) => "<" + t + a + "></" + t + ">"
+    );
+    html = html.replace(/<helmet(\s|>)/gi, "<sc-helmet$1");
+    html = html.replace(/<\/helmet\s*>/gi, "</sc-helmet>");
+    html = html.replace(
+      CAMEL_ATTR_RE,
+      (_, sp, name, eq) => sp + CAMEL_ATTR + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + eq
+    );
+    for (const [real, alias] of Object.entries(RAW_WRAP)) {
+      html = html.replace(
+        new RegExp("(</?)" + real + "(?=[\\s>])", "gi"),
+        "$1" + alias
+      );
+    }
+    return html;
+  }
+  function kebabToCamel(s) {
+    return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  }
+  function cssToObj(css) {
+    const o = {};
+    for (const decl of css.split(";")) {
+      const i = decl.indexOf(":");
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      o[prop.startsWith("--") ? prop : kebabToCamel(prop)] = decl.slice(i + 1).trim();
+    }
+    return o;
+  }
+  function compileAttr(raw) {
+    const whole = raw.match(/^\s*\{\{([\s\S]+?)\}\}\s*$/);
+    if (whole) {
+      const path = whole[1];
+      return (vals) => resolve(vals, path);
+    }
+    if (raw.includes("{{")) {
+      const parts = raw.split(/\{\{([\s\S]+?)\}\}/g);
+      return (vals) => parts.map((s, i) => i & 1 ? resolve(vals, s) ?? "" : s).join("");
+    }
+    return () => raw;
+  }
+
+  // src/compile.ts
+  function collectProps(node, kind, host) {
+    const propGetters = [];
+    const pseudoClasses = [];
+    let hintSize = null;
+    for (const { name, value } of [...node.attributes]) {
+      if (name === "sc-name" || name === "data-dc-tpl") continue;
+      let key = name;
+      if (key.startsWith(CAMEL_ATTR))
+        key = kebabToCamel(key.slice(CAMEL_ATTR.length));
+      if (key === "hint-size") {
+        hintSize = value;
+        continue;
+      }
+      if (key.startsWith("style-")) {
+        pseudoClasses.push(host.pseudoClass(key.slice(6), value));
+        continue;
+      }
+      if (kind !== "dom") {
+        if (key.includes("-") && !(kind === "x-import" && (key.startsWith("aria-") || key.startsWith("data-"))))
+          key = kebabToCamel(key);
+      } else {
+        if (key === "class") key = "className";
+        else if (key === "for") key = "htmlFor";
+        else if (key.startsWith("on"))
+          key = EVENT_MAP[key] || "on" + key[2].toUpperCase() + key.slice(3);
+      }
+      propGetters.push([key, compileAttr(value)]);
+    }
+    return { propGetters, pseudoClasses, hintSize };
+  }
+  var HOST_STYLE_PROPS = /* @__PURE__ */ new Set([
+    "position",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "inset",
+    "width",
+    "height",
+    "z-index",
+    "transform"
+  ]);
+  function hostPositionStyle(style) {
+    const all = typeof style === "string" ? cssToObj(style) : style != null && typeof style === "object" ? style : null;
+    if (!all) return void 0;
+    const out = {};
+    for (const [k, v] of Object.entries(all)) {
+      const kebab = k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+      if (HOST_STYLE_PROPS.has(kebab)) out[k] = v;
+    }
+    return Object.keys(out).length ? out : void 0;
+  }
+  function compileTemplate(html, host) {
+    const tpl = document.createElement("template");
+    //! nosemgrep: direct-inner-html-assignment
+    tpl.innerHTML = encodeCase(html);
+    let tplN = 0;
+    (function stamp(node) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        node.setAttribute("data-dc-tpl", String(tplN++));
+      }
+      for (const c of node.childNodes) stamp(c);
+    })(tpl.content);
+    const builders = walkChildren(tpl.content, host);
+    const render = ((vals, ctx) => builders.map((b, i) => b(vals || {}, ctx, i)));
+    render.__annotated = tpl.innerHTML;
+    return render;
+  }
+  function walkChildren(node, host) {
+    return [...node.childNodes].map((c) => walk(c, host)).filter((b) => b != null);
+  }
+  function walk(node, host) {
+    if (node.nodeType === Node.TEXT_NODE) return walkText(node);
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    const el = node;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "sc-for") return walkFor(el, host);
+    if (tag === "sc-if") return walkIf(el, host);
+    if (tag === "x-import") return walkXImport(el, host);
+    if (tag === "sc-helmet") return host.helmet(el);
+    if (tag === "dc-import") return walkComponent(el, host);
+    return walkElement(el, host);
+  }
+  var warnedHoles = /* @__PURE__ */ new Set();
+  function warnUnresolved(ctx, what) {
+    const key = (ctx?.__name || "?") + "\0" + what;
+    if (warnedHoles.has(key)) return;
+    warnedHoles.add(key);
+    console.warn("[dc-runtime] " + (ctx?.__name || "template") + ": " + what);
+  }
+  function walkText(node) {
+    const txt = node.nodeValue ?? "";
+    if (!txt.includes("{{")) {
+      if (!txt.trim() && !txt.includes(" ")) return null;
+      return () => txt;
+    }
+    const parts = txt.split(/\{\{([\s\S]+?)\}\}/g);
+    return (vals, ctx, key) => h(
+      getReact().Fragment,
+      { key },
+      ...parts.map((p, i) => {
+        if (!(i & 1)) return p;
+        const v = resolve(vals, p);
+        if (v === void 0) {
+          if (!ctx?.__streamingNow) {
+            if (document.body?.hasAttribute("data-dc-editor-on")) {
+              return h(
+                "span",
+                { key: i, className: "sc-interp sc-unresolved" },
+                "{{ " + p.trim() + " }}"
+              );
+            }
+            warnUnresolved(
+              ctx,
+              "{{ " + p.trim() + " }} never resolved \u2014 rendered as empty"
+            );
+            return null;
+          }
+          return h(
+            "span",
+            { key: i, className: "sc-interp sc-missing" },
+            p.trim()
+          );
+        }
+        if (getReact().isValidElement(v) || Array.isArray(v)) {
+          return h(getReact().Fragment, { key: i }, v);
+        }
+        if (v === null || typeof v === "boolean") return null;
+        return h("span", { key: i, className: "sc-interp" }, String(v));
+      })
+    );
+  }
+  function walkFor(el, host) {
+    const listGet = compileAttr(el.getAttribute("list") || "");
+    const asName = el.getAttribute("as") || "item";
+    const hintN = parseInt(el.getAttribute("hint-placeholder-count") || "0", 10);
+    const kids = walkChildren(el, host);
+    const listSrc = el.getAttribute("list") || "";
+    return (vals, ctx, key) => {
+      let list = listGet(vals);
+      if (!Array.isArray(list)) {
+        if (!ctx?.__streamingNow) {
+          if (list !== void 0 && list !== null) {
+            warnUnresolved(
+              ctx,
+              'sc-for list="' + listSrc + '" is not an array (' + typeof list + ")"
+            );
+          }
+          list = [];
+        } else {
+          list = hintN > 0 ? Array(hintN).fill(void 0) : [];
+        }
+      }
+      return h(
+        getReact().Fragment,
+        { key },
+        list.map((item, i) => {
+          const sub = { ...vals, [asName]: item, $index: i };
+          return h(
+            getReact().Fragment,
+            { key: i },
+            kids.map((b, j) => b(sub, ctx, j))
+          );
+        })
+      );
+    };
+  }
+  function walkIf(el, host) {
+    const valGet = compileAttr(el.getAttribute("value") || "");
+    const hintRaw = el.getAttribute("hint-placeholder-val");
+    const hintGet = hintRaw != null ? compileAttr(hintRaw) : null;
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      let v = valGet(vals);
+      if (v === void 0 && hintGet && ctx?.__streamingNow) v = hintGet(vals);
+      return v ? h(
+        getReact().Fragment,
+        { key },
+        kids.map((b, j) => b(vals, ctx, j))
+      ) : null;
+    };
+  }
+  function walkComponent(el, host) {
+    const name = el.getAttribute("name") || el.getAttribute("component") || "";
+    el.removeAttribute("name");
+    el.removeAttribute("component");
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const { propGetters, hintSize } = collectProps(el, "dc-import", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key,
+        __hintSize: hintSize,
+        __tplId: tplId,
+        __hostStyle: styleGet ? hostPositionStyle(styleGet(vals)) : void 0
+      };
+      for (const [k, g] of propGetters) {
+        const v = g(vals);
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return h(host.component(name), props);
+    };
+  }
+  function walkXImport(el, host) {
+    const globalNameGet = compileAttr(
+      el.getAttribute("component-from-global-scope") || ""
+    );
+    const exportNameGet = compileAttr(
+      el.getAttribute("component") || el.getAttribute("name") || ""
+    );
+    const fromRaw = el.getAttribute("from") || el.getAttribute("src") || el.getAttribute("import") || "";
+    const urls = fromRaw.trim() ? fromRaw.trim().split(/\s+/) : [];
+    const url = urls.length ? urls[urls.length - 1] : "";
+    const kindOf = (u) => /\.(jsx|tsx)(\?|#|$)/i.test(u) ? "jsx" : "js";
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const wrap = tplId != null || styleGet != null;
+    const { propGetters, hintSize } = collectProps(el, "x-import", host);
+    const hasContent = el.children.length > 0 || !!(el.textContent || "").trim();
+    const kids = hasContent ? walkChildren(el, host) : [];
+    const urlBindable = fromRaw.includes("{{");
+    if (urls.length && !urlBindable) {
+      let prev;
+      for (const u of urls) prev = host.loadExternal(kindOf(u), u, prev);
+    }
+    const evalName = (g, vals) => {
+      const v = g(vals);
+      const s = v == null ? "" : String(v);
+      return s.includes("{{") ? "" : s;
+    };
+    return (vals, ctx, key) => {
+      const globalName = evalName(globalNameGet, vals);
+      const name = globalName || evalName(exportNameGet, vals);
+      const C = !name || urlBindable ? null : globalName ? host.resolveExternalGlobal(url, globalName) : host.resolveExternal(url, name);
+      const hostStyle = styleGet ? hostPositionStyle(styleGet(vals)) : void 0;
+      const wrapper = wrap ? {
+        key,
+        className: "sc-host-x",
+        "data-dc-tpl": tplId,
+        style: hostStyle || { display: "contents" }
+      } : null;
+      if (!C) {
+        const error = urlBindable ? "x-import `from` cannot contain {{ \u2026 }} \u2014 module URLs are resolved at parse time; use a literal URL" : host.resolveExternalError(url, name);
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      const props = wrapper ? {} : { key };
+      let unresolvedHole = false;
+      for (const [k, g] of propGetters) {
+        if (k === "component" || k === "componentFromGlobalScope" || k === "from") {
+          continue;
+        }
+        const v = g(vals);
+        if (v === void 0) unresolvedHole = true;
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (unresolvedHole && ctx?.__htmlStreamingNow) {
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error: null
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return wrapper ? h("div", wrapper, h(C, props)) : h(C, props);
+    };
+  }
+  function contentKey(el) {
+    const clone = el.cloneNode(true);
+    for (const d of clone.querySelectorAll("*")) {
+      while (d.attributes.length) d.removeAttribute(d.attributes[0].name);
+    }
+    const s = clone.innerHTML;
+    let h2 = 5381;
+    for (let i = 0; i < s.length; i++) h2 = (h2 << 5) + h2 + s.charCodeAt(i) | 0;
+    return s.length + "." + (h2 >>> 0).toString(36);
+  }
+  var NEVER_CONTENT_KEYED = new Set(
+    "script style textarea option title select canvas iframe video audio".split(
+      " "
+    )
+  );
+  var NOT_INLINE_SELECTOR = ":not(" + [...INLINE_TEXT_TAGS].join(",") + ")";
+  function walkElement(el, host) {
+    const realTag = RAW_UNWRAP[el.localName] || el.localName;
+    const tplId = el.getAttribute("data-dc-tpl");
+    const inlineOnly = el.childNodes.length > 0 && !NEVER_CONTENT_KEYED.has(realTag) && el.querySelector(NOT_INLINE_SELECTOR) === null;
+    const keySuffix = inlineOnly ? "|" + contentKey(el) : "";
+    const { propGetters, pseudoClasses } = collectProps(el, "dom", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key: key + keySuffix,
+        "data-dc-tpl": tplId
+      };
+      for (const [k, g] of propGetters) {
+        let v = g(vals);
+        if (k === "style" && typeof v === "string") v = cssToObj(v);
+        if ((k === "value" || k === "checked") && v === void 0) {
+          v = k === "checked" ? false : "";
+        }
+        props[k] = v;
+      }
+      if (pseudoClasses.length) {
+        props.className = [props.className, ...pseudoClasses].filter(Boolean).join(" ");
+      }
+      return h(realTag, props, ...kids.map((b, j) => b(vals, ctx, j)));
+    };
+  }
+
+  // src/logic.ts
+  var StreamableLogic = class {
+    constructor(props) {
+      __publicField(this, "props");
+      __publicField(this, "state", {});
+      /** Back-pointer to the wrapper component, installed after construction. */
+      __publicField(this, "__host");
+      this.props = props || {};
+    }
+    setState(update, cb) {
+      this.__host && this.__host.__setLogicState(update, cb);
+    }
+    forceUpdate() {
+      this.__host && this.__host.forceUpdate();
+    }
+    componentDidMount() {
+    }
+    componentDidUpdate(_prevProps) {
+    }
+    componentWillUnmount() {
+    }
+    /** The flat object the template renders against (merged over props). */
+    renderVals() {
+      return {};
+    }
+  };
+  function evalDcLogic(src) {
+    //! nosemgrep: eval-and-function-constructor
+    const fn = new Function(
+      "DCLogic",
+      "StreamableLogic",
+      "React",
+      src + '\n;return (typeof Component!=="undefined"&&Component)||undefined;'
+    );
+    return fn(StreamableLogic, StreamableLogic, getReact());
+  }
+
+  // src/component.ts
+  function shallowEqual(a, b) {
+    if (!b) return false;
+    const ak = Object.keys(a).filter((k) => k !== "children");
+    const bk = Object.keys(b).filter((k) => k !== "children");
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) if (a[k] !== b[k]) return false;
+    return true;
+  }
+  function Placeholder({
+    name,
+    hintSize,
+    streaming,
+    error
+  }) {
+    const [w, hgt] = (hintSize || "100%,60px").split(",");
+    return h(
+      "div",
+      {
+        className: "sc-placeholder" + (streaming ? " sc-streaming" : ""),
+        style: { width: w.trim(), height: hgt && hgt.trim() },
+        title: name
+      },
+      error ? h(
+        "div",
+        { className: "sc-placeholder-error" },
+        (name ? name + ": " : "") + error
+      ) : null
+    );
+  }
+  function hintToMin(hint) {
+    if (!hint) return void 0;
+    const [w, hgt] = hint.split(",");
+    return { minWidth: w.trim(), minHeight: hgt && hgt.trim() };
+  }
+  function createComponentFactory(registry, ensureFetched) {
+    const React = getReact();
+    const AncestorContext = React.createContext([]);
+    class StreamableComponent extends React.Component {
+      constructor(props) {
+        super(props);
+        __publicField(this, "__name");
+        __publicField(this, "__sub");
+        __publicField(this, "__needsDidMount", false);
+        /** Snapshot of the registry's streaming flags taken at render time —
+         *  builders read it off the RenderCtx (this) to pick placeholder vs
+         *  render-nothing for unresolved values. */
+        __publicField(this, "__streamingNow", false);
+        __publicField(this, "__htmlStreamingNow", false);
+        /** When a construct throws, remember the (class, registry.ver, props)
+         *  triple so render-time reconcile doesn't re-attempt it on every parent
+         *  re-render. A registry bump (new class, template, external module
+         *  resolving via bumpAll) changes `ver` and breaks the memo so an
+         *  env-dependent constructor can self-heal. */
+        __publicField(this, "__failedLogic", null);
+        __publicField(this, "__failedUserProps", null);
+        __publicField(this, "__failedVer", -1);
+        /** Per-instance constructor error — kept here (not on the registry entry)
+         *  so one instance's successful construct can't hide a sibling's failure,
+         *  and a construct can never wipe an eval error `updateJs` recorded on
+         *  `r.logicError`. */
+        __publicField(this, "__ctorError", null);
+        __publicField(this, "logic");
+        this.__name = props.__name;
+        this.state = { __v: 0, __err: null };
+        this.__sub = () => {
+          if (this.state.__err) this.setState({ __err: null });
+          this.forceUpdate();
+        };
+        this.__makeLogic(registry.get(this.__name).Logic, null);
+        ensureFetched(this.__name);
+      }
+      /** Error-boundary hook: a render crash anywhere in this DC's subtree
+       *  (its own template, an x-import'd component, a child DC without its
+       *  own deeper boundary) lands here instead of unmounting the page. */
+      static getDerivedStateFromError(e) {
+        return { __err: e instanceof Error && e.message ? e.message : String(e) };
+      }
+      componentDidCatch(e, info) {
+        console.error(
+          "[dc-runtime] render error in <" + this.__name + ">:",
+          e,
+          info?.componentStack || ""
+        );
+      }
+      /** Instantiate the logic class (or the no-op base) and adopt `prevState`
+       *  over its initial state — used both at mount and on hot-swap. */
+      __makeLogic(Logic, prevState) {
+        const L = Logic || StreamableLogic;
+        try {
+          this.logic = new L(this.__userProps());
+          this.__failedLogic = null;
+          this.__failedUserProps = null;
+          this.__ctorError = null;
+        } catch (e) {
+          console.error(e);
+          this.__failedLogic = Logic;
+          this.__failedUserProps = this.__userProps();
+          this.__failedVer = registry.get(this.__name).ver;
+          this.__ctorError = this.__name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+          this.logic = new StreamableLogic(
+            this.__userProps()
+          );
+        }
+        this.logic.__host = this;
+        if (prevState)
+          this.logic.state = { ...this.logic.state || {}, ...prevState };
+      }
+      /** The props the author's logic + template see — internal __-prefixed
+       *  wiring stripped. */
+      __userProps() {
+        const { __name, __hintSize, __tplId, __hostStyle, ...rest } = this.props;
+        return rest;
+      }
+      __setLogicState(update, cb) {
+        const prev = this.logic.state;
+        const patch = typeof update === "function" ? update(prev) : update;
+        this.logic.state = { ...prev, ...patch };
+        this.setState((s) => ({ __v: s.__v + 1 }), cb);
+      }
+      /** Swap the logic instance when the registry's Logic class changed
+       *  (streaming completion, hot reload). State carries over; didMount
+       *  re-fires after the swap commits so refs exist. */
+      __reconcileLogic() {
+        const r = registry.get(this.__name);
+        const Next = r.Logic;
+        const Cur = this.logic.constructor;
+        if (Next === Cur || !Next && Cur === StreamableLogic || Next === this.__failedLogic && r.ver === this.__failedVer && shallowEqual(this.__userProps(), this.__failedUserProps)) {
+          return;
+        }
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+        this.__makeLogic(Next, this.logic.state);
+        this.__needsDidMount = true;
+      }
+      componentDidMount() {
+        registry.get(this.__name).subs.add(this.__sub);
+        try {
+          this.logic.componentDidMount();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      componentDidUpdate(prevProps) {
+        this.logic.props = this.__userProps();
+        if (this.__needsDidMount) {
+          if (this.state.__err || !registry.get(this.__name).tpl) return;
+          this.__needsDidMount = false;
+          try {
+            this.logic.componentDidMount();
+          } catch (e) {
+            console.error(e);
+          }
+        } else {
+          try {
+            this.logic.componentDidUpdate(prevProps);
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      componentWillUnmount() {
+        registry.get(this.__name).subs.delete(this.__sub);
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      render() {
+        const r = registry.get(this.__name);
+        const cls = "sc-host" + (r.htmlStreaming ? " sc-streaming-html" : "") + (r.jsStreaming ? " sc-streaming-js" : "");
+        const hintStyle = r.htmlStreaming ? hintToMin(this.props.__hintSize) : void 0;
+        const hostStyle = this.props.__hostStyle || hintStyle ? { ...hintStyle || {}, ...this.props.__hostStyle || {} } : void 0;
+        const hostBase = {
+          className: cls,
+          style: hostStyle,
+          "data-sc-name": this.__name,
+          "data-dc-tpl": this.props.__tplId
+        };
+        const chain = Array.isArray(this.context) ? this.context : [];
+        if (chain.includes(this.__name)) {
+          const cycle = [
+            ...chain.slice(chain.indexOf(this.__name)),
+            this.__name
+          ].join(" \u2192 ");
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: "circular import: " + cycle
+            })
+          );
+        }
+        if (this.state.__err) {
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(
+              "div",
+              { className: "sc-logic-error", "data-omelette-chrome": "" },
+              this.__name + ": " + this.state.__err
+            ),
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: this.state.__err
+            })
+          );
+        }
+        this.__reconcileLogic();
+        if (!r.tpl) {
+          return h(
+            "div",
+            hostBase,
+            h(Placeholder, { name: this.__name, hintSize: this.props.__hintSize })
+          );
+        }
+        const userProps = this.__userProps();
+        this.logic.props = userProps;
+        let vals = userProps;
+        let renderErr = r.logicError || this.__ctorError;
+        try {
+          vals = { ...userProps, ...this.logic.renderVals() || {} };
+        } catch (e) {
+          console.error(e);
+          renderErr = this.__name + ".renderVals(): " + (e instanceof Error && e.message ? e.message : String(e));
+        }
+        this.__streamingNow = !!(r.htmlStreaming || r.jsStreaming);
+        this.__htmlStreamingNow = !!r.htmlStreaming;
+        return h(
+          "div",
+          { ...hostBase, className: cls + (renderErr ? " sc-has-error" : "") },
+          renderErr && h(
+            "div",
+            { className: "sc-logic-error", "data-omelette-chrome": "" },
+            renderErr
+          ),
+          h(
+            AncestorContext.Provider,
+            { value: [...chain, this.__name] },
+            r.tpl(vals, this)
+          )
+        );
+      }
+    }
+    __publicField(StreamableComponent, "contextType", AncestorContext);
+    const named = /* @__PURE__ */ new Map();
+    function getDC(name) {
+      const hit = named.get(name);
+      if (hit) return hit;
+      function Dispatcher(p) {
+        const [, setTick] = React.useState(0);
+        React.useEffect(() => {
+          const sub = () => setTick((n) => n + 1);
+          registry.get(name).subs.add(sub);
+          return () => {
+            registry.get(name).subs.delete(sub);
+          };
+        }, []);
+        ensureFetched(name);
+        return h(StreamableComponent, { ...p, __name: name });
+      }
+      Dispatcher.displayName = name;
+      named.set(name, Dispatcher);
+      return Dispatcher;
+    }
+    return {
+      getDC,
+      StreamableComponent
+    };
+  }
+
+  // src/external.ts
+  var isCustomElementName = (n) => !n.includes(".") && n.includes("-");
+  function isRenderableType(g) {
+    if (typeof g === "function") return !isElementClass(g);
+    return typeof g === "object" && g !== null && typeof g.$$typeof === "symbol";
+  }
+  function resolveDottedPath(root, name) {
+    let cur = root;
+    for (const seg of name.split(".")) {
+      if (cur == null) return void 0;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+  var BABEL_SRI = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+  var GLOBAL_POLL_INTERVAL_MS = 50;
+  var GLOBAL_POLL_TIMEOUT_MS = 3e4;
+  function createExternalModules(onResolved) {
+    const cache = /* @__PURE__ */ new Map();
+    let babelLoading = null;
+    const reportedMissing = /* @__PURE__ */ new Map();
+    const polling = /* @__PURE__ */ new Set();
+    function ensureBabel() {
+      if (window.Babel) return Promise.resolve();
+      if (babelLoading) return babelLoading;
+      babelLoading = new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = BABEL_URL;
+        s.integrity = BABEL_SRI;
+        s.crossOrigin = "anonymous";
+        s.onload = () => res();
+        s.onerror = rej;
+        document.head.appendChild(s);
+      });
+      return babelLoading;
+    }
+    const pending = /* @__PURE__ */ new Map();
+    function load(kind, url, after) {
+      const existing = pending.get(url);
+      if (existing) return existing;
+      cache.set(url, null);
+      console.info("[dc-runtime] x-import: loading", url, "(" + kind + ")");
+      const ready = Promise.all([
+        kind === "jsx" ? ensureBabel() : Promise.resolve(),
+        after ?? Promise.resolve()
+      ]);
+      const p = ready.then(() => fetch(url)).then((r) => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      }).then((src) => {
+        const code = kind === "jsx" ? window.Babel.transform(src, {
+          filename: url,
+          presets: ["react", "typescript"]
+        }).code : src;
+        const module = { exports: {} };
+        const before = new Set(Object.keys(window));
+        //! nosemgrep: eval-and-function-constructor
+        new Function("React", "module", "exports", "require", code)(
+          getReact(),
+          module,
+          module.exports,
+          () => ({})
+        );
+        const globals = {};
+        for (const k of Object.keys(window)) {
+          if (!before.has(k) && typeof window[k] === "function") {
+            globals[k] = window[k];
+          }
+        }
+        cache.set(url, { mod: module.exports, globals });
+        console.info(
+          "[dc-runtime] x-import: loaded",
+          url,
+          "\u2014 exports:",
+          Object.keys(module.exports),
+          "window globals:",
+          Object.keys(globals)
+        );
+        onResolved();
+      }).catch((e) => {
+        cache.set(url, {
+          mod: {},
+          globals: {},
+          error: "failed to load: " + (e instanceof Error && e.message ? e.message : String(e))
+        });
+        console.error(
+          "[dc-runtime] x-import: FAILED to load",
+          url,
+          "(" + kind + ")",
+          e
+        );
+        onResolved();
+      });
+      pending.set(url, p);
+      return p;
+    }
+    function resolve2(url, name) {
+      const entry = cache.get(url);
+      if (!entry) return null;
+      const { mod, globals } = entry;
+      const C = mod && mod[name] || globals && globals[name] || typeof window !== "undefined" && window[name] || mod && mod.default;
+      if (typeof C === "function") return C;
+      const key = url + "\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(
+          key,
+          entry.error || 'no export named "' + name + '" (has: ' + Object.keys(mod).join(", ") + ")"
+        );
+        console.error(
+          "[dc-runtime] x-import: module",
+          url,
+          "loaded but has no component named",
+          JSON.stringify(name),
+          "\u2014 available exports:",
+          Object.keys(mod),
+          "window globals:",
+          Object.keys(globals),
+          ". The module must `module.exports = {" + name + "}` or set `window." + name + "`."
+        );
+      }
+      return null;
+    }
+    function waitForGlobal(name) {
+      if (polling.has(name)) return;
+      polling.add(name);
+      const started = Date.now();
+      const isCE = isCustomElementName(name);
+      const tick = () => {
+        const found = isCE ? customElements.get(name) : isRenderableType(resolveDottedPath(window, name));
+        if (found) {
+          polling.delete(name);
+          onResolved();
+          return;
+        }
+        if (Date.now() - started >= GLOBAL_POLL_TIMEOUT_MS) {
+          console.warn(
+            "[dc-runtime] x-import: global",
+            JSON.stringify(name),
+            "never appeared on window after " + GLOBAL_POLL_TIMEOUT_MS + "ms"
+          );
+          return;
+        }
+        setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+      };
+      setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+    }
+    function resolveGlobal(url, name) {
+      const isCE = isCustomElementName(name);
+      if (!url) {
+        if (isCE) {
+          if (customElements.get(name)) return name;
+          waitForGlobal(name);
+          return null;
+        }
+        const g2 = resolveDottedPath(window, name);
+        if (isRenderableType(g2)) return g2;
+        waitForGlobal(name);
+        return null;
+      }
+      const entry = cache.get(url);
+      if (!entry) return null;
+      if (isCE && customElements.get(name)) return name;
+      const g = entry.globals[name] ?? resolveDottedPath(window, name);
+      if (isRenderableType(g)) return g;
+      if (name.includes(".")) return null;
+      const key = url + "\0global\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(key, null);
+        if (isCE && !customElements.get(name)) {
+          console.warn(
+            "[dc-runtime] x-import:",
+            url,
+            "loaded but no custom element",
+            JSON.stringify(name),
+            "is registered and window." + name + " is not a function \u2014 rendering <" + name + "> as an unknown element."
+          );
+        }
+      }
+      return name;
+    }
+    function getError(url, name) {
+      const entry = cache.get(url);
+      if (entry?.error) return entry.error;
+      return reportedMissing.get(url + "\0" + name) || null;
+    }
+    return { load, resolve: resolve2, resolveGlobal, getError };
+  }
+  function isElementClass(g) {
+    try {
+      return typeof g === "function" && typeof HTMLElement !== "undefined" && g.prototype instanceof HTMLElement;
+    } catch {
+      return false;
+    }
+  }
+
+  // src/atomics.ts
+  var ATOMIC_CSS = (
+    // layout
+    ".fx{display:flex}.col{display:flex;flex-direction:column}.grid{display:grid}.ac{align-items:center}.jc{justify-content:center}.jb{justify-content:space-between}.f1{flex:1}.noshrink{flex-shrink:0}.wrap{flex-wrap:wrap}.fw5{font-weight:500}.fw6{font-weight:600}.fw7{font-weight:700}.fw8{font-weight:800}.fs11{font-size:11px}.fs12{font-size:12px}.fs13{font-size:13px}.fs14{font-size:14px}.fs15{font-size:15px}.fs16{font-size:16px}.fs20{font-size:20px}.fs22{font-size:22px}.upper{text-transform:uppercase}.tc{text-align:center}.nowrap{white-space:nowrap}.gap8{gap:8px}.gap10{gap:10px}.gap12{gap:12px}.gap16{gap:16px}.gap24{gap:24px}.m0{margin:0}.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mb8{margin-bottom:8px}.mb12{margin-bottom:12px}.mb16{margin-bottom:16px}.posrel{position:relative}.posabs{position:absolute}.round{border-radius:50%}.ohide{overflow:hidden}.bbox{box-sizing:border-box}.pointer{cursor:pointer}.w100{width:100%}.b0{border:none}"
+  );
+
+  // src/helmet.ts
+  var DESIGN_DOC_MODE_RE = /<meta\b[^>]*\bname\s*=\s*["']design_doc_mode["'][^>]*\b(?:content|value)\s*=\s*["'](\w+)["']/i;
+  var CANVAS_BG_LIGHT = "#f0eee6";
+  var CANVAS_BG_DARK = "#2e2c26";
+  function createHelmetManager(doc, isStreaming) {
+    const mounted = /* @__PURE__ */ new Set();
+    const live = /* @__PURE__ */ new Map();
+    let designDocMode = null;
+    let canvasStyleEl = null;
+    let appTheme = "light";
+    try {
+      const ds = doc.documentElement.dataset.theme;
+      appTheme = ds === "dark" || ds === "light" ? ds : new URLSearchParams(doc.defaultView?.location.search ?? "").get(
+        "theme"
+      ) === "dark" ? "dark" : "light";
+    } catch {
+    }
+    function applyCanvasBg() {
+      if (!canvasStyleEl) return;
+      const bg = appTheme === "dark" ? CANVAS_BG_DARK : CANVAS_BG_LIGHT;
+      canvasStyleEl.textContent = `html,body{background:${bg}}#dc-root>.sc-host{position:relative}`;
+    }
+    function postDesignMode(mode) {
+      if (window.parent === window) return;
+      try {
+        window.parent.postMessage({ type: "__dc_design_mode", mode }, "*");
+      } catch {
+      }
+    }
+    function setDesignDocMode(mode) {
+      if (mode === designDocMode) return;
+      designDocMode = mode;
+      postDesignMode(mode);
+      if (mode === "canvas") {
+        doc.documentElement.setAttribute("data-dc-canvas", "");
+        canvasStyleEl = doc.createElement("style");
+        canvasStyleEl.setAttribute("data-dc-canvas", "");
+        applyCanvasBg();
+        doc.head.appendChild(canvasStyleEl);
+      } else {
+        doc.documentElement.removeAttribute("data-dc-canvas");
+        canvasStyleEl?.remove();
+        canvasStyleEl = null;
+      }
+    }
+    window.addEventListener("message", (e) => {
+      const type = e.data && e.data.type;
+      if (type === "__dc_theme") {
+        const t = e.data.theme;
+        if (t === "light" || t === "dark") {
+          appTheme = t;
+          doc.documentElement.dataset.theme = t;
+          applyCanvasBg();
+        }
+        return;
+      }
+      if (!designDocMode || type !== "__dc_probe") return;
+      postDesignMode(designDocMode);
+    });
+    function compile(node) {
+      const raw = [...node.children];
+      const helmetClosed = node.nextSibling != null || node.parentNode?.nextSibling != null;
+      if (node.hasAttribute("data-dc-atomics") && !mounted.has("__dc-atomics")) {
+        mounted.add("__dc-atomics");
+        const el = doc.createElement("style");
+        el.id = "__dc-atomics";
+        el.textContent = ATOMIC_CSS;
+        doc.head.appendChild(el);
+      }
+      return (_vals, ctx) => {
+        const name = ctx && ctx.__name || "";
+        const streaming = !!(name && isStreaming(name));
+        for (let i = 0; i < raw.length; i++) {
+          const child = raw[i];
+          const tag = child.tagName;
+          const mayBePartial = streaming && !helmetClosed && i === raw.length - 1;
+          if (tag === "SCRIPT") {
+            if (mayBePartial) continue;
+            const key = "SCRIPT|" + (child.getAttribute("src") || child.textContent || "");
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            const el = doc.createElement("script");
+            for (const { name: an, value } of [...child.attributes])
+              el.setAttribute(an, value);
+            if (child.textContent) el.textContent = child.textContent;
+            doc.head.appendChild(el);
+          } else if (tag === "LINK" || tag === "META") {
+            if (mayBePartial) continue;
+            const key = tag + "|" + (child.getAttribute("href") || child.getAttribute("src") || child.outerHTML);
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            doc.head.appendChild(child.cloneNode(true));
+          } else {
+            const key = name + "|" + i;
+            let el = live.get(key);
+            if (!el || el.tagName !== tag) {
+              if (el) el.remove();
+              el = doc.createElement(tag.toLowerCase());
+              live.set(key, el);
+              doc.head.appendChild(el);
+            }
+            for (const { name: an, value } of [...child.attributes]) {
+              if (el.getAttribute(an) !== value) el.setAttribute(an, value);
+            }
+            if (el.textContent !== child.textContent)
+              el.textContent = child.textContent;
+          }
+        }
+        return null;
+      };
+    }
+    return { compile, setDesignDocMode };
+  }
+
+  // src/pseudo.ts
+  function createPseudoSheet(doc) {
+    let el = null;
+    const cache = /* @__PURE__ */ new Map();
+    let n = 0;
+    return (pseudo, css) => {
+      const k = pseudo + "|" + css;
+      const hit = cache.get(k);
+      if (hit) return hit;
+      if (!el) {
+        el = doc.createElement("style");
+        doc.head.appendChild(el);
+      }
+      const cls = "scp" + (n++).toString(36);
+      const sel = pseudo === "before" || pseudo === "after" ? "." + cls + "::" + pseudo : "." + cls + ":" + pseudo;
+      el.sheet.insertRule(sel + "{" + css + "}", el.sheet.cssRules.length);
+      cache.set(k, cls);
+      return cls;
+    };
+  }
+
+  // src/registry.ts
+  function createRegistry() {
+    const entries = /* @__PURE__ */ Object.create(null);
+    function get(name) {
+      return entries[name] || (entries[name] = {
+        html: "",
+        tpl: null,
+        Logic: null,
+        jsStreaming: false,
+        htmlStreaming: false,
+        ver: 0,
+        subs: /* @__PURE__ */ new Set(),
+        fetched: false
+      });
+    }
+    function bump(name) {
+      const r = get(name);
+      r.ver++;
+      for (const fn of r.subs) fn();
+    }
+    return {
+      entries,
+      get,
+      bump,
+      bumpAll() {
+        for (const n in entries) bump(n);
+      }
+    };
+  }
+
+  // src/runtime.ts
+  var COMPONENT_DIR = ".";
+  function createRuntime(doc = document) {
+    const registry = createRegistry();
+    const pseudoClass = createPseudoSheet(doc);
+    const helmet = createHelmetManager(
+      doc,
+      (name) => registry.get(name).htmlStreaming
+    );
+    const external = createExternalModules(() => registry.bumpAll());
+    const factory = createComponentFactory(registry, ensureFetched);
+    const host = {
+      component: (name) => factory.getDC(name),
+      placeholder: (props) => h(Placeholder, props),
+      helmet: (node) => helmet.compile(node),
+      loadExternal: (kind, url, after) => external.load(kind, url, after),
+      resolveExternal: (url, name) => external.resolve(url, name),
+      resolveExternalGlobal: (url, name) => external.resolveGlobal(url, name),
+      resolveExternalError: (url, name) => external.getError(url, name),
+      pseudoClass
+    };
+    function ensureFetched(name) {
+      const r = registry.get(name);
+      if (r.fetched) return;
+      r.fetched = true;
+      const url = COMPONENT_DIR + "/" + encodeURIComponent(name) + ".dc.html";
+      fetch(url).then((res) => {
+        if (!res.ok) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/> failed:",
+            url,
+            "returned",
+            res.status,
+            "\u2014 the reference renders as an empty placeholder."
+          );
+          return "";
+        }
+        return res.text();
+      }).then((t) => {
+        if (!t) return;
+        const parsed = parseDcText(t);
+        if (!parsed) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/>:",
+            url,
+            "has no <x-dc> block \u2014 not a Design Component."
+          );
+          return;
+        }
+        if (parsed.props) r.propsMeta = parsed.props;
+        if (parsed.preview) r.preview = parsed.preview;
+        if (parsed.template && !r.html) updateHtml(name, parsed.template);
+        if (parsed.js && !r.Logic) updateJs(name, parsed.js);
+      }).catch(
+        (e) => console.error(
+          "[dc-runtime] sibling fetch for <" + name + "/> threw:",
+          url,
+          e
+        )
+      );
+    }
+    let rootName = null;
+    function updateHtml(name, html) {
+      const r = registry.get(name);
+      r.html = html;
+      if (name === rootName) {
+        const mode = DESIGN_DOC_MODE_RE.exec(html)?.[1] ?? null;
+        if (mode || !r.htmlStreaming) helmet.setDesignDocMode(mode);
+      }
+      try {
+        r.tpl = compileTemplate(html, host);
+      } catch (e) {
+        console.error("[dc-runtime] template compile FAILED for", name, e);
+      }
+      registry.bump(name);
+    }
+    function updateJs(name, src) {
+      const r = registry.get(name);
+      const seq = r.jsSeq = (r.jsSeq || 0) + 1;
+      try {
+        const Cls = evalDcLogic(src);
+        if (r.jsSeq !== seq) return;
+        if (typeof Cls !== "function") {
+          r.logicError = name + ".dc.html: <script data-dc-script> must define `class Component extends DCLogic`";
+        } else {
+          r.logicError = null;
+          r.Logic = Cls;
+        }
+      } catch (e) {
+        if (r.jsSeq !== seq) return;
+        console.error(
+          "[dc-runtime] logic class eval FAILED for",
+          name,
+          "\u2014 the template renders with props only.",
+          e
+        );
+        r.logicError = name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+      }
+      registry.bump(name);
+    }
+    function setStreaming(name, kind, on) {
+      const r = registry.get(name);
+      if (kind === "html") r.htmlStreaming = !!on;
+      else r.jsStreaming = !!on;
+      let any = false;
+      for (const n in registry.entries) {
+        const e = registry.entries[n];
+        if (e && (e.htmlStreaming || e.jsStreaming)) {
+          any = true;
+          break;
+        }
+      }
+      doc.documentElement.classList.toggle("sc-dc-streaming", any);
+      registry.bump(name);
+    }
+    function dcUpdate(name, kind, content, streaming) {
+      if (streaming) registry.get(name).fetched = true;
+      if (kind === "html") {
+        setStreaming(name, "html", !!streaming);
+        updateHtml(name, content);
+      } else if (kind === "js") {
+        setStreaming(name, "js", !!streaming);
+        if (!streaming) updateJs(name, content);
+      } else if (kind === "props") {
+        const { props, preview } = parseDataProps(content);
+        const r = registry.get(name);
+        r.propsMeta = props ?? void 0;
+        r.preview = preview;
+        registry.bump(name);
+      }
+    }
+    function setProps(name, overrides) {
+      registry.get(name).propOverrides = overrides && typeof overrides === "object" ? { ...overrides } : null;
+      registry.bump(name);
+    }
+    function adoptParsed(name, parsed) {
+      if (!parsed) return;
+      const r = registry.get(name);
+      if (parsed.props) r.propsMeta = parsed.props;
+      if (parsed.preview) r.preview = parsed.preview;
+      if (parsed.template) updateHtml(name, parsed.template);
+      if (parsed.js) updateJs(name, parsed.js);
+    }
+    return {
+      registry,
+      getDC: factory.getDC,
+      updateHtml,
+      updateJs,
+      dcUpdate,
+      setProps,
+      adoptParsed,
+      setRootName: (name) => {
+        rootName = name;
+      },
+      markFetched: (name) => {
+        registry.get(name).fetched = true;
+      },
+      annotatedTemplate: (name) => {
+        const r = registry.get(name);
+        return r.tpl && r.tpl.__annotated || null;
+      },
+      templateSource: (name) => registry.get(name).html || null,
+      StreamableLogic
+    };
+  }
+
+  // src/index.ts
+  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
+  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
+  function hideRawTemplate() {
+    const s = document.createElement("style");
+    s.textContent = "x-dc{display:none!important}";
+    document.head.appendChild(s);
+  }
+  function loadScript(src, integrity) {
+    return new Promise((resolve2, reject) => {
+      //! nosemgrep: create-script-element
+      const s = document.createElement("script");
+      s.src = src;
+      s.integrity = integrity;
+      s.crossOrigin = "anonymous";
+      s.async = false;
+      s.onload = () => resolve2();
+      s.onerror = () => reject(new Error(`failed to load ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+  function loadReactUmd() {
+    const w = window;
+    if (w.React && w.ReactDOM) return Promise.resolve();
+    return Promise.all([
+      loadScript(REACT_URL, REACT_SRI),
+      loadScript(REACT_DOM_URL, REACT_DOM_SRI)
+    ]).then(() => void 0);
+  }
+  function init() {
+    const runtime = createRuntime(document);
+    let rootName = "Root";
+    const baseCss = document.createElement("style");
+    baseCss.textContent = BASE_CSS;
+    document.head.prepend(baseCss);
+    const notifyHost = () => {
+      if (window.parent === window) return;
+      const r = runtime.registry.entries[rootName];
+      try {
+        window.parent.postMessage(
+          {
+            type: "__dc_booted",
+            rootName,
+            propsMeta: r && r.propsMeta || null,
+            preview: r && r.preview || null
+          },
+          "*"
+        );
+      } catch {
+      }
+    };
+    const api = {
+      __dcUpdate: (name, kind, content, streaming) => {
+        runtime.dcUpdate(name, kind, content, streaming);
+        if (name === rootName && !streaming && kind === "props") notifyHost();
+      },
+      __dcSetProps: (name, overrides) => runtime.setProps(name, overrides),
+      /** Name of the component currently mounted as the page root — DC tools
+       *  push their template-stream here when targeting "the open page". */
+      __dcRootName: () => rootName,
+      /** Editor bridge — the encoded, `data-dc-tpl`-annotated template source.
+       *  The host editor parses this into its own template DOM so it can map a
+       *  rendered node (carrying the same `data-dc-tpl`) back to the source
+       *  node that emitted it. Returns the encoded form (`<sc-comp>`,
+       *  `sc-camel-*` attrs); the editor decodes on serialize. */
+      __dcAnnotatedTemplate: (name) => runtime.annotatedTemplate(name),
+      /** Editor bridge — the *original* (decoded) template source. */
+      __dcTemplateSource: (name) => runtime.templateSource(name),
+      __dcBoot: () => {
+        rootName = boot(runtime, document) ?? rootName;
+        notifyHost();
+      },
+      __dcRegistry: runtime.registry.entries,
+      getDC: (name) => runtime.getDC(name),
+      // `DCLogic` is the documented base class name; `StreamableLogic` is the
+      // implementation alias kept for any project that already references it.
+      DCLogic: runtime.StreamableLogic,
+      StreamableLogic: runtime.StreamableLogic
+    };
+    Object.assign(window, api);
+    window.__dcContentKeyed = true;
+    if (document.readyState !== "loading") api.__dcBoot();
+    else document.addEventListener("DOMContentLoaded", () => api.__dcBoot());
+  }
+  hideRawTemplate();
+  loadReactUmd().then(init).catch((err) => {
+    console.error("[dc] failed to load React or boot:", err);
+    throw err;
+  });
+})();
+
+</script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Noto+Sans+JP:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0}
+*{box-sizing:border-box}
+[data-jema-root]{
+ --bg0:#F6F8FB;--bg1:#FFFFFF;--bg2:#F1F4F8;--bg3:#FAFBFD;
+ --bd:#E8E8E8;--bd2:#E2E7EE;--dv:#EEF1F5;--grid:#E5E9F0;
+ --tx:#1B2A4A;--tx2:#4A5568;--mut:#8A93A3;--fnt:#A7AFBC;--fnt2:#B4BCC9;--fnt3:#CBD2DC;
+ --ac:#00A5CF;--acT:#0090B5;--acHi:#5AB6CC;--acTint:rgba(0,165,207,.10);--acTint2:rgba(0,165,207,.06);--acBadge:#00A5CF;
+ --up:#1F7A6E;--upBg:rgba(42,157,143,.13);--dn:#C92A37;--dnBg:rgba(230,57,70,.10);
+ --warnBg:rgba(244,162,97,.16);--warnTx:#9A6210;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#EEF2F7;--avatar:#1B2A4A;--navyA:#1B2A4A;--navyB:#264653;--tipBg:rgba(27,42,74,.94);
+ --sh1:0 2px 8px rgba(27,42,74,.08);--sh1a:0 2px 8px rgba(27,42,74,.10);--sh2:0 8px 24px rgba(27,42,74,.12);--sh2a:0 8px 24px rgba(27,42,74,.18);--shPop:0 16px 48px rgba(27,42,74,.16);
+}
+[data-jema-root][data-dark="true"]{
+ --bg0:#0D1420;--bg1:#161F31;--bg2:#212E49;--bg3:#1A2438;
+ --bd:#263450;--bd2:#2C3B59;--dv:#232F4A;--grid:#26334D;
+ --tx:#E9EEF7;--tx2:#BBC6DA;--mut:#8493AC;--fnt:#69778F;--fnt2:#5D6B85;--fnt3:#48526B;
+ --ac:#1FB6DC;--acT:#4FCBE9;--acHi:#4FCBE9;--acTint:rgba(31,182,220,.14);--acTint2:rgba(31,182,220,.08);--acBadge:#0FA3C8;
+ --up:#4ED4AE;--upBg:rgba(63,208,163,.15);--dn:#FF8B94;--dnBg:rgba(255,107,118,.15);
+ --warnBg:rgba(240,182,87,.15);--warnTx:#F0C07A;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#20304E;--avatar:#33425F;--navyA:#131E33;--navyB:#1C333D;--tipBg:rgba(8,14,27,.96);
+ --sh1:0 2px 8px rgba(0,0,0,.35);--sh1a:0 2px 8px rgba(0,0,0,.4);--sh2:0 8px 24px rgba(0,0,0,.45);--sh2a:0 8px 24px rgba(0,0,0,.5);--shPop:0 16px 48px rgba(0,0,0,.55);
+}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:rgba(139,148,163,.45);border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</helmet>
+<div data-screen-label="Policy Deep Dive" data-jema-root="1" data-dark="{{ isDark }}" style="display:flex;height:100vh;min-width:1280px;background:var(--bg0);font-family:'Inter','Noto Sans JP','Hiragino Kaku Gothic ProN','Yu Gothic',system-ui,sans-serif;color:var(--tx);font-size:14px;line-height:1.5;overflow:hidden">
+
+  <!-- ============ COLLAPSED ICON RAIL ============ -->
+  <div style="width:68px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);display:flex;flex-direction:column;align-items:center;padding:22px 0 16px;gap:4px">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px;color:var(--ac);flex-shrink:0;margin-bottom:18px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goOverview }}" title="Market Overview · 概況">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>
+    </div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goMarket }}" title="Market Data · データ">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg>
+    </div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goCapacity }}" title="Capacity &amp; Auctions · 容量市場">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg>
+    </div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#FFFFFF;background:var(--acBadge);cursor:pointer;position:relative" title="Policy Deep Dive · 政策">
+      <span style="position:absolute;left:-13px;top:8px;bottom:8px;width:3px;background:var(--ac);border-radius:0 2px 2px 0"></span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>
+    </div>
+    <div style="width:28px;height:1px;background:var(--dv);margin:6px 0"></div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}" title="Watchlist · ウォッチリスト">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>
+    </div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}" title="Settings · 設定">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>
+    </div>
+    <div style="flex:1"></div>
+    <div style="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" style-hover="background:var(--bg2);color:var(--tx2)" onClick="{{ tExpand }}" title="Expand nav · ナビを展開">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M13 17l5-5-5-5"></path><path d="M6 17l5-5-5-5"></path></svg>
+    </div>
+  </div>
+
+  <!-- ============ MAIN COLUMN ============ -->
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column;position:relative">
+
+    <!-- Top bar -->
+    <div style="height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30">
+      <div style="font-size:13px;color:var(--mut);flex-shrink:0">Policy Deep Dive <span style="color:var(--fnt3)">·</span> 政策ディープダイブ</div>
+      <div style="flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>
+        <input placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style="border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0">
+        <span style="border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0">⌘K</span>
+      </div>
+      <div style="flex:1"></div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ toggleTheme }}" title="Toggle theme · テーマ切替">
+        <sc-if value="{{ isDarkB }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></sc-if>
+        <sc-if value="{{ isLightB }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></sc-if>
+      </div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ tNotif }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+        <span style="position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)"></span>
+      </div>
+      <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0">
+        <span style="{{ langJaS }}" onClick="{{ setLangJa }}">日本語</span>
+        <span style="{{ langEnS }}" onClick="{{ setLangEn }}">English</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <div style="width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600">AN</div>
+        <div style="line-height:1.25">
+          <div style="font-size:13px;font-weight:600">Analyst</div>
+          <div style="font-size:11px;color:var(--mut)">analyst@example.jp</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scrollable content -->
+    <div style="flex:1;overflow-y:auto;padding:26px 32px 40px">
+      <div style="max-width:1560px;margin:0 auto;display:flex;flex-direction:column;gap:18px">
+
+        <!-- Page header -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
+          <div>
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-size:26px;font-weight:700;letter-spacing:-.01em">Policy Deep Dive</span>
+              <span style="font-size:15px;font-weight:500;color:var(--mut)">政策ディープダイブ</span>
+            </div>
+            <div style="font-size:13.5px;color:var(--tx2);margin-top:2px">Committee tracking &amp; AI briefings · METI · OCCTO · EGC · 委員会追跡とAIブリーフィング</div>
+          </div>
+          <div style="display:flex;gap:10px;flex-shrink:0;padding-top:4px">
+            <div style="display:inline-flex;align-items:center;gap:7px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer;box-shadow:var(--sh1a)" style-hover="background:var(--acT);box-shadow:var(--sh2)" onClick="{{ runCatchup }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>Run catch-up · 差分取得
+            </div>
+            <div style="background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acTint2);border-color:var(--ac)" onClick="{{ tManage }}">Manage · 管理</div>
+          </div>
+        </div>
+
+        <!-- Search & filter bar -->
+        <div style="background:var(--bg1);border-radius:16px;padding:10px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+          <div style="flex:1;min-width:220px;display:flex;align-items:center;gap:9px;color:var(--mut)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>
+            <input placeholder="Search all METI meetings, briefings &amp; digests… 全会合・要約・ダイジェストを検索…" value="{{ q }}" onChange="{{ onQ }}" style="border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0">
+            <sc-if value="{{ hasQ }}" hint-placeholder-val="{{ false }}"><span style="font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;flex-shrink:0" onClick="{{ clearQ }}">✕ clear</span></sc-if>
+            <span style="font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0" title="Search covers titles, committees &amp; digests — incl. untracked meetings. Full text of source PDFs (FTS5) is proposed. · 検索は未追跡会合も対象。PDF全文検索は提案中">PDF full-text = PROPOSED</span>
+          </div>
+          <span style="width:1px;height:22px;background:var(--dv)"></span>
+          <span style="{{ chipCommittee }}" onClick="{{ tFilter }}">Committee 委員会 ▾</span>
+          <span style="{{ chipDate }}" onClick="{{ tFilter }}">Date 期間 ▾</span>
+          <span style="{{ chipFollowed }}" onClick="{{ toggleFollowed }}">Followed only フォロー中のみ</span>
+        </div>
+
+        <!-- Newly summarised banner -->
+        <div style="background:var(--acTint);border:1px solid var(--acTint);border-radius:16px;padding:14px 16px">
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <span style="display:inline-flex;align-items:center;gap:7px;font-size:13.5px;font-weight:600;color:var(--acT)">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"></path></svg>Newly summarised · last 7 days (3) 新着要約
+            </span>
+            <span style="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer" style-hover="color:var(--ac)" onClick="{{ tViewAll }}">View all →</span>
+          </div>
+          <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px">
+            <sc-for list="{{ newCards }}" as="nc" hint-placeholder-count="3">
+              <div style="background:var(--bg1);border-radius:12px;padding:10px 12px;cursor:pointer;box-shadow:var(--sh1)" style-hover="box-shadow:var(--sh2)" onClick="{{ nc.click }}">
+                <div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ nc.title }}</div>
+                <div style="font-size:11px;color:var(--mut);margin-top:1px;font-feature-settings:'tnum' 1">{{ nc.meta }}</div>
+                <div style="font-size:11.5px;color:var(--tx2);margin-top:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">{{ nc.preview }}</div>
+              </div>
+            </sc-for>
+          </div>
+          <div style="font-size:11px;color:var(--mut);margin-top:9px;font-feature-settings:'tnum' 1">Last run 2026-07-02 06:10 JST — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no</div>
+        </div>
+
+        <!-- ============ THREE PANES ============ -->
+        <div style="display:grid;grid-template-columns:290px 350px 1fr;gap:18px;align-items:start">
+
+          <!-- EXPLORER -->
+          <div style="background:var(--bg1);border-radius:20px;padding:16px;box-shadow:var(--sh1)">
+            <div style="display:flex;align-items:baseline;justify-content:space-between">
+              <span style="font-size:14px;font-weight:600">Committees <span style="font-size:11.5px;font-weight:400;color:var(--mut)">委員会</span></span>
+              <span style="font-size:11px;color:var(--mut)">14 tracked</span>
+            </div>
+            <div style="{{ allRowS }}" onClick="{{ selAll }}">All committees · すべて</div>
+            <sc-for list="{{ explorerGroups }}" as="g" hint-placeholder-count="3">
+              <div style="font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 5px;display:flex;align-items:center;gap:6px"><span style="{{ g.dot }}"></span>{{ g.name }}</div>
+              <div style="display:flex;flex-direction:column;gap:3px">
+                <sc-for list="{{ g.items }}" as="c" hint-placeholder-count="2">
+                  <div style="{{ c.s }}" onClick="{{ c.click }}">
+                    <div style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.n1 }}</div>
+                    <div style="font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.n2 }} · {{ c.tier }}</div>
+                    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:3px">
+                      <span style="{{ c.folS }}">{{ c.folTxt }}</span>
+                      <span style="font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1">{{ c.last }}</span>
+                    </div>
+                    <sc-if value="{{ c.hasNext }}" hint-placeholder-val="{{ false }}">
+                      <div style="display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--up);margin-top:4px;font-feature-settings:'tnum' 1">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                        <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.next }}</span>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-for>
+            <div style="border:1px dashed var(--fnt2);border-radius:12px;padding:9px 11px;margin-top:12px;display:flex;justify-content:space-between;align-items:center">
+              <span style="font-size:11px;color:var(--mut)">Discovered · 6 committees · 24 mtgs<br>未追跡 — 「All METI」で表示</span>
+              <span style="font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1)" style-hover="border-color:var(--ac);color:var(--acT)" onClick="{{ tAdd }}">Add 追加</span>
+            </div>
+          </div>
+
+          <!-- FEED -->
+          <div style="background:var(--bg1);border-radius:20px;padding:16px;box-shadow:var(--sh1)">
+            <div style="display:flex;align-items:baseline;justify-content:space-between">
+              <span style="font-size:14px;font-weight:600">Meetings <span style="font-size:11.5px;font-weight:400;color:var(--mut)">会合フィード</span></span>
+              <div style="display:flex;background:var(--bg2);border-radius:999px;padding:2px;flex-shrink:0">
+                <span style="{{ covTS }}" onClick="{{ covTracked }}">Tracked</span>
+                <span style="{{ covAS }}" onClick="{{ covAll }}">All METI</span>
+              </div>
+            </div>
+            <div style="font-size:11px;color:var(--mut);margin-top:5px">{{ feedNote }}</div>
+            <div style="display:flex;flex-direction:column;margin-top:8px">
+              <sc-if value="{{ hasUpcoming }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--up);margin:2px 2px 4px"><span style="width:7px;height:7px;border-radius:999px;background:var(--okDot)"></span>UPCOMING · 開催予定</div>
+              </sc-if>
+              <sc-for list="{{ feedUp }}" as="u" hint-placeholder-count="2">
+                <div style="{{ u.s }}" onClick="{{ u.click }}">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                    <span style="display:inline-flex;align-items:center;gap:7px;min-width:0">
+                      <span style="{{ u.dot }}"></span>
+                      <span style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ u.title }}</span>
+                    </span>
+                    <span style="{{ u.stS }}">{{ u.st }}</span>
+                  </div>
+                  <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">{{ u.meta }}</div>
+                  <sc-if value="{{ u.hasPrev }}" hint-placeholder-val="{{ true }}">
+                    <div style="font-size:11.5px;color:var(--tx2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ u.preview }}</div>
+                  </sc-if>
+                </div>
+              </sc-for>
+              <sc-if value="{{ hasUpcoming }}" hint-placeholder-val="{{ false }}">
+                <div style="font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 4px">RECENT · 開催済み</div>
+              </sc-if>
+              <sc-for list="{{ feed }}" as="f" hint-placeholder-count="6">
+                <div style="{{ f.s }}" onClick="{{ f.click }}">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+                    <span style="display:inline-flex;align-items:center;gap:7px;min-width:0">
+                      <span style="{{ f.dot }}"></span>
+                      <span style="font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.title }}</span>
+                    </span>
+                    <span style="{{ f.stS }}">{{ f.st }}</span>
+                  </div>
+                  <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">{{ f.meta }}</div>
+                  <sc-if value="{{ f.hasPrev }}" hint-placeholder-val="{{ true }}">
+                    <div style="font-size:11.5px;color:var(--tx2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.preview }}</div>
+                  </sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+
+          <!-- DETAIL -->
+          <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);min-width:0">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+              <div style="min-width:0">
+                <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap">
+                  <span style="font-size:17px;font-weight:700">{{ dTitle }}</span>
+                  <span style="{{ dStS }}">{{ dSt }}</span>
+                  <sc-if value="{{ dTori }}" hint-placeholder-val="{{ true }}"><span style="font-size:10.5px;font-weight:600;background:var(--acTint);color:var(--acT);border-radius:6px;padding:1px 7px">とりまとめ</span></sc-if>
+                </div>
+                <div style="font-size:12px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">{{ dSub }}</div>
+              </div>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" style-hover="color:var(--ac)" onClick="{{ tSource }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>METI page · 元ページ</span>
+            </div>
+
+            <sc-if value="{{ dHasDigest }}" hint-placeholder-val="{{ true }}">
+              <div style="margin-top:14px">
+                <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)">ENGLISH DIGEST · 英語ダイジェスト</div>
+                <sc-for list="{{ dSections }}" as="ds" hint-placeholder-count="3">
+                  <div style="margin-top:11px">
+                    <div style="font-size:13px;font-weight:600;color:var(--tx)">{{ ds.h }}</div>
+                    <sc-for list="{{ ds.items }}" as="li" hint-placeholder-count="2">
+                      <div style="display:flex;gap:8px;font-size:12.5px;color:var(--tx2);margin-top:4px;line-height:1.55">
+                        <span style="width:5px;height:5px;border-radius:999px;background:var(--ac);margin-top:7px;flex-shrink:0"></span>
+                        <span style="flex:1">{{ li.t }}</span>
+                      </div>
+                    </sc-for>
+                  </div>
+                </sc-for>
+                <div style="display:flex;gap:6px;margin-top:12px;flex-wrap:wrap">
+                  <sc-for list="{{ dRefs }}" as="r" hint-placeholder-count="3">
+                    <span style="font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1);font-feature-settings:'tnum' 1" style-hover="border-color:var(--ac);color:var(--acT)" onClick="{{ tRef }}">{{ r.t }}</span>
+                  </sc-for>
+                </div>
+
+                <!-- JP briefing accordion -->
+                <div style="border:1px solid var(--bd);border-radius:14px;margin-top:14px;overflow:hidden">
+                  <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;cursor:pointer;background:var(--bg3)" style-hover="background:var(--bg2)" onClick="{{ toggleJp }}">
+                    <span style="font-size:13px;font-weight:600">詳細ブリーフィング（4部構成） <span style="font-size:11px;font-weight:400;color:var(--mut)">JP authoritative · 日本語正</span></span>
+                    <sc-if value="{{ jpOpen }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:var(--mut)"><path d="M18 15l-6-6-6 6"></path></svg></sc-if>
+                    <sc-if value="{{ jpClosed }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:var(--mut)"><path d="M6 9l6 6 6-6"></path></svg></sc-if>
+                  </div>
+                  <sc-if value="{{ jpOpen }}" hint-placeholder-val="{{ false }}">
+                    <div style="padding:4px 14px 13px;border-top:1px solid var(--dv)">
+                      <sc-for list="{{ dJp }}" as="j" hint-placeholder-count="4">
+                        <div style="margin-top:10px">
+                          <div style="font-size:12.5px;font-weight:600;color:var(--acT)">{{ j.h }}</div>
+                          <div style="font-size:12.5px;color:var(--tx2);margin-top:3px;line-height:1.7">{{ j.t }}</div>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </sc-if>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- Agenda state for scheduled meetings -->
+            <sc-if value="{{ dAgendaOn }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:14px">
+                <div style="display:flex;align-items:center;gap:9px">
+                  <span style="font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)">PUBLISHED AGENDA · 公表議題</span>
+                  <span style="font-size:10.5px;font-weight:600;background:var(--upBg);color:var(--up);border-radius:6px;padding:1px 8px;font-feature-settings:'tnum' 1">{{ dCountdown }}</span>
+                </div>
+                <sc-for list="{{ dAgenda }}" as="ag" hint-placeholder-count="3">
+                  <div style="display:flex;gap:8px;font-size:12.5px;color:var(--tx2);margin-top:6px;line-height:1.55">
+                    <span style="width:5px;height:5px;border-radius:999px;background:var(--okDot);margin-top:7px;flex-shrink:0"></span>
+                    <span style="flex:1">{{ ag.t }}</span>
+                  </div>
+                </sc-for>
+                <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+                  <span style="display:inline-flex;align-items:center;gap:6px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acT)" onClick="{{ tNotifyMe }}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>Notify me when summarised · 要約時に通知
+                  </span>
+                  <span style="display:inline-flex;align-items:center;gap:6px;border:1px solid var(--bd2);color:var(--tx2);border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="border-color:var(--ac);color:var(--acT)" onClick="{{ tIcsOne }}">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>Add to calendar · ICS
+                  </span>
+                </div>
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;border:1px solid var(--bd);border-radius:12px;padding:10px 14px;margin-top:14px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ dPrevClick }}">
+                  <span style="font-size:12.5px;color:var(--tx2);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Previous meeting 前回: <span style="font-weight:600;color:var(--tx)">{{ dPrevLabel }}</span></span>
+                  <span style="font-size:12px;font-weight:600;color:var(--acT);white-space:nowrap;flex-shrink:0">Open →</span>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ dNoDigest }}" hint-placeholder-val="{{ false }}">
+              <div style="margin-top:16px;border:1px dashed var(--fnt2);border-radius:14px;padding:22px;text-align:center">
+                <div style="font-size:13.5px;font-weight:600;color:var(--tx2)">{{ dEmptyTitle }}</div>
+                <div style="font-size:12px;color:var(--mut);margin-top:3px">{{ dEmptySub }}</div>
+                <sc-if value="{{ dFailed }}" hint-placeholder-val="{{ false }}">
+                  <span style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acT)" onClick="{{ tRetry }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>Retry summarisation · 再実行</span>
+                </sc-if>
+                <sc-if value="{{ dUntracked }}" hint-placeholder-val="{{ false }}">
+                  <span style="display:inline-flex;align-items:center;gap:6px;margin-top:12px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:6px 16px;font-size:12.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acT)" onClick="{{ queueThis }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>Track &amp; queue summarisation · 追跡して要約キューへ</span>
+                </sc-if>
+              </div>
+            </sc-if>
+
+            <!-- Audio overview (PROPOSED) -->
+            <sc-if value="{{ showAudio }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;align-items:center;gap:12px;border:1px dashed var(--fnt2);border-radius:14px;padding:11px 14px;margin-top:14px">
+                <span style="width:36px;height:36px;border-radius:999px;border:1px solid var(--bd2);display:flex;align-items:center;justify-content:center;color:var(--fnt);flex-shrink:0"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg></span>
+                <div style="flex:1;min-width:0">
+                  <div style="font-size:12.5px;font-weight:600">Audio overview <span style="font-size:11px;font-weight:400;color:var(--mut)">音声概要</span></div>
+                  <div style="font-size:11px;color:var(--mut)">Not generated yet · NotebookLM-style narration · 未生成</div>
+                </div>
+                <span style="font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0">PROPOSED</span>
+              </div>
+            </sc-if>
+
+            <!-- Source materials -->
+            <div style="margin-top:14px;border-top:1px solid var(--dv);padding-top:12px">
+              <div style="font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)">SOURCE MATERIALS · 配布資料</div>
+              <div style="display:flex;flex-direction:column;gap:2px;margin-top:6px">
+                <sc-for list="{{ dDocs }}" as="doc" hint-placeholder-count="3">
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ tDoc }}">
+                    <span style="display:inline-flex;align-items:center;gap:9px;min-width:0;font-size:12.5px;color:var(--tx2)">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:var(--mut);flex-shrink:0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+                      <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ doc.name }}</span>
+                    </span>
+                    <span style="display:inline-flex;align-items:center;gap:8px;flex-shrink:0;font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1">{{ doc.size }}<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg></span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <sc-if value="{{ toastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;bottom:24px;right:24px;background:var(--bg1);border-left:3px solid var(--ac);border-radius:12px;box-shadow:var(--sh2a);padding:12px 18px;font-size:13px;color:var(--tx);z-index:100;max-width:420px">{{ toastMsg }}</div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;lang&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;en&quot;, &quot;ja&quot;], &quot;default&quot;: &quot;en&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Localization&quot; },
+  &quot;theme&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;light&quot;, &quot;dark&quot;], &quot;default&quot;: &quot;light&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Appearance&quot; },
+  &quot;showAudioCard&quot;: { &quot;editor&quot;: &quot;boolean&quot;, &quot;default&quot;: true, &quot;tsType&quot;: &quot;boolean&quot;, &quot;section&quot;: &quot;Content&quot; }
+}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    let st = null, sl = null;
+    try { st = localStorage.getItem('jema-theme'); sl = localStorage.getItem('jema-lang'); } catch (e) {}
+    this.state = { theme: st, lang: sl, committee: 'all', meeting: 'egmsc58', followedOnly: false, jpOpen: false, q: '', coverage: 'tracked', queued: {}, toast: null };
+    this._toastT = null;
+
+    this.committees = [
+      { key: 'basic', org: 'METI', en: 'E&G Basic Policy Subcommittee', ja: '電力・ガス基本政策小委員会', tier: 'Tier 1', followed: true, last: '第84回 · 5d', nextNo: 85, nextDate: '2026-08-05' },
+      { key: 'sysrev', org: 'METI', en: 'System Review WG', ja: '制度検討作業部会', tier: 'Tier 1', followed: true, last: '第60回 · 13d', nextNo: 61, nextDate: '2026-07-10' },
+      { key: 'renew', org: 'METI', en: 'Renewable Integration & Next-gen Grid', ja: '再エネ大量導入・次世代NW小委', tier: 'Tier 2', followed: true, last: '第63回 · 27d' },
+      { key: 'emis', org: 'METI', en: 'Emissions Trading WG', ja: '排出量取引制度WG', tier: 'Tier 2', followed: false, last: '第14回 · 27d' },
+      { key: 'supply', org: 'OCCTO', en: 'Mid- & Long-term Power Supply WG', ja: '中長期の供給力確保WG', tier: 'Tier 2', followed: false, last: '第12回 · 13d' },
+      { key: 'balrev', org: 'OCCTO', en: 'Balancing Market Review Subcommittee', ja: '需給調整市場検討小委員会', tier: 'Tier 2', followed: false, last: '第47回 · 22d', nextNo: 48, nextDate: '2026-07-17' },
+      { key: 'egmsc', org: 'EGC', en: 'E&G Market Surveillance Commission', ja: '電力・ガス取引監視等委員会', tier: 'Tier 1', followed: true, last: '第58回 · 8d', nextNo: 59, nextDate: '2026-07-22' },
+      { key: 'inst', org: 'EGC', en: 'Institutional Design Subcommittee', ja: '制度設計専門会合', tier: 'Tier 1', followed: true, last: '第91回 · 19d' }
+    ];
+
+    this.meetings = [
+      { key: 'basic84', com: 'basic', en: 'Basic Policy · No. 84', ja: '基本政策小委 · 第84回', date: '2026-06-27', status: 'done', tori: false,
+        prevEn: 'Debated capacity-market linkage for long-duration storage; secretariat to draft options for August.',
+        prevJa: '長期蓄電池の容量市場連携を審議。8月会合に向け事務局が選択肢を整理へ。',
+        title: 'E&G Basic Policy Subcommittee — No. 84', titleJa: '電力・ガス基本政策小委員会 第84回',
+        sub: '電力・ガス基本政策小委員会 · 2026-06-27 · METI · 議事録 · Summarised 06-29',
+        digest: [
+          { h: 'Key decisions', items: ['Agreed to study explicit capacity-market linkage for long-duration storage (8h+), with eligibility criteria to be drafted by the secretariat.', 'Confirmed the FY2027 review timeline for the kWh-market monitoring framework.'] },
+          { h: 'Points of discussion', items: ['Committee members split on whether linkage should extend to pumped hydro refurbishments or new-build batteries only.', 'Consumer representatives raised cost-recovery transparency concerns for pass-through to retail tariffs.'] },
+          { h: 'Action items', items: ['Secretariat to present 3 design options at the August meeting (No. 85).', 'OCCTO to provide LTDA auction interaction analysis by end of July.'] }
+        ],
+        jp: [
+          { h: '主要な論点', t: '長期蓄電池（8時間超）の容量市場連携の要否と適格性基準。揚水改修を含めるか新設蓄電池に限定するかで意見が分かれた。' },
+          { h: '主要な数値', t: '対象候補容量 約4.2GW（事務局推計）。FY2027制度見直しまでに詳細設計を確定する工程を確認。' },
+          { h: '結論', t: '事務局が8月の第85回会合で3つの設計オプションを提示することで合意。' },
+          { h: '今後の課題', t: 'LTDAオークションとの相互作用分析（OCCTO、7月末まで）。小売料金への転嫁透明性の確保策。' }
+        ],
+        refs: ['資料3 · pp.12-18', '資料4 · p.6', '議事要旨 · p.2'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.2 MB' }, { name: '資料3_長期蓄電池と容量市場.pdf', size: '4.8 MB' }, { name: '資料4_モニタリング枠組み.pdf', size: '2.1 MB' }] },
+      { key: 'egmsc58', com: 'egmsc', en: 'EGMSC · No. 58', ja: '監視等委 · 第58回', date: '2026-06-24', status: 'done', tori: true,
+        prevEn: 'Adopted the interim report on the wheeling-charge review; FY2027 tariff-reform framework now fixed.',
+        prevJa: '託送料金制度見直しの中間とりまとめを採択。FY2027の料金改革枠組みが確定。',
+        title: 'E&G Market Surveillance Commission — No. 58', titleJa: '電力・ガス取引監視等委員会 第58回',
+        sub: '電力・ガス取引監視等委員会 · 2026-06-24 · EGC · とりまとめ · 議事録 · Summarised 06-26',
+        digest: [
+          { h: 'Key decisions', items: ['Adopted the interim report (中間とりまとめ) on the wheeling-charge review — the FY2027 tariff-reform framework is now fixed.', 'Approved revised information-disclosure guidelines for general transmission & distribution utilities.'] },
+          { h: 'Points of discussion', items: ['Extent to which revenue-cap incentives should reward proactive grid reinforcement versus cost minimisation.', 'Treatment of EV-charging demand forecasts in the next regulatory period\u2019s demand assumptions.'] },
+          { h: 'Action items', items: ['Secretariat to publish the final report draft for public comment in July.', 'GT&D utilities to file revised FY2027 revenue-cap applications by September.'] }
+        ],
+        jp: [
+          { h: '主要な論点', t: '託送料金制度見直しの中間とりまとめ採択。レベニューキャップ制度の第2規制期間に向けたインセンティブ設計、系統増強への先行投資評価。' },
+          { h: '主要な数値', t: '第2規制期間はFY2028〜FY2032。公共コメントは7月中旬から30日間を予定。' },
+          { h: '結論', t: '中間とりまとめを全会一致で採択。FY2027料金改革の枠組みが確定した。' },
+          { h: '今後の課題', t: '最終報告書案の公表とパブコメ対応。一般送配電事業者のレベニューキャップ申請（9月期限）の審査体制整備。' }
+        ],
+        refs: ['資料2 · pp.4-9', '資料3 · pp.22-31', 'とりまとめ本文 · p.14'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.2 MB' }, { name: '資料2_中間とりまとめ（案）.pdf', size: '6.3 MB' }, { name: '資料3_託送料金制度の見直し.pdf', size: '5.1 MB' }, { name: '議事要旨.pdf', size: '0.4 MB' }] },
+      { key: 'sysrev60', com: 'sysrev', en: 'System Review WG · No. 60', ja: '制度検討WG · 第60回', date: '2026-06-19', status: 'running', tori: false,
+        prevEn: 'Materials ingested · summarisation in progress (2 of 6 documents done).',
+        prevJa: '資料取得済み · 要約処理中（6件中2件完了）。',
+        title: 'System Review WG — No. 60', titleJa: '制度検討作業部会 第60回',
+        sub: '制度検討作業部会 · 2026-06-19 · METI · Summarising… 要約処理中',
+        emptyTitle: 'Summarisation in progress · 要約処理中',
+        emptySub: '2 of 6 documents processed · started 06:12 JST · ETA ~4 min',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_同時市場の詳細設計.pdf', size: '7.9 MB' }, { name: '資料3_三次調整力の調達.pdf', size: '3.3 MB' }] },
+      { key: 'inst91', com: 'inst', en: 'Inst. Design · No. 91', ja: '制度設計専門会合 · 第91回', date: '2026-06-13', status: 'done', tori: false,
+        prevEn: 'Discussed imbalance-penalty recalibration and EPRX bidding-guideline amendments for tertiary products.',
+        prevJa: 'インバランス料金の再調整と三次調整力の入札ガイドライン改定を議論。',
+        title: 'Institutional Design Subcommittee — No. 91', titleJa: '制度設計専門会合 第91回',
+        sub: '制度設計専門会合 · 2026-06-13 · EGC · 議事録 · Summarised 06-16',
+        digest: [
+          { h: 'Key decisions', items: ['Endorsed recalibrating the imbalance-price cap parameters K and L from FY2027, subject to public comment.', 'Approved EPRX bidding-guideline amendments tightening offer-curve granularity for tertiary② products.'] },
+          { h: 'Points of discussion', items: ['Whether the current ¥600/kWh scarcity cap distorts BG hedging incentives during tight supply.', 'Aggregators requested a transition period for the new tertiary bidding format.'] },
+          { h: 'Action items', items: ['Secretariat to run parameter simulations against FY2025 tight-supply days and report at No. 92.'] }
+        ],
+        jp: [
+          { h: '主要な論点', t: 'インバランス料金のK・Lパラメータ再調整、三次調整力②の入札ガイドライン改定、¥600/kWh上限の妥当性。' },
+          { h: '主要な数値', t: 'FY2025の需給ひっ迫日（12日間）を対象にシミュレーション実施予定。新入札様式の経過措置は6ヶ月案。' },
+          { h: '結論', t: 'FY2027からのパラメータ再調整方針を了承（パブコメ付き）。ガイドライン改定を承認。' },
+          { h: '今後の課題', t: '第92回でのシミュレーション結果報告。アグリゲーター向け経過措置の詳細設計。' }
+        ],
+        refs: ['資料4 · pp.8-15', '資料5 · p.3'],
+        docs: [{ name: '資料4_インバランス料金の見直し.pdf', size: '3.7 MB' }, { name: '資料5_需給調整市場ガイドライン改定.pdf', size: '2.9 MB' }] },
+      { key: 'balrev47', com: 'balrev', en: 'Balancing Mkt Review · No. 47', ja: '需給調整市場検討小委 · 第47回', date: '2026-06-10', status: 'pending', tori: false,
+        title: 'Balancing Market Review Subcommittee — No. 47', titleJa: '需給調整市場検討小委員会 第47回',
+        sub: '需給調整市場検討小委員会 · 2026-06-10 · OCCTO · Pending · Queued',
+        emptyTitle: 'Summary pending · 要約待ち',
+        emptySub: 'Queued behind 2 jobs · materials detected 06-11 · will run on next catch-up',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_調達実績の評価.pdf', size: '5.5 MB' }] },
+      { key: 'renew63', com: 'renew', en: 'Renewable Integration · No. 63', ja: '再エネ大量導入小委 · 第63回', date: '2026-06-05', status: 'done', tori: false,
+        prevEn: 'Progress check on non-firm connection expansion and curtailment forecasting accuracy.',
+        prevJa: 'ノンファーム接続拡大と出力制御予測の精度を確認。',
+        title: 'Renewable Integration & Next-gen Grid — No. 63', titleJa: '再エネ大量導入・次世代電力NW小委員会 第63回',
+        sub: '再エネ大量導入・次世代電力NW小委員会 · 2026-06-05 · METI · 議事録 · Summarised 06-08',
+        digest: [
+          { h: 'Key decisions', items: ['Confirmed nationwide rollout of non-firm connection to all local (77kV-class) grids from FY2027.', 'Adopted new accuracy KPIs for day-ahead curtailment forecasts (MAE targets per area).'] },
+          { h: 'Points of discussion', items: ['Kyushu curtailment rates remain elevated (spring midday); storage co-location incentives debated.'] },
+          { h: 'Action items', items: ['OCCTO to publish per-area curtailment forecast scorecards quarterly from October.'] }
+        ],
+        jp: [
+          { h: '主要な論点', t: 'ローカル系統へのノンファーム接続全国展開、出力制御の前日予測精度KPI、九州の春季昼間の制御率。' },
+          { h: '主要な数値', t: 'FY2027から77kV級系統に展開。九州の春季出力制御率は約6.8%（前年比 −0.9pt）。' },
+          { h: '結論', t: 'ノンファーム接続の全国展開方針とKPI導入を確認。' },
+          { h: '今後の課題', t: '併設蓄電池インセンティブの制度設計。四半期スコアカードの公表体制（10月開始）。' }
+        ],
+        refs: ['資料2 · pp.5-11', '資料3 · p.19'],
+        docs: [{ name: '資料2_ノンファーム接続の展開.pdf', size: '4.2 MB' }, { name: '資料3_出力制御の実績と見通し.pdf', size: '6.0 MB' }] },
+      { key: 'emis14', com: 'emis', en: 'Emissions Trading WG · No. 14', ja: '排出量取引WG · 第14回', date: '2026-06-05', status: 'failed', tori: false,
+        title: 'Emissions Trading WG — No. 14', titleJa: '排出量取引制度WG 第14回',
+        sub: '排出量取引制度WG · 2026-06-05 · METI · Failed — retry · quality: OCR',
+        emptyTitle: 'Summarisation failed · 要約失敗',
+        emptySub: 'Scanned PDF failed OCR quality gate (confidence 0.61 < 0.75) · 2 attempts',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_制度骨格（スキャン）.pdf', size: '11.4 MB' }] }
+    ];
+
+    // Untracked METI meetings — full coverage, searchable, summaries queue to NotebookLM on track
+    this.untracked = [
+      { key: 'hyd22', org: 'METI', untracked: true, en: 'Hydrogen & Ammonia Policy · No. 22', ja: '水素・アンモニア政策小委 · 第22回', date: '2026-06-30', status: 'untracked',
+        title: 'Hydrogen & Ammonia Policy Subcommittee — No. 22', titleJa: '水素・アンモニア政策小委員会 第22回',
+        sub: '水素・アンモニア政策小委員会 · 2026-06-30 · METI · untracked 未追跡',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_価格差支援（CfD）の進捗.pdf', size: '3.6 MB' }] },
+      { key: 'nuc45', org: 'METI', untracked: true, en: 'Nuclear Subcommittee · No. 45', ja: '原子力小委員会 · 第45回', date: '2026-06-26', status: 'untracked',
+        title: 'Nuclear Subcommittee — No. 45', titleJa: '原子力小委員会 第45回',
+        sub: '原子力小委員会 · 2026-06-26 · METI · untracked 未追跡',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料3_次世代革新炉の開発状況.pdf', size: '8.2 MB' }] },
+      { key: 'ene38', org: 'METI', untracked: true, en: 'Energy Efficiency Subcommittee · No. 38', ja: '省エネルギー小委員会 · 第38回', date: '2026-06-18', status: 'untracked',
+        title: 'Energy Efficiency Subcommittee — No. 38', titleJa: '省エネルギー小委員会 第38回',
+        sub: '省エネルギー小委員会 · 2026-06-18 · METI · untracked 未追跡',
+        docs: [{ name: '資料2_ベンチマーク制度の見直し.pdf', size: '2.4 MB' }] },
+      { key: 'cp9', org: 'METI', untracked: true, en: 'Carbon Pricing Expert WG · No. 9', ja: 'カーボンプライシング専門WG · 第9回', date: '2026-06-16', status: 'untracked',
+        title: 'Carbon Pricing Expert WG — No. 9', titleJa: 'カーボンプライシング専門WG 第9回',
+        sub: 'カーボンプライシング専門WG · 2026-06-16 · METI · untracked 未追跡',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_有償オークションの設計論点.pdf', size: '4.9 MB' }] },
+      { key: 'bat11', org: 'METI', untracked: true, en: 'Battery Industry Strategy Council · No. 11', ja: '蓄電池産業戦略検討官民協議会 · 第11回', date: '2026-06-09', status: 'untracked',
+        title: 'Battery Industry Strategy Council — No. 11', titleJa: '蓄電池産業戦略検討官民協議会 第11回',
+        sub: '蓄電池産業戦略検討官民協議会 · 2026-06-09 · METI · untracked 未追跡',
+        docs: [{ name: '資料3_国内製造基盤の投資動向.pdf', size: '5.7 MB' }] },
+      { key: 'osw31', org: 'METI', untracked: true, en: 'Offshore Wind Promotion WG · No. 31', ja: '洋上風力促進WG · 第31回', date: '2026-06-03', status: 'untracked',
+        title: 'Offshore Wind Promotion WG — No. 31', titleJa: '洋上風力促進ワーキンググループ 第31回',
+        sub: '洋上風力促進WG · 2026-06-03 · METI · untracked 未追跡',
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_ラウンド4公募の状況.pdf', size: '6.1 MB' }] }
+    ];
+
+    // Scheduled upcoming meetings — agenda published, digest arrives after the meeting
+    this.upcoming = [
+      { key: 'sysrev61', com: 'sysrev', status: 'scheduled', prevKey: 'sysrev60',
+        en: 'System Review WG · No. 61', ja: '制度検討WG · 第61回', date: '2026-07-10',
+        title: 'System Review WG — No. 61', titleJa: '制度検討作業部会 第61回',
+        sub: '制度検討作業部会 · 2026-07-10 · METI · agenda published 議題公表済み',
+        prevEn: 'Agenda: simultaneous-market detailed design — settlement & bidding interactions.',
+        prevJa: '議題：同時市場の詳細設計 — 精算・入札の相互作用。',
+        agendaEn: ['Simultaneous market (同時市場) detailed design: settlement and bidding interactions.', 'Treatment of BG imbalance positions under combined kWh/ΔkW clearing.', 'Report: FY2026 system-cost simulation — interim results.'],
+        agendaJa: ['同時市場の詳細設計：精算・入札の相互作用', '同時約定におけるBGインバランスポジションの取扱い', '報告：FY2026システムコスト試算の中間結果'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_同時市場の詳細設計（続）.pdf', size: '5.4 MB' }] },
+      { key: 'balrev48', com: 'balrev', status: 'scheduled', prevKey: 'balrev47',
+        en: 'Balancing Mkt Review · No. 48', ja: '需給調整市場検討小委 · 第48回', date: '2026-07-17',
+        title: 'Balancing Market Review Subcommittee — No. 48', titleJa: '需給調整市場検討小委員会 第48回',
+        sub: '需給調整市場検討小委員会 · 2026-07-17 · OCCTO · agenda published 議題公表済み',
+        prevEn: 'Agenda: FY2026 procurement review & tertiary② shortfall countermeasures.',
+        prevJa: '議題：FY2026調達実績の点検と三次②不足対策。',
+        agendaEn: ['FY2026 procurement results across the five ΔkW products.', 'Countermeasures for tertiary② evening-ramp shortfalls.', 'Aggregator participation: metering-requirement relaxation status.'],
+        agendaJa: ['FY2026調達実績の点検（5商品）', '三次調整力②の夕方ランプ不足対策', 'アグリゲーター参入：計量要件緩和の状況'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_調達実績と不足対策.pdf', size: '4.1 MB' }] },
+      { key: 'egmsc59', com: 'egmsc', status: 'scheduled', prevKey: 'egmsc58',
+        en: 'EGMSC · No. 59', ja: '監視等委 · 第59回', date: '2026-07-22',
+        title: 'E&G Market Surveillance Commission — No. 59', titleJa: '電力・ガス取引監視等委員会 第59回',
+        sub: '電力・ガス取引監視等委員会 · 2026-07-22 · EGC · agenda published 議題公表済み',
+        prevEn: 'Agenda: final wheeling-charge report put to public comment; retail-market monitoring update.',
+        prevJa: '議題：託送料金最終報告案のパブコメ付議、小売市場モニタリング報告。',
+        agendaEn: ['Final wheeling-charge report: put to public comment (30 days).', 'Retail-market monitoring: switching rates and offer diversity.', 'Follow-up: information-disclosure guideline compliance.'],
+        agendaJa: ['託送料金最終報告案：パブリックコメント付議（30日間）', '小売市場モニタリング：スイッチング率と料金メニュー多様性', '情報開示ガイドライン遵守状況のフォローアップ'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料2_最終報告（案）.pdf', size: '7.2 MB' }] },
+      { key: 'basic85', com: 'basic', status: 'scheduled', prevKey: 'basic84',
+        en: 'Basic Policy · No. 85', ja: '基本政策小委 · 第85回', date: '2026-08-05',
+        title: 'E&G Basic Policy Subcommittee — No. 85', titleJa: '電力・ガス基本政策小委員会 第85回',
+        sub: '電力・ガス基本政策小委員会 · 2026-08-05 · METI · agenda published 議題公表済み',
+        prevEn: 'Agenda: 3 design options for long-duration storage capacity-market linkage.',
+        prevJa: '議題：長期蓄電池の容量市場連携に関する3つの設計オプション。',
+        agendaEn: ['Three design options for long-duration storage capacity-market linkage.', 'LTDA Round 4 requirements: storage participation thresholds.', 'OCCTO analysis: LTDA × capacity-market interaction.'],
+        agendaJa: ['長期蓄電池の容量市場連携：3つの設計オプション', '長期脱炭素オークション第4回の要件：蓄電池参入閾値', 'OCCTO分析：LTDAと容量市場の相互作用'],
+        docs: [{ name: '資料1_議事次第.pdf', size: '0.1 MB' }, { name: '資料3_設計オプション比較.pdf', size: '3.9 MB' }] }
+    ];
+  }
+
+  toast(msg) {
+    clearTimeout(this._toastT);
+    this.setState({ toast: msg });
+    this._toastT = setTimeout(() => this.setState({ toast: null }), 3800);
+  }
+  theme() { return this.state.theme ?? this.props.theme ?? 'light'; }
+  dUntil(ds) { return Math.round((new Date(ds) - new Date(2026, 6, 2)) / 864e5); }
+
+  // ---- handlers ----
+  setLangEn = () => { try { localStorage.setItem('jema-lang', 'en'); } catch (e) {} this.setState({ lang: 'en' }); };
+  setLangJa = () => { try { localStorage.setItem('jema-lang', 'ja'); } catch (e) {} this.setState({ lang: 'ja' }); };
+  toggleTheme = () => {
+    const next = this.theme() === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('jema-theme', next); } catch (e) {}
+    this.setState({ theme: next });
+  };
+  goOverview = () => { window.location.href = 'market-overview.html'; };
+  goMarket = () => { window.location.href = 'market-data.html'; };
+  goCapacity = () => { window.location.href = 'capacity-auctions.html'; };
+  selAll = () => this.setState({ committee: 'all' });
+  toggleFollowed = () => this.setState(s => ({ followedOnly: !s.followedOnly }));
+  toggleJp = () => this.setState(s => ({ jpOpen: !s.jpOpen }));
+  onQ = e => this.setState({ q: e.target.value });
+  clearQ = () => this.setState({ q: '' });
+  covTracked = () => this.setState({ coverage: 'tracked' });
+  covAll = () => this.setState({ coverage: 'all' });
+  queueMeeting(key) {
+    this.setState(s => ({ queued: { ...s.queued, [key]: true } }));
+    this.toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (daily 06:10 JST) · 追跡し、要約キューに登録しました');
+  }
+  runCatchup = () => this.toast('Catch-up run complete — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · 差分取得が完了しました');
+  tManage = () => this.toast('Committee registry management (follow / tiers / sources) — not in this prototype · 委員会管理は対象外');
+  tFilter = () => this.toast('Filter dropdown — not in this prototype · フィルタは対象外');
+  tViewAll = () => this.toast('Full “newly summarised” list — not in this prototype · 一覧表示は対象外');
+  tAdd = () => this.toast('Add discovered committees to the registry — not in this prototype · 追跡追加は対象外');
+  tSource = () => this.toast('Opens the committee’s official METI/OCCTO page in a new tab · 公式ページを開きます');
+  tRef = () => this.toast('Citation deep-link: opens the source PDF at the cited page · 引用元PDFの該当ページを開きます');
+  tDoc = () => this.toast('Opens the original PDF from METI · 元資料PDFを開きます');
+  tRetry = () => this.toast('Re-queued with high-accuracy OCR — will run on next catch-up · 高精度OCRで再実行キューに追加');
+  tExpand = () => this.toast('Nav rail auto-collapses on this screen to fit three panes · 3ペイン表示のためナビは自動折りたたみ');
+  tNotif = () => this.toast('Notifications live on the Overview screen · 通知は概況画面にあります');
+  tIcsOne = () => this.toast('.ics export for this meeting — not wired in this prototype · この会合のICS出力は対象外');
+  tNotifyMe = () => this.toast('Alert armed — you will be notified when the digest is ready · 要約完了時に通知します');
+  tNav = () => this.toast('Placeholder destination in this prototype · 本プロトタイプ対象外');
+
+  selectCommittee(key) { this.setState({ committee: key }); }
+  selectMeeting(key) { this.setState({ meeting: key, jpOpen: false }); }
+
+  renderVals() {
+    const L = this.state.lang ?? this.props.lang ?? 'en';
+    const dark = this.theme() === 'dark';
+    const selCom = this.state.committee;
+    const selMtg = this.state.meeting;
+    const fOnly = this.state.followedOnly;
+
+    const segBase = on => ({ padding: '4px 13px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: on ? 'var(--ac)' : 'transparent', color: on ? '#FFFFFF' : 'var(--mut)', transition: 'all .15s', whiteSpace: 'nowrap' });
+    const chipBase = on => ({ fontSize: 11.5, fontWeight: 600, padding: '3px 11px', borderRadius: 999, cursor: 'pointer', border: on ? '1px solid var(--ac)' : '1px solid var(--bd2)', background: on ? 'var(--acTint)' : 'var(--bg1)', color: on ? 'var(--acT)' : 'var(--mut)', whiteSpace: 'nowrap' });
+
+    const orgColors = { METI: 'var(--ac)', OCCTO: dark ? '#7C9CD1' : '#4A6FA5', EGC: dark ? '#C77BD8' : '#7B2D8E' };
+
+    // ---- explorer ----
+    const orgs = ['METI', 'OCCTO', 'EGC'];
+    const explorerGroups = orgs.map(org => {
+      const items = this.committees
+        .filter(c => c.org === org && (!fOnly || c.followed))
+        .map(c => {
+          const on = selCom === c.key;
+          let nx = '';
+          if (c.nextDate) {
+            const dd = this.dUntil(c.nextDate);
+            const mo = parseInt(c.nextDate.slice(5, 7), 10), dy = parseInt(c.nextDate.slice(8, 10), 10);
+            const MOs = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+            nx = L === 'ja' ? ('次回 第' + c.nextNo + '回 · ' + mo + '月' + dy + '日 · あと' + dd + '日') : ('Next No. ' + c.nextNo + ' · ' + MOs[mo] + ' ' + dy + ' · in ' + dd + 'd');
+          }
+          return {
+            n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
+            next: nx, hasNext: !!c.nextDate,
+            s: { padding: '7px 9px', borderRadius: 10, cursor: 'pointer', background: on ? 'var(--acTint)' : 'transparent', borderLeft: on ? '3px solid var(--ac)' : '3px solid transparent', minWidth: 0 },
+            click: () => this.selectCommittee(c.key),
+            folTxt: c.followed ? 'Following フォロー中' : 'Not followed 未フォロー',
+            folS: c.followed
+              ? { fontSize: 9.5, fontWeight: 600, background: 'var(--acBadge)', color: '#FFFFFF', borderRadius: 999, padding: '1px 8px' }
+              : { fontSize: 9.5, fontWeight: 500, border: '1px solid var(--bd2)', color: 'var(--mut)', borderRadius: 999, padding: '0 8px' }
+          };
+        });
+      const count = this.committees.filter(c => c.org === org).length;
+      return { name: org + ' · ' + count, dot: { width: 7, height: 7, borderRadius: 999, background: orgColors[org], display: 'inline-block' }, items };
+    }).filter(g => g.items.length);
+
+    const allOn = selCom === 'all';
+    const allRowS = { marginTop: 10, padding: '7px 11px', borderRadius: 10, cursor: 'pointer', fontSize: 12.5, fontWeight: 600, background: allOn ? 'var(--acTint)' : 'var(--bg2)', color: allOn ? 'var(--acT)' : 'var(--tx2)' };
+
+    // ---- feed ----
+    const stChip = st => {
+      const base = { fontSize: 10, fontWeight: 600, borderRadius: 999, padding: '1px 8px', flexShrink: 0, whiteSpace: 'nowrap' };
+      if (st === 'done') return { txt: 'Summarised 済', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } };
+      if (st === 'scheduled') return { txt: 'Scheduled 開催予定', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } };
+      if (st === 'running') return { txt: 'Summarising…', s: { ...base, background: 'var(--acTint)', color: 'var(--acT)' } };
+      if (st === 'failed') return { txt: 'Failed — retry', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } };
+      if (st === 'untracked') return { txt: 'Untracked 未追跡', s: { ...base, border: '1px dashed var(--fnt2)', color: 'var(--mut)', background: 'transparent' } };
+      return { txt: 'Pending · Queued', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } };
+    };
+    const followedSet = {};
+    this.committees.forEach(c => { followedSet[c.key] = c.followed; });
+    const comOrg = {};
+    this.committees.forEach(c => { comOrg[c.key] = c.org; });
+
+    const q = (this.state.q || '').trim().toLowerCase();
+    const coverage = this.state.coverage;
+    let pool = this.meetings.slice();
+    if (coverage === 'all' || q) pool = pool.concat(this.untracked);
+    const feedList = pool.filter(m => {
+      if (m.untracked) {
+        if (selCom !== 'all' || fOnly) return false;
+      } else {
+        if (!(selCom === 'all' || m.com === selCom)) return false;
+        if (fOnly && !followedSet[m.com]) return false;
+      }
+      if (q) {
+        const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', m.com ? comOrg[m.com] : m.org]
+          .concat(m.digest ? m.digest.map(s => s.h + ' ' + s.items.join(' ')) : [])
+          .join(' ').toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }).sort((a, b) => b.date < a.date ? -1 : 1);
+    const mapFeed = m => {
+      const on = selMtg === m.key;
+      const st = stChip(this.state.queued[m.key] ? 'pending' : m.status);
+      const dd = m.status === 'scheduled' ? this.dUntil(m.date) : 0;
+      return {
+        title: L === 'ja' ? m.ja : m.en,
+        meta: m.status === 'scheduled'
+          ? m.date + ' · ' + (L === 'ja' ? ('あと' + dd + '日') : ('in ' + dd + 'd')) + ' · ' + comOrg[m.com]
+          : m.date + (m.tori ? ' · とりまとめ' : '') + ' · ' + (m.com ? comOrg[m.com] : m.org),
+        st: st.txt, stS: st.s,
+        hasPrev: !!(m.prevEn),
+        preview: m.prevEn ? (L === 'ja' ? m.prevJa : m.prevEn) : '',
+        dot: { width: 7, height: 7, borderRadius: 999, background: m.status === 'scheduled' ? 'var(--okDot)' : followedSet[m.com] ? 'var(--ac)' : 'var(--fnt2)', flexShrink: 0 },
+        s: { padding: '9px 10px', borderRadius: 12, cursor: 'pointer', background: on ? 'var(--acTint)' : 'transparent', borderLeft: on ? '3px solid var(--ac)' : '3px solid transparent', borderBottom: '1px solid var(--dv)', minWidth: 0 },
+        click: () => this.selectMeeting(m.key)
+      };
+    };
+    const feed = feedList.map(mapFeed);
+    const upList = this.upcoming.filter(m => {
+      if (!(selCom === 'all' || m.com === selCom)) return false;
+      if (fOnly && !followedSet[m.com]) return false;
+      if (q) {
+        const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', comOrg[m.com]]
+          .concat(m.agendaEn || []).concat(m.agendaJa || []).join(' ').toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    }).sort((a, b) => a.date < b.date ? -1 : 1);
+    const feedUp = upList.map(mapFeed);
+
+    // ---- detail ----
+    const allMeetings = this.meetings.concat(this.untracked).concat(this.upcoming);
+    let d = allMeetings.find(m => m.key === selMtg);
+    if (!d) d = feedList[0] || this.meetings[0];
+    const dQueued = !!this.state.queued[d.key];
+    const dEffSt = dQueued ? 'pending' : d.status;
+    const dSt = stChip(dEffSt);
+    const hasDigest = dEffSt === 'done';
+    const dIsUn = dEffSt === 'untracked';
+    const hasAgenda = dEffSt === 'scheduled';
+    const dPrev = hasAgenda ? allMeetings.find(m => m.key === d.prevKey) : null;
+
+    return {
+      isDark: dark ? 'true' : 'false', isDarkB: dark, isLightB: !dark,
+      toggleTheme: this.toggleTheme,
+      setLangEn: this.setLangEn, setLangJa: this.setLangJa,
+      langJaS: segBase(L === 'ja'), langEnS: segBase(L === 'en'),
+      goOverview: this.goOverview, goMarket: this.goMarket, goCapacity: this.goCapacity,
+      tNav: this.tNav, tNotif: this.tNotif, tExpand: this.tExpand,
+      runCatchup: this.runCatchup, tManage: this.tManage, tFilter: this.tFilter,
+      tViewAll: this.tViewAll, tAdd: this.tAdd, tSource: this.tSource,
+      tRef: this.tRef, tDoc: this.tDoc, tRetry: this.tRetry,
+      chipCommittee: chipBase(selCom !== 'all'), chipDate: chipBase(false), chipFollowed: chipBase(fOnly),
+      toggleFollowed: this.toggleFollowed, selAll: this.selAll, allRowS,
+      newCards: [
+        { title: 'EGMSC · 第58回 🏁', meta: '2026-06-24 · summarised 06-26', preview: L === 'ja' ? '託送料金制度見直しの中間とりまとめを採択。' : 'Adopted the interim report on the wheeling-charge review.', click: () => this.selectMeeting('egmsc58') },
+        { title: 'Basic Policy · 第84回', meta: '2026-06-27 · summarised 06-29', preview: L === 'ja' ? '長期蓄電池の容量市場連携を審議。' : 'Debated capacity-market linkage for long-duration storage.', click: () => this.selectMeeting('basic84') },
+        { title: 'Renewable Integration · 第63回', meta: '2026-06-05 · summarised 06-08', preview: L === 'ja' ? 'ノンファーム接続の全国展開方針を確認。' : 'Confirmed nationwide non-firm connection rollout from FY2027.', click: () => this.selectMeeting('renew63') }
+      ],
+      explorerGroups, feed, feedCount: feed.length + ' shown',
+      covTS: { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'tracked' ? 'var(--ac)' : 'transparent', color: coverage === 'tracked' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' },
+      covAS: { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'all' ? 'var(--ac)' : 'transparent', color: coverage === 'all' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' },
+      covTracked: this.covTracked, covAll: this.covAll,
+      q: this.state.q, onQ: this.onQ, hasQ: !!q, clearQ: this.clearQ,
+      feedNote: q ? ('Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')) : (feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')),
+      dTitle: L === 'ja' ? d.titleJa : d.title,
+      dSub: d.sub, dSt: dSt.txt, dStS: { ...dSt.s, fontSize: 10.5, padding: '2px 9px' }, dTori: !!d.tori,
+      dHasDigest: hasDigest, dNoDigest: !hasDigest && !hasAgenda, dFailed: dEffSt === 'failed',
+      dAgendaOn: hasAgenda,
+      dAgenda: hasAgenda ? (L === 'ja' ? d.agendaJa : d.agendaEn).map(t => ({ t })) : [],
+      dCountdown: hasAgenda ? (L === 'ja' ? ('あと' + this.dUntil(d.date) + '日') : ('in ' + this.dUntil(d.date) + ' days')) : '',
+      dPrevLabel: dPrev ? (L === 'ja' ? dPrev.ja : dPrev.en) : '',
+      dPrevClick: () => { if (dPrev) this.selectMeeting(dPrev.key); },
+      tIcsOne: this.tIcsOne, tNotifyMe: this.tNotifyMe,
+      feedUp, hasUpcoming: feedUp.length > 0,
+      dUntracked: dIsUn, queueThis: () => this.queueMeeting(d.key),
+      dEmptyTitle: dIsUn ? 'Not summarised — untracked committee · 未追跡の委員会' : (dQueued && d.untracked) ? 'Queued for summarisation · キュー登録済み' : d.emptyTitle || '',
+      dEmptySub: dIsUn ? 'Track this committee to add its meetings to the NotebookLM summarisation queue · 追跡するとNotebookLM要約キューに追加されます' : (dQueued && d.untracked) ? 'NotebookLM picks this up on the next catch-up run (daily 06:10 JST) · 次回の差分取得で要約されます' : d.emptySub || '',
+      dSections: hasDigest ? d.digest.map(s => ({ h: s.h, items: s.items.map(t => ({ t })) })) : [],
+      dJp: hasDigest ? d.jp : [],
+      dRefs: hasDigest ? d.refs.map(t => ({ t })) : [],
+      dDocs: d.docs,
+      jpOpen: this.state.jpOpen, jpClosed: !this.state.jpOpen,
+      toggleJp: this.toggleJp,
+      showAudio: (this.props.showAudioCard ?? true) && !hasAgenda,
+      toastOn: !!this.state.toast, toastMsg: this.state.toast
+    };
+  }
+}
+</script>
+</body>
+</html>

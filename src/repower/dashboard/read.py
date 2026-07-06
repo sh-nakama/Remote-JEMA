@@ -536,6 +536,7 @@ def balancing_period_stats(
     return {
         "avg_demand_mw": avg_demand,
         "avg_contracted_mw": avg_contracted,
+        "avg_bid_volume_mw": means.get("bid_volume_mw"),
         "avg_unprocured_mw": avg_unprocured,
         "avg_price": means.get("price_avg"),
         "avg_max_price": means.get("price_max"),
@@ -684,3 +685,20 @@ def _records(df: pd.DataFrame) -> list[dict]:
     if "datetime" in out.columns:
         out["datetime"] = pd.to_datetime(out["datetime"]).dt.strftime("%Y-%m-%dT%H:%M:%S")
     return out.to_dict("records")
+
+
+# ── Capacity market (curated; see repower.dashboard.capacity_data) ───────────
+# OCCTO publishes the capacity-market summary only as PDF / Excel, so these read
+# from the curated, source-cited source-of-truth module rather than the DB. They
+# are plain functions (no DB / no cache) and return the web MaRow / LtdaRow shape.
+
+def load_capacity_ma() -> list[dict]:
+    """Main-auction results per delivery fiscal year (curated)."""
+    from repower.dashboard import capacity_data
+    return capacity_data.main_auction_rows()
+
+
+def load_capacity_ltda() -> list[dict]:
+    """LTDA (long-term decarbonization auction) technology breakdown (curated)."""
+    from repower.dashboard import capacity_data
+    return capacity_data.ltda_rows()

@@ -1,0 +1,2220 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>
+// GENERATED from dc-runtime/src/*.ts — do not edit. Rebuild with `cd dc-runtime && bun run build`.
+"use strict";
+(() => {
+  var __defProp = Object.defineProperty;
+  var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
+  var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
+
+  // src/react.ts
+  function getReact() {
+    const R = window.React;
+    if (!R) throw new Error("dc-runtime: window.React is not available yet");
+    return R;
+  }
+  function getReactDOM() {
+    const RD = window.ReactDOM;
+    if (!RD) throw new Error("dc-runtime: window.ReactDOM is not available yet");
+    return RD;
+  }
+  var h = ((...args) => getReact().createElement(
+    ...args
+  ));
+
+  // src/parse.ts
+  function parseDcDocument(doc) {
+    const dc = doc.querySelector("x-dc");
+    if (!dc) return null;
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template: dc.innerHTML,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDcText(src) {
+    const openMatch = /<x-dc(?:\s[^>]*)?>/.exec(src);
+    if (!openMatch) return null;
+    const close = src.lastIndexOf("</x-dc>");
+    if (close === -1 || close < openMatch.index) return null;
+    const template = src.slice(openMatch.index + openMatch[0].length, close);
+    const doc = new DOMParser().parseFromString(src, "text/html");
+    const scriptEl = doc.querySelector("script[data-dc-script]");
+    const { props, preview } = parseDataProps(
+      scriptEl?.getAttribute("data-props") ?? null
+    );
+    return {
+      template,
+      js: scriptEl ? scriptEl.textContent || "" : "",
+      props,
+      preview
+    };
+  }
+  function parseDataProps(raw) {
+    if (!raw) return { props: null, preview: null };
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { props: null, preview: null };
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { props: null, preview: null };
+    }
+    const obj = parsed;
+    const preview = obj.$preview && typeof obj.$preview === "object" ? obj.$preview : null;
+    const rest = {};
+    for (const k of Object.keys(obj)) {
+      if (k[0] !== "$") rest[k] = obj[k];
+    }
+    return { props: Object.keys(rest).length ? rest : null, preview };
+  }
+  function dcNameFromPath(pathname) {
+    let p = pathname || "";
+    try {
+      p = decodeURIComponent(p);
+    } catch {
+    }
+    const base = p.split("/").pop() || "Root";
+    return base.replace(/\.dc\.html$/, "").replace(/\.html?$/, "") || "Root";
+  }
+
+  // src/boot.ts
+  var BASE_CSS = `
+    .sc-placeholder{background:color-mix(in srgb,currentColor 8%,transparent);
+      border:1px solid color-mix(in srgb,currentColor 50%,transparent);
+      border-radius:2px;box-sizing:border-box;overflow:hidden}
+    @keyframes sc-shine{0%{background-position:100% 50%}100%{background-position:0% 50%}}
+    html.sc-dc-streaming .sc-placeholder,
+    html.sc-dc-streaming .sc-interp.sc-missing{position:relative;
+      background:color-mix(in srgb,currentColor 5%,transparent);
+      border-color:transparent}
+    html.sc-dc-streaming .sc-placeholder::before,
+    html.sc-dc-streaming .sc-interp.sc-missing::before{content:'';
+      position:absolute;inset:0;pointer-events:none;
+      background:linear-gradient(90deg,rgba(217,119,87,0) 25%,rgba(247,225,211,.95) 37%,rgba(217,119,87,0) 63%);
+      background-size:400% 100%;animation:sc-shine 1.4s ease infinite}
+    html.sc-dc-streaming .sc-placeholder:nth-child(n+9 of .sc-placeholder)::before,
+    html.sc-dc-streaming .sc-interp.sc-missing:nth-child(n+9 of .sc-interp.sc-missing)::before{animation:none;
+      background:color-mix(in srgb,currentColor 8%,transparent)}
+    .sc-placeholder-error{padding:4px 8px;font:11px/1.4 ui-monospace,monospace;
+      color:color-mix(in srgb,currentColor 70%,transparent);word-break:break-word}
+    .sc-interp.sc-missing{display:inline-block;width:2em;height:1em;overflow:hidden;
+      vertical-align:text-bottom;background:rgba(255,255,255,.3);border:1px solid rgba(0,0,0,.5);
+      border-radius:2px;box-sizing:border-box;color:transparent;
+      user-select:none}
+    .sc-interp.sc-unresolved{font-family:ui-monospace,monospace;font-size:.85em;
+      color:color-mix(in srgb,currentColor 50%,transparent);
+      background:color-mix(in srgb,currentColor 10%,transparent);border-radius:3px;
+      padding:0 3px}
+    .sc-host.sc-has-error{position:relative}
+    .sc-logic-error{position:absolute;top:8px;left:8px;z-index:2147483647;max-width:60ch;
+      padding:6px 10px;background:#b00020;color:#fff;font:12px/1.4 ui-monospace,monospace;
+      border-radius:4px;white-space:pre-wrap;pointer-events:none}
+    /* Mirrors PRINT_BASELINE_CSS in apps/web deck-stage-export.ts \u2014 keep both
+       in sync until dc-runtime regains a build step. */
+    @media print {
+      @page { margin: 0.5cm; }
+      figure, table { break-inside: avoid; }
+      #dc-root, #dc-root > .sc-host { height: auto; }
+      *, *::before, *::after {
+        print-color-adjust: exact; -webkit-print-color-adjust: exact;
+        backdrop-filter: none !important; -webkit-backdrop-filter: none !important;
+        animation-delay: -99s !important; animation-duration: .001s !important;
+        animation-iteration-count: 1 !important; animation-fill-mode: both !important;
+        animation-play-state: running !important; transition-duration: 0s !important;
+      }
+    }
+  `;
+  var FULL_PAGE_CSS = "html,body{height:100%;margin:0}#dc-root,#dc-root>.sc-host{height:100%}";
+  function rootNameForDocument(doc, loc) {
+    let bootPath = loc.pathname || "";
+    if (!/\.dc\.html?$/i.test(safeDecode(bootPath))) {
+      try {
+        bootPath = new URL(doc.baseURI || "/").pathname;
+      } catch {
+      }
+    }
+    return dcNameFromPath(bootPath);
+  }
+  function safeDecode(s) {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  }
+  function boot(runtime, doc = document) {
+    const parsed = parseDcDocument(doc);
+    if (!parsed) return null;
+    const React = getReact();
+    const rootName = rootNameForDocument(doc, location);
+    runtime.markFetched(rootName);
+    runtime.setRootName(rootName);
+    runtime.adoptParsed(rootName, parsed);
+    fetch(location.href).then((res) => res.ok ? res.text() : "").then((t) => {
+      const raw = t ? parseDcText(t) : null;
+      if (raw?.template) runtime.updateHtml(rootName, raw.template);
+    }).catch(() => {
+    });
+    const dc = doc.querySelector("x-dc");
+    const hostEl = doc.createElement("div");
+    hostEl.id = "dc-root";
+    dc.replaceWith(hostEl);
+    if (!parsed.preview) {
+      const s = doc.createElement("style");
+      s.textContent = FULL_PAGE_CSS;
+      doc.head.appendChild(s);
+    }
+    const Root = runtime.getDC(rootName);
+    const entry = runtime.registry.get(rootName);
+    function StandaloneRoot() {
+      const [, setTick] = React.useState(0);
+      React.useEffect(() => {
+        const sub = () => setTick((n) => n + 1);
+        entry.subs.add(sub);
+        return () => {
+          entry.subs.delete(sub);
+        };
+      }, []);
+      const defaults = React.useMemo(() => {
+        const d = {};
+        for (const k in entry.propsMeta || {}) {
+          const v = entry.propsMeta?.[k]?.default;
+          if (v !== void 0) d[k] = v;
+        }
+        return d;
+      }, [entry.propsMeta]);
+      return h(Root, { ...defaults, ...entry.propOverrides || {} });
+    }
+    const ReactDOM = getReactDOM();
+    if (ReactDOM.createRoot)
+      ReactDOM.createRoot(hostEl).render(h(StandaloneRoot));
+    else ReactDOM.render(h(StandaloneRoot), hostEl);
+    return rootName;
+  }
+
+  // src/expr.ts
+  var IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+  var NUMBER_RE = /^-?\d+(\.\d+)?$/;
+  function resolve(vals, src) {
+    const expr = String(src).trim();
+    if (!expr) return void 0;
+    if (expr[0] === "(" && expr[expr.length - 1] === ")" && parensWrapWhole(expr)) {
+      return resolve(vals, expr.slice(1, -1));
+    }
+    const eq = findTopLevelEquality(expr);
+    if (eq) {
+      const lv = resolve(vals, expr.slice(0, eq.index));
+      const rv = resolve(vals, expr.slice(eq.index + eq.op.length));
+      switch (eq.op) {
+        case "===":
+          return lv === rv;
+        case "!==":
+          return lv !== rv;
+        case "==":
+          return lv == rv;
+        default:
+          return lv != rv;
+      }
+    }
+    if (expr[0] === "!") return !resolve(vals, expr.slice(1));
+    if (expr === "true") return true;
+    if (expr === "false") return false;
+    if (expr === "null") return null;
+    if (expr === "undefined") return void 0;
+    if (NUMBER_RE.test(expr)) return Number(expr);
+    if (expr.length >= 2 && (expr[0] === '"' || expr[0] === "'") && expr[expr.length - 1] === expr[0]) {
+      return expr.slice(1, -1);
+    }
+    return resolvePath(vals, expr);
+  }
+  function parensWrapWhole(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length - 1; i++) {
+      if (expr[i] === "(") depth++;
+      else if (expr[i] === ")") {
+        depth--;
+        if (depth === 0) return false;
+      }
+    }
+    return true;
+  }
+  function findTopLevelEquality(expr) {
+    let depth = 0;
+    for (let i = 0; i < expr.length; i++) {
+      const c = expr[i];
+      if (c === "[" || c === "(") depth++;
+      else if (c === "]" || c === ")") depth--;
+      else if (depth === 0 && (c === "=" || c === "!") && expr[i + 1] === "=") {
+        if (i > 0 && (expr[i - 1] === "=" || expr[i - 1] === "!")) continue;
+        if (!expr.slice(0, i).trim()) continue;
+        const op = expr[i + 2] === "=" ? c + "==" : c + "=";
+        return { index: i, op };
+      }
+    }
+    return null;
+  }
+  function resolvePath(vals, expr) {
+    const head = expr.match(IDENT_RE);
+    if (!head) return void 0;
+    let cur = vals == null ? void 0 : vals[head[0]];
+    let i = head[0].length;
+    while (i < expr.length) {
+      if (expr[i] === ".") {
+        const m = expr.slice(i + 1).match(IDENT_RE) || expr.slice(i + 1).match(/^\d+/);
+        if (!m) return void 0;
+        cur = cur == null ? void 0 : cur[m[0]];
+        i += 1 + m[0].length;
+      } else if (expr[i] === "[") {
+        let depth = 1;
+        let j = i + 1;
+        while (j < expr.length && depth > 0) {
+          if (expr[j] === "[") depth++;
+          else if (expr[j] === "]") {
+            depth--;
+            if (depth === 0) break;
+          }
+          j++;
+        }
+        if (depth !== 0) return void 0;
+        const key = resolve(vals, expr.slice(i + 1, j));
+        cur = cur == null ? void 0 : cur[key];
+        i = j + 1;
+      } else {
+        return void 0;
+      }
+    }
+    return cur;
+  }
+
+  // src/encode.ts
+  var CAMEL_ATTR = "sc-camel-";
+  var INLINE_TEXT_TAGS = new Set(
+    "a abbr b bdi bdo br cite code del dfn em i ins kbd mark q s samp small span strike strong sub sup u var wbr".split(
+      " "
+    )
+  );
+  var RAW_WRAP = {
+    select: "sc-raw-select",
+    table: "sc-raw-table",
+    tbody: "sc-raw-tbody",
+    thead: "sc-raw-thead",
+    tfoot: "sc-raw-tfoot",
+    tr: "sc-raw-tr",
+    td: "sc-raw-td",
+    th: "sc-raw-th",
+    caption: "sc-raw-caption"
+  };
+  var RAW_UNWRAP = Object.fromEntries(
+    Object.entries(RAW_WRAP).map(([k, v]) => [v, k])
+  );
+  var EVENT_MAP = {
+    onclick: "onClick",
+    onchange: "onChange",
+    oninput: "onInput",
+    onsubmit: "onSubmit",
+    onkeydown: "onKeyDown",
+    onkeyup: "onKeyUp",
+    onkeypress: "onKeyPress",
+    onmousedown: "onMouseDown",
+    onmouseup: "onMouseUp",
+    onmouseenter: "onMouseEnter",
+    onmouseleave: "onMouseLeave",
+    onfocus: "onFocus",
+    onblur: "onBlur",
+    ondoubleclick: "onDoubleClick",
+    oncontextmenu: "onContextMenu"
+  };
+  var ATTRS = `(?:[^>"']|"[^"]*"|'[^']*')*`;
+  var IMPORT_SELF_CLOSE_RE = new RegExp(
+    "<(x-import|dc-import)(" + ATTRS + ")/>",
+    "gi"
+  );
+  var CAMEL_ATTR_RE = /(\s)([a-z]+[A-Z][A-Za-z0-9]*)(\s*=)/g;
+  function encodeCase(html) {
+    html = html.replace(
+      IMPORT_SELF_CLOSE_RE,
+      (_, t, a) => "<" + t + a + "></" + t + ">"
+    );
+    html = html.replace(/<helmet(\s|>)/gi, "<sc-helmet$1");
+    html = html.replace(/<\/helmet\s*>/gi, "</sc-helmet>");
+    html = html.replace(
+      CAMEL_ATTR_RE,
+      (_, sp, name, eq) => sp + CAMEL_ATTR + name.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase()) + eq
+    );
+    for (const [real, alias] of Object.entries(RAW_WRAP)) {
+      html = html.replace(
+        new RegExp("(</?)" + real + "(?=[\\s>])", "gi"),
+        "$1" + alias
+      );
+    }
+    return html;
+  }
+  function kebabToCamel(s) {
+    return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
+  }
+  function cssToObj(css) {
+    const o = {};
+    for (const decl of css.split(";")) {
+      const i = decl.indexOf(":");
+      if (i < 0) continue;
+      const prop = decl.slice(0, i).trim();
+      o[prop.startsWith("--") ? prop : kebabToCamel(prop)] = decl.slice(i + 1).trim();
+    }
+    return o;
+  }
+  function compileAttr(raw) {
+    const whole = raw.match(/^\s*\{\{([\s\S]+?)\}\}\s*$/);
+    if (whole) {
+      const path = whole[1];
+      return (vals) => resolve(vals, path);
+    }
+    if (raw.includes("{{")) {
+      const parts = raw.split(/\{\{([\s\S]+?)\}\}/g);
+      return (vals) => parts.map((s, i) => i & 1 ? resolve(vals, s) ?? "" : s).join("");
+    }
+    return () => raw;
+  }
+
+  // src/compile.ts
+  function collectProps(node, kind, host) {
+    const propGetters = [];
+    const pseudoClasses = [];
+    let hintSize = null;
+    for (const { name, value } of [...node.attributes]) {
+      if (name === "sc-name" || name === "data-dc-tpl") continue;
+      let key = name;
+      if (key.startsWith(CAMEL_ATTR))
+        key = kebabToCamel(key.slice(CAMEL_ATTR.length));
+      if (key === "hint-size") {
+        hintSize = value;
+        continue;
+      }
+      if (key.startsWith("style-")) {
+        pseudoClasses.push(host.pseudoClass(key.slice(6), value));
+        continue;
+      }
+      if (kind !== "dom") {
+        if (key.includes("-") && !(kind === "x-import" && (key.startsWith("aria-") || key.startsWith("data-"))))
+          key = kebabToCamel(key);
+      } else {
+        if (key === "class") key = "className";
+        else if (key === "for") key = "htmlFor";
+        else if (key.startsWith("on"))
+          key = EVENT_MAP[key] || "on" + key[2].toUpperCase() + key.slice(3);
+      }
+      propGetters.push([key, compileAttr(value)]);
+    }
+    return { propGetters, pseudoClasses, hintSize };
+  }
+  var HOST_STYLE_PROPS = /* @__PURE__ */ new Set([
+    "position",
+    "left",
+    "right",
+    "top",
+    "bottom",
+    "inset",
+    "width",
+    "height",
+    "z-index",
+    "transform"
+  ]);
+  function hostPositionStyle(style) {
+    const all = typeof style === "string" ? cssToObj(style) : style != null && typeof style === "object" ? style : null;
+    if (!all) return void 0;
+    const out = {};
+    for (const [k, v] of Object.entries(all)) {
+      const kebab = k.replace(/[A-Z]/g, (c) => "-" + c.toLowerCase());
+      if (HOST_STYLE_PROPS.has(kebab)) out[k] = v;
+    }
+    return Object.keys(out).length ? out : void 0;
+  }
+  function compileTemplate(html, host) {
+    const tpl = document.createElement("template");
+    //! nosemgrep: direct-inner-html-assignment
+    tpl.innerHTML = encodeCase(html);
+    let tplN = 0;
+    (function stamp(node) {
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        node.setAttribute("data-dc-tpl", String(tplN++));
+      }
+      for (const c of node.childNodes) stamp(c);
+    })(tpl.content);
+    const builders = walkChildren(tpl.content, host);
+    const render = ((vals, ctx) => builders.map((b, i) => b(vals || {}, ctx, i)));
+    render.__annotated = tpl.innerHTML;
+    return render;
+  }
+  function walkChildren(node, host) {
+    return [...node.childNodes].map((c) => walk(c, host)).filter((b) => b != null);
+  }
+  function walk(node, host) {
+    if (node.nodeType === Node.TEXT_NODE) return walkText(node);
+    if (node.nodeType !== Node.ELEMENT_NODE) return null;
+    const el = node;
+    const tag = el.tagName.toLowerCase();
+    if (tag === "sc-for") return walkFor(el, host);
+    if (tag === "sc-if") return walkIf(el, host);
+    if (tag === "x-import") return walkXImport(el, host);
+    if (tag === "sc-helmet") return host.helmet(el);
+    if (tag === "dc-import") return walkComponent(el, host);
+    return walkElement(el, host);
+  }
+  var warnedHoles = /* @__PURE__ */ new Set();
+  function warnUnresolved(ctx, what) {
+    const key = (ctx?.__name || "?") + "\0" + what;
+    if (warnedHoles.has(key)) return;
+    warnedHoles.add(key);
+    console.warn("[dc-runtime] " + (ctx?.__name || "template") + ": " + what);
+  }
+  function walkText(node) {
+    const txt = node.nodeValue ?? "";
+    if (!txt.includes("{{")) {
+      if (!txt.trim() && !txt.includes(" ")) return null;
+      return () => txt;
+    }
+    const parts = txt.split(/\{\{([\s\S]+?)\}\}/g);
+    return (vals, ctx, key) => h(
+      getReact().Fragment,
+      { key },
+      ...parts.map((p, i) => {
+        if (!(i & 1)) return p;
+        const v = resolve(vals, p);
+        if (v === void 0) {
+          if (!ctx?.__streamingNow) {
+            if (document.body?.hasAttribute("data-dc-editor-on")) {
+              return h(
+                "span",
+                { key: i, className: "sc-interp sc-unresolved" },
+                "{{ " + p.trim() + " }}"
+              );
+            }
+            warnUnresolved(
+              ctx,
+              "{{ " + p.trim() + " }} never resolved \u2014 rendered as empty"
+            );
+            return null;
+          }
+          return h(
+            "span",
+            { key: i, className: "sc-interp sc-missing" },
+            p.trim()
+          );
+        }
+        if (getReact().isValidElement(v) || Array.isArray(v)) {
+          return h(getReact().Fragment, { key: i }, v);
+        }
+        if (v === null || typeof v === "boolean") return null;
+        return h("span", { key: i, className: "sc-interp" }, String(v));
+      })
+    );
+  }
+  function walkFor(el, host) {
+    const listGet = compileAttr(el.getAttribute("list") || "");
+    const asName = el.getAttribute("as") || "item";
+    const hintN = parseInt(el.getAttribute("hint-placeholder-count") || "0", 10);
+    const kids = walkChildren(el, host);
+    const listSrc = el.getAttribute("list") || "";
+    return (vals, ctx, key) => {
+      let list = listGet(vals);
+      if (!Array.isArray(list)) {
+        if (!ctx?.__streamingNow) {
+          if (list !== void 0 && list !== null) {
+            warnUnresolved(
+              ctx,
+              'sc-for list="' + listSrc + '" is not an array (' + typeof list + ")"
+            );
+          }
+          list = [];
+        } else {
+          list = hintN > 0 ? Array(hintN).fill(void 0) : [];
+        }
+      }
+      return h(
+        getReact().Fragment,
+        { key },
+        list.map((item, i) => {
+          const sub = { ...vals, [asName]: item, $index: i };
+          return h(
+            getReact().Fragment,
+            { key: i },
+            kids.map((b, j) => b(sub, ctx, j))
+          );
+        })
+      );
+    };
+  }
+  function walkIf(el, host) {
+    const valGet = compileAttr(el.getAttribute("value") || "");
+    const hintRaw = el.getAttribute("hint-placeholder-val");
+    const hintGet = hintRaw != null ? compileAttr(hintRaw) : null;
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      let v = valGet(vals);
+      if (v === void 0 && hintGet && ctx?.__streamingNow) v = hintGet(vals);
+      return v ? h(
+        getReact().Fragment,
+        { key },
+        kids.map((b, j) => b(vals, ctx, j))
+      ) : null;
+    };
+  }
+  function walkComponent(el, host) {
+    const name = el.getAttribute("name") || el.getAttribute("component") || "";
+    el.removeAttribute("name");
+    el.removeAttribute("component");
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const { propGetters, hintSize } = collectProps(el, "dc-import", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key,
+        __hintSize: hintSize,
+        __tplId: tplId,
+        __hostStyle: styleGet ? hostPositionStyle(styleGet(vals)) : void 0
+      };
+      for (const [k, g] of propGetters) {
+        const v = g(vals);
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return h(host.component(name), props);
+    };
+  }
+  function walkXImport(el, host) {
+    const globalNameGet = compileAttr(
+      el.getAttribute("component-from-global-scope") || ""
+    );
+    const exportNameGet = compileAttr(
+      el.getAttribute("component") || el.getAttribute("name") || ""
+    );
+    const fromRaw = el.getAttribute("from") || el.getAttribute("src") || el.getAttribute("import") || "";
+    const urls = fromRaw.trim() ? fromRaw.trim().split(/\s+/) : [];
+    const url = urls.length ? urls[urls.length - 1] : "";
+    const kindOf = (u) => /\.(jsx|tsx)(\?|#|$)/i.test(u) ? "jsx" : "js";
+    const tplId = el.getAttribute("data-dc-tpl");
+    const styleRaw = el.getAttribute("style");
+    el.removeAttribute("style");
+    const styleGet = styleRaw != null ? compileAttr(styleRaw) : null;
+    const wrap = tplId != null || styleGet != null;
+    const { propGetters, hintSize } = collectProps(el, "x-import", host);
+    const hasContent = el.children.length > 0 || !!(el.textContent || "").trim();
+    const kids = hasContent ? walkChildren(el, host) : [];
+    const urlBindable = fromRaw.includes("{{");
+    if (urls.length && !urlBindable) {
+      let prev;
+      for (const u of urls) prev = host.loadExternal(kindOf(u), u, prev);
+    }
+    const evalName = (g, vals) => {
+      const v = g(vals);
+      const s = v == null ? "" : String(v);
+      return s.includes("{{") ? "" : s;
+    };
+    return (vals, ctx, key) => {
+      const globalName = evalName(globalNameGet, vals);
+      const name = globalName || evalName(exportNameGet, vals);
+      const C = !name || urlBindable ? null : globalName ? host.resolveExternalGlobal(url, globalName) : host.resolveExternal(url, name);
+      const hostStyle = styleGet ? hostPositionStyle(styleGet(vals)) : void 0;
+      const wrapper = wrap ? {
+        key,
+        className: "sc-host-x",
+        "data-dc-tpl": tplId,
+        style: hostStyle || { display: "contents" }
+      } : null;
+      if (!C) {
+        const error = urlBindable ? "x-import `from` cannot contain {{ \u2026 }} \u2014 module URLs are resolved at parse time; use a literal URL" : host.resolveExternalError(url, name);
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      const props = wrapper ? {} : { key };
+      let unresolvedHole = false;
+      for (const [k, g] of propGetters) {
+        if (k === "component" || k === "componentFromGlobalScope" || k === "from") {
+          continue;
+        }
+        const v = g(vals);
+        if (v === void 0) unresolvedHole = true;
+        if (k === "dcProps") {
+          if (v && typeof v === "object") Object.assign(props, v);
+          continue;
+        }
+        props[k] = v;
+      }
+      if (unresolvedHole && ctx?.__htmlStreamingNow) {
+        const ph = host.placeholder({
+          key: wrapper ? void 0 : key,
+          name,
+          hintSize,
+          error: null
+        });
+        return wrapper ? h("div", wrapper, ph) : ph;
+      }
+      if (kids.length) props.children = kids.map((b, j) => b(vals, ctx, j));
+      return wrapper ? h("div", wrapper, h(C, props)) : h(C, props);
+    };
+  }
+  function contentKey(el) {
+    const clone = el.cloneNode(true);
+    for (const d of clone.querySelectorAll("*")) {
+      while (d.attributes.length) d.removeAttribute(d.attributes[0].name);
+    }
+    const s = clone.innerHTML;
+    let h2 = 5381;
+    for (let i = 0; i < s.length; i++) h2 = (h2 << 5) + h2 + s.charCodeAt(i) | 0;
+    return s.length + "." + (h2 >>> 0).toString(36);
+  }
+  var NEVER_CONTENT_KEYED = new Set(
+    "script style textarea option title select canvas iframe video audio".split(
+      " "
+    )
+  );
+  var NOT_INLINE_SELECTOR = ":not(" + [...INLINE_TEXT_TAGS].join(",") + ")";
+  function walkElement(el, host) {
+    const realTag = RAW_UNWRAP[el.localName] || el.localName;
+    const tplId = el.getAttribute("data-dc-tpl");
+    const inlineOnly = el.childNodes.length > 0 && !NEVER_CONTENT_KEYED.has(realTag) && el.querySelector(NOT_INLINE_SELECTOR) === null;
+    const keySuffix = inlineOnly ? "|" + contentKey(el) : "";
+    const { propGetters, pseudoClasses } = collectProps(el, "dom", host);
+    const kids = walkChildren(el, host);
+    return (vals, ctx, key) => {
+      const props = {
+        key: key + keySuffix,
+        "data-dc-tpl": tplId
+      };
+      for (const [k, g] of propGetters) {
+        let v = g(vals);
+        if (k === "style" && typeof v === "string") v = cssToObj(v);
+        if ((k === "value" || k === "checked") && v === void 0) {
+          v = k === "checked" ? false : "";
+        }
+        props[k] = v;
+      }
+      if (pseudoClasses.length) {
+        props.className = [props.className, ...pseudoClasses].filter(Boolean).join(" ");
+      }
+      return h(realTag, props, ...kids.map((b, j) => b(vals, ctx, j)));
+    };
+  }
+
+  // src/logic.ts
+  var StreamableLogic = class {
+    constructor(props) {
+      __publicField(this, "props");
+      __publicField(this, "state", {});
+      /** Back-pointer to the wrapper component, installed after construction. */
+      __publicField(this, "__host");
+      this.props = props || {};
+    }
+    setState(update, cb) {
+      this.__host && this.__host.__setLogicState(update, cb);
+    }
+    forceUpdate() {
+      this.__host && this.__host.forceUpdate();
+    }
+    componentDidMount() {
+    }
+    componentDidUpdate(_prevProps) {
+    }
+    componentWillUnmount() {
+    }
+    /** The flat object the template renders against (merged over props). */
+    renderVals() {
+      return {};
+    }
+  };
+  function evalDcLogic(src) {
+    //! nosemgrep: eval-and-function-constructor
+    const fn = new Function(
+      "DCLogic",
+      "StreamableLogic",
+      "React",
+      src + '\n;return (typeof Component!=="undefined"&&Component)||undefined;'
+    );
+    return fn(StreamableLogic, StreamableLogic, getReact());
+  }
+
+  // src/component.ts
+  function shallowEqual(a, b) {
+    if (!b) return false;
+    const ak = Object.keys(a).filter((k) => k !== "children");
+    const bk = Object.keys(b).filter((k) => k !== "children");
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) if (a[k] !== b[k]) return false;
+    return true;
+  }
+  function Placeholder({
+    name,
+    hintSize,
+    streaming,
+    error
+  }) {
+    const [w, hgt] = (hintSize || "100%,60px").split(",");
+    return h(
+      "div",
+      {
+        className: "sc-placeholder" + (streaming ? " sc-streaming" : ""),
+        style: { width: w.trim(), height: hgt && hgt.trim() },
+        title: name
+      },
+      error ? h(
+        "div",
+        { className: "sc-placeholder-error" },
+        (name ? name + ": " : "") + error
+      ) : null
+    );
+  }
+  function hintToMin(hint) {
+    if (!hint) return void 0;
+    const [w, hgt] = hint.split(",");
+    return { minWidth: w.trim(), minHeight: hgt && hgt.trim() };
+  }
+  function createComponentFactory(registry, ensureFetched) {
+    const React = getReact();
+    const AncestorContext = React.createContext([]);
+    class StreamableComponent extends React.Component {
+      constructor(props) {
+        super(props);
+        __publicField(this, "__name");
+        __publicField(this, "__sub");
+        __publicField(this, "__needsDidMount", false);
+        /** Snapshot of the registry's streaming flags taken at render time —
+         *  builders read it off the RenderCtx (this) to pick placeholder vs
+         *  render-nothing for unresolved values. */
+        __publicField(this, "__streamingNow", false);
+        __publicField(this, "__htmlStreamingNow", false);
+        /** When a construct throws, remember the (class, registry.ver, props)
+         *  triple so render-time reconcile doesn't re-attempt it on every parent
+         *  re-render. A registry bump (new class, template, external module
+         *  resolving via bumpAll) changes `ver` and breaks the memo so an
+         *  env-dependent constructor can self-heal. */
+        __publicField(this, "__failedLogic", null);
+        __publicField(this, "__failedUserProps", null);
+        __publicField(this, "__failedVer", -1);
+        /** Per-instance constructor error — kept here (not on the registry entry)
+         *  so one instance's successful construct can't hide a sibling's failure,
+         *  and a construct can never wipe an eval error `updateJs` recorded on
+         *  `r.logicError`. */
+        __publicField(this, "__ctorError", null);
+        __publicField(this, "logic");
+        this.__name = props.__name;
+        this.state = { __v: 0, __err: null };
+        this.__sub = () => {
+          if (this.state.__err) this.setState({ __err: null });
+          this.forceUpdate();
+        };
+        this.__makeLogic(registry.get(this.__name).Logic, null);
+        ensureFetched(this.__name);
+      }
+      /** Error-boundary hook: a render crash anywhere in this DC's subtree
+       *  (its own template, an x-import'd component, a child DC without its
+       *  own deeper boundary) lands here instead of unmounting the page. */
+      static getDerivedStateFromError(e) {
+        return { __err: e instanceof Error && e.message ? e.message : String(e) };
+      }
+      componentDidCatch(e, info) {
+        console.error(
+          "[dc-runtime] render error in <" + this.__name + ">:",
+          e,
+          info?.componentStack || ""
+        );
+      }
+      /** Instantiate the logic class (or the no-op base) and adopt `prevState`
+       *  over its initial state — used both at mount and on hot-swap. */
+      __makeLogic(Logic, prevState) {
+        const L = Logic || StreamableLogic;
+        try {
+          this.logic = new L(this.__userProps());
+          this.__failedLogic = null;
+          this.__failedUserProps = null;
+          this.__ctorError = null;
+        } catch (e) {
+          console.error(e);
+          this.__failedLogic = Logic;
+          this.__failedUserProps = this.__userProps();
+          this.__failedVer = registry.get(this.__name).ver;
+          this.__ctorError = this.__name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+          this.logic = new StreamableLogic(
+            this.__userProps()
+          );
+        }
+        this.logic.__host = this;
+        if (prevState)
+          this.logic.state = { ...this.logic.state || {}, ...prevState };
+      }
+      /** The props the author's logic + template see — internal __-prefixed
+       *  wiring stripped. */
+      __userProps() {
+        const { __name, __hintSize, __tplId, __hostStyle, ...rest } = this.props;
+        return rest;
+      }
+      __setLogicState(update, cb) {
+        const prev = this.logic.state;
+        const patch = typeof update === "function" ? update(prev) : update;
+        this.logic.state = { ...prev, ...patch };
+        this.setState((s) => ({ __v: s.__v + 1 }), cb);
+      }
+      /** Swap the logic instance when the registry's Logic class changed
+       *  (streaming completion, hot reload). State carries over; didMount
+       *  re-fires after the swap commits so refs exist. */
+      __reconcileLogic() {
+        const r = registry.get(this.__name);
+        const Next = r.Logic;
+        const Cur = this.logic.constructor;
+        if (Next === Cur || !Next && Cur === StreamableLogic || Next === this.__failedLogic && r.ver === this.__failedVer && shallowEqual(this.__userProps(), this.__failedUserProps)) {
+          return;
+        }
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+        this.__makeLogic(Next, this.logic.state);
+        this.__needsDidMount = true;
+      }
+      componentDidMount() {
+        registry.get(this.__name).subs.add(this.__sub);
+        try {
+          this.logic.componentDidMount();
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      componentDidUpdate(prevProps) {
+        this.logic.props = this.__userProps();
+        if (this.__needsDidMount) {
+          if (this.state.__err || !registry.get(this.__name).tpl) return;
+          this.__needsDidMount = false;
+          try {
+            this.logic.componentDidMount();
+          } catch (e) {
+            console.error(e);
+          }
+        } else {
+          try {
+            this.logic.componentDidUpdate(prevProps);
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      componentWillUnmount() {
+        registry.get(this.__name).subs.delete(this.__sub);
+        if (!this.__needsDidMount) {
+          try {
+            this.logic.componentWillUnmount();
+          } catch (e) {
+            console.error(e);
+          }
+        }
+      }
+      render() {
+        const r = registry.get(this.__name);
+        const cls = "sc-host" + (r.htmlStreaming ? " sc-streaming-html" : "") + (r.jsStreaming ? " sc-streaming-js" : "");
+        const hintStyle = r.htmlStreaming ? hintToMin(this.props.__hintSize) : void 0;
+        const hostStyle = this.props.__hostStyle || hintStyle ? { ...hintStyle || {}, ...this.props.__hostStyle || {} } : void 0;
+        const hostBase = {
+          className: cls,
+          style: hostStyle,
+          "data-sc-name": this.__name,
+          "data-dc-tpl": this.props.__tplId
+        };
+        const chain = Array.isArray(this.context) ? this.context : [];
+        if (chain.includes(this.__name)) {
+          const cycle = [
+            ...chain.slice(chain.indexOf(this.__name)),
+            this.__name
+          ].join(" \u2192 ");
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: "circular import: " + cycle
+            })
+          );
+        }
+        if (this.state.__err) {
+          return h(
+            "div",
+            { ...hostBase, className: cls + " sc-has-error" },
+            h(
+              "div",
+              { className: "sc-logic-error", "data-omelette-chrome": "" },
+              this.__name + ": " + this.state.__err
+            ),
+            h(Placeholder, {
+              name: this.__name,
+              hintSize: this.props.__hintSize,
+              error: this.state.__err
+            })
+          );
+        }
+        this.__reconcileLogic();
+        if (!r.tpl) {
+          return h(
+            "div",
+            hostBase,
+            h(Placeholder, { name: this.__name, hintSize: this.props.__hintSize })
+          );
+        }
+        const userProps = this.__userProps();
+        this.logic.props = userProps;
+        let vals = userProps;
+        let renderErr = r.logicError || this.__ctorError;
+        try {
+          vals = { ...userProps, ...this.logic.renderVals() || {} };
+        } catch (e) {
+          console.error(e);
+          renderErr = this.__name + ".renderVals(): " + (e instanceof Error && e.message ? e.message : String(e));
+        }
+        this.__streamingNow = !!(r.htmlStreaming || r.jsStreaming);
+        this.__htmlStreamingNow = !!r.htmlStreaming;
+        return h(
+          "div",
+          { ...hostBase, className: cls + (renderErr ? " sc-has-error" : "") },
+          renderErr && h(
+            "div",
+            { className: "sc-logic-error", "data-omelette-chrome": "" },
+            renderErr
+          ),
+          h(
+            AncestorContext.Provider,
+            { value: [...chain, this.__name] },
+            r.tpl(vals, this)
+          )
+        );
+      }
+    }
+    __publicField(StreamableComponent, "contextType", AncestorContext);
+    const named = /* @__PURE__ */ new Map();
+    function getDC(name) {
+      const hit = named.get(name);
+      if (hit) return hit;
+      function Dispatcher(p) {
+        const [, setTick] = React.useState(0);
+        React.useEffect(() => {
+          const sub = () => setTick((n) => n + 1);
+          registry.get(name).subs.add(sub);
+          return () => {
+            registry.get(name).subs.delete(sub);
+          };
+        }, []);
+        ensureFetched(name);
+        return h(StreamableComponent, { ...p, __name: name });
+      }
+      Dispatcher.displayName = name;
+      named.set(name, Dispatcher);
+      return Dispatcher;
+    }
+    return {
+      getDC,
+      StreamableComponent
+    };
+  }
+
+  // src/external.ts
+  var isCustomElementName = (n) => !n.includes(".") && n.includes("-");
+  function isRenderableType(g) {
+    if (typeof g === "function") return !isElementClass(g);
+    return typeof g === "object" && g !== null && typeof g.$$typeof === "symbol";
+  }
+  function resolveDottedPath(root, name) {
+    let cur = root;
+    for (const seg of name.split(".")) {
+      if (cur == null) return void 0;
+      cur = cur[seg];
+    }
+    return cur;
+  }
+  var BABEL_URL = "https://unpkg.com/@babel/standalone@7.29.0/babel.min.js";
+  var BABEL_SRI = "sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y";
+  var GLOBAL_POLL_INTERVAL_MS = 50;
+  var GLOBAL_POLL_TIMEOUT_MS = 3e4;
+  function createExternalModules(onResolved) {
+    const cache = /* @__PURE__ */ new Map();
+    let babelLoading = null;
+    const reportedMissing = /* @__PURE__ */ new Map();
+    const polling = /* @__PURE__ */ new Set();
+    function ensureBabel() {
+      if (window.Babel) return Promise.resolve();
+      if (babelLoading) return babelLoading;
+      babelLoading = new Promise((res, rej) => {
+        const s = document.createElement("script");
+        s.src = BABEL_URL;
+        s.integrity = BABEL_SRI;
+        s.crossOrigin = "anonymous";
+        s.onload = () => res();
+        s.onerror = rej;
+        document.head.appendChild(s);
+      });
+      return babelLoading;
+    }
+    const pending = /* @__PURE__ */ new Map();
+    function load(kind, url, after) {
+      const existing = pending.get(url);
+      if (existing) return existing;
+      cache.set(url, null);
+      console.info("[dc-runtime] x-import: loading", url, "(" + kind + ")");
+      const ready = Promise.all([
+        kind === "jsx" ? ensureBabel() : Promise.resolve(),
+        after ?? Promise.resolve()
+      ]);
+      const p = ready.then(() => fetch(url)).then((r) => {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      }).then((src) => {
+        const code = kind === "jsx" ? window.Babel.transform(src, {
+          filename: url,
+          presets: ["react", "typescript"]
+        }).code : src;
+        const module = { exports: {} };
+        const before = new Set(Object.keys(window));
+        //! nosemgrep: eval-and-function-constructor
+        new Function("React", "module", "exports", "require", code)(
+          getReact(),
+          module,
+          module.exports,
+          () => ({})
+        );
+        const globals = {};
+        for (const k of Object.keys(window)) {
+          if (!before.has(k) && typeof window[k] === "function") {
+            globals[k] = window[k];
+          }
+        }
+        cache.set(url, { mod: module.exports, globals });
+        console.info(
+          "[dc-runtime] x-import: loaded",
+          url,
+          "\u2014 exports:",
+          Object.keys(module.exports),
+          "window globals:",
+          Object.keys(globals)
+        );
+        onResolved();
+      }).catch((e) => {
+        cache.set(url, {
+          mod: {},
+          globals: {},
+          error: "failed to load: " + (e instanceof Error && e.message ? e.message : String(e))
+        });
+        console.error(
+          "[dc-runtime] x-import: FAILED to load",
+          url,
+          "(" + kind + ")",
+          e
+        );
+        onResolved();
+      });
+      pending.set(url, p);
+      return p;
+    }
+    function resolve2(url, name) {
+      const entry = cache.get(url);
+      if (!entry) return null;
+      const { mod, globals } = entry;
+      const C = mod && mod[name] || globals && globals[name] || typeof window !== "undefined" && window[name] || mod && mod.default;
+      if (typeof C === "function") return C;
+      const key = url + "\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(
+          key,
+          entry.error || 'no export named "' + name + '" (has: ' + Object.keys(mod).join(", ") + ")"
+        );
+        console.error(
+          "[dc-runtime] x-import: module",
+          url,
+          "loaded but has no component named",
+          JSON.stringify(name),
+          "\u2014 available exports:",
+          Object.keys(mod),
+          "window globals:",
+          Object.keys(globals),
+          ". The module must `module.exports = {" + name + "}` or set `window." + name + "`."
+        );
+      }
+      return null;
+    }
+    function waitForGlobal(name) {
+      if (polling.has(name)) return;
+      polling.add(name);
+      const started = Date.now();
+      const isCE = isCustomElementName(name);
+      const tick = () => {
+        const found = isCE ? customElements.get(name) : isRenderableType(resolveDottedPath(window, name));
+        if (found) {
+          polling.delete(name);
+          onResolved();
+          return;
+        }
+        if (Date.now() - started >= GLOBAL_POLL_TIMEOUT_MS) {
+          console.warn(
+            "[dc-runtime] x-import: global",
+            JSON.stringify(name),
+            "never appeared on window after " + GLOBAL_POLL_TIMEOUT_MS + "ms"
+          );
+          return;
+        }
+        setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+      };
+      setTimeout(tick, GLOBAL_POLL_INTERVAL_MS);
+    }
+    function resolveGlobal(url, name) {
+      const isCE = isCustomElementName(name);
+      if (!url) {
+        if (isCE) {
+          if (customElements.get(name)) return name;
+          waitForGlobal(name);
+          return null;
+        }
+        const g2 = resolveDottedPath(window, name);
+        if (isRenderableType(g2)) return g2;
+        waitForGlobal(name);
+        return null;
+      }
+      const entry = cache.get(url);
+      if (!entry) return null;
+      if (isCE && customElements.get(name)) return name;
+      const g = entry.globals[name] ?? resolveDottedPath(window, name);
+      if (isRenderableType(g)) return g;
+      if (name.includes(".")) return null;
+      const key = url + "\0global\0" + name;
+      if (!reportedMissing.has(key)) {
+        reportedMissing.set(key, null);
+        if (isCE && !customElements.get(name)) {
+          console.warn(
+            "[dc-runtime] x-import:",
+            url,
+            "loaded but no custom element",
+            JSON.stringify(name),
+            "is registered and window." + name + " is not a function \u2014 rendering <" + name + "> as an unknown element."
+          );
+        }
+      }
+      return name;
+    }
+    function getError(url, name) {
+      const entry = cache.get(url);
+      if (entry?.error) return entry.error;
+      return reportedMissing.get(url + "\0" + name) || null;
+    }
+    return { load, resolve: resolve2, resolveGlobal, getError };
+  }
+  function isElementClass(g) {
+    try {
+      return typeof g === "function" && typeof HTMLElement !== "undefined" && g.prototype instanceof HTMLElement;
+    } catch {
+      return false;
+    }
+  }
+
+  // src/atomics.ts
+  var ATOMIC_CSS = (
+    // layout
+    ".fx{display:flex}.col{display:flex;flex-direction:column}.grid{display:grid}.ac{align-items:center}.jc{justify-content:center}.jb{justify-content:space-between}.f1{flex:1}.noshrink{flex-shrink:0}.wrap{flex-wrap:wrap}.fw5{font-weight:500}.fw6{font-weight:600}.fw7{font-weight:700}.fw8{font-weight:800}.fs11{font-size:11px}.fs12{font-size:12px}.fs13{font-size:13px}.fs14{font-size:14px}.fs15{font-size:15px}.fs16{font-size:16px}.fs20{font-size:20px}.fs22{font-size:22px}.upper{text-transform:uppercase}.tc{text-align:center}.nowrap{white-space:nowrap}.gap8{gap:8px}.gap10{gap:10px}.gap12{gap:12px}.gap16{gap:16px}.gap24{gap:24px}.m0{margin:0}.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mb8{margin-bottom:8px}.mb12{margin-bottom:12px}.mb16{margin-bottom:16px}.posrel{position:relative}.posabs{position:absolute}.round{border-radius:50%}.ohide{overflow:hidden}.bbox{box-sizing:border-box}.pointer{cursor:pointer}.w100{width:100%}.b0{border:none}"
+  );
+
+  // src/helmet.ts
+  var DESIGN_DOC_MODE_RE = /<meta\b[^>]*\bname\s*=\s*["']design_doc_mode["'][^>]*\b(?:content|value)\s*=\s*["'](\w+)["']/i;
+  var CANVAS_BG_LIGHT = "#f0eee6";
+  var CANVAS_BG_DARK = "#2e2c26";
+  function createHelmetManager(doc, isStreaming) {
+    const mounted = /* @__PURE__ */ new Set();
+    const live = /* @__PURE__ */ new Map();
+    let designDocMode = null;
+    let canvasStyleEl = null;
+    let appTheme = "light";
+    try {
+      const ds = doc.documentElement.dataset.theme;
+      appTheme = ds === "dark" || ds === "light" ? ds : new URLSearchParams(doc.defaultView?.location.search ?? "").get(
+        "theme"
+      ) === "dark" ? "dark" : "light";
+    } catch {
+    }
+    function applyCanvasBg() {
+      if (!canvasStyleEl) return;
+      const bg = appTheme === "dark" ? CANVAS_BG_DARK : CANVAS_BG_LIGHT;
+      canvasStyleEl.textContent = `html,body{background:${bg}}#dc-root>.sc-host{position:relative}`;
+    }
+    function postDesignMode(mode) {
+      if (window.parent === window) return;
+      try {
+        window.parent.postMessage({ type: "__dc_design_mode", mode }, "*");
+      } catch {
+      }
+    }
+    function setDesignDocMode(mode) {
+      if (mode === designDocMode) return;
+      designDocMode = mode;
+      postDesignMode(mode);
+      if (mode === "canvas") {
+        doc.documentElement.setAttribute("data-dc-canvas", "");
+        canvasStyleEl = doc.createElement("style");
+        canvasStyleEl.setAttribute("data-dc-canvas", "");
+        applyCanvasBg();
+        doc.head.appendChild(canvasStyleEl);
+      } else {
+        doc.documentElement.removeAttribute("data-dc-canvas");
+        canvasStyleEl?.remove();
+        canvasStyleEl = null;
+      }
+    }
+    window.addEventListener("message", (e) => {
+      const type = e.data && e.data.type;
+      if (type === "__dc_theme") {
+        const t = e.data.theme;
+        if (t === "light" || t === "dark") {
+          appTheme = t;
+          doc.documentElement.dataset.theme = t;
+          applyCanvasBg();
+        }
+        return;
+      }
+      if (!designDocMode || type !== "__dc_probe") return;
+      postDesignMode(designDocMode);
+    });
+    function compile(node) {
+      const raw = [...node.children];
+      const helmetClosed = node.nextSibling != null || node.parentNode?.nextSibling != null;
+      if (node.hasAttribute("data-dc-atomics") && !mounted.has("__dc-atomics")) {
+        mounted.add("__dc-atomics");
+        const el = doc.createElement("style");
+        el.id = "__dc-atomics";
+        el.textContent = ATOMIC_CSS;
+        doc.head.appendChild(el);
+      }
+      return (_vals, ctx) => {
+        const name = ctx && ctx.__name || "";
+        const streaming = !!(name && isStreaming(name));
+        for (let i = 0; i < raw.length; i++) {
+          const child = raw[i];
+          const tag = child.tagName;
+          const mayBePartial = streaming && !helmetClosed && i === raw.length - 1;
+          if (tag === "SCRIPT") {
+            if (mayBePartial) continue;
+            const key = "SCRIPT|" + (child.getAttribute("src") || child.textContent || "");
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            const el = doc.createElement("script");
+            for (const { name: an, value } of [...child.attributes])
+              el.setAttribute(an, value);
+            if (child.textContent) el.textContent = child.textContent;
+            doc.head.appendChild(el);
+          } else if (tag === "LINK" || tag === "META") {
+            if (mayBePartial) continue;
+            const key = tag + "|" + (child.getAttribute("href") || child.getAttribute("src") || child.outerHTML);
+            if (mounted.has(key)) continue;
+            mounted.add(key);
+            doc.head.appendChild(child.cloneNode(true));
+          } else {
+            const key = name + "|" + i;
+            let el = live.get(key);
+            if (!el || el.tagName !== tag) {
+              if (el) el.remove();
+              el = doc.createElement(tag.toLowerCase());
+              live.set(key, el);
+              doc.head.appendChild(el);
+            }
+            for (const { name: an, value } of [...child.attributes]) {
+              if (el.getAttribute(an) !== value) el.setAttribute(an, value);
+            }
+            if (el.textContent !== child.textContent)
+              el.textContent = child.textContent;
+          }
+        }
+        return null;
+      };
+    }
+    return { compile, setDesignDocMode };
+  }
+
+  // src/pseudo.ts
+  function createPseudoSheet(doc) {
+    let el = null;
+    const cache = /* @__PURE__ */ new Map();
+    let n = 0;
+    return (pseudo, css) => {
+      const k = pseudo + "|" + css;
+      const hit = cache.get(k);
+      if (hit) return hit;
+      if (!el) {
+        el = doc.createElement("style");
+        doc.head.appendChild(el);
+      }
+      const cls = "scp" + (n++).toString(36);
+      const sel = pseudo === "before" || pseudo === "after" ? "." + cls + "::" + pseudo : "." + cls + ":" + pseudo;
+      el.sheet.insertRule(sel + "{" + css + "}", el.sheet.cssRules.length);
+      cache.set(k, cls);
+      return cls;
+    };
+  }
+
+  // src/registry.ts
+  function createRegistry() {
+    const entries = /* @__PURE__ */ Object.create(null);
+    function get(name) {
+      return entries[name] || (entries[name] = {
+        html: "",
+        tpl: null,
+        Logic: null,
+        jsStreaming: false,
+        htmlStreaming: false,
+        ver: 0,
+        subs: /* @__PURE__ */ new Set(),
+        fetched: false
+      });
+    }
+    function bump(name) {
+      const r = get(name);
+      r.ver++;
+      for (const fn of r.subs) fn();
+    }
+    return {
+      entries,
+      get,
+      bump,
+      bumpAll() {
+        for (const n in entries) bump(n);
+      }
+    };
+  }
+
+  // src/runtime.ts
+  var COMPONENT_DIR = ".";
+  function createRuntime(doc = document) {
+    const registry = createRegistry();
+    const pseudoClass = createPseudoSheet(doc);
+    const helmet = createHelmetManager(
+      doc,
+      (name) => registry.get(name).htmlStreaming
+    );
+    const external = createExternalModules(() => registry.bumpAll());
+    const factory = createComponentFactory(registry, ensureFetched);
+    const host = {
+      component: (name) => factory.getDC(name),
+      placeholder: (props) => h(Placeholder, props),
+      helmet: (node) => helmet.compile(node),
+      loadExternal: (kind, url, after) => external.load(kind, url, after),
+      resolveExternal: (url, name) => external.resolve(url, name),
+      resolveExternalGlobal: (url, name) => external.resolveGlobal(url, name),
+      resolveExternalError: (url, name) => external.getError(url, name),
+      pseudoClass
+    };
+    function ensureFetched(name) {
+      const r = registry.get(name);
+      if (r.fetched) return;
+      r.fetched = true;
+      const url = COMPONENT_DIR + "/" + encodeURIComponent(name) + ".dc.html";
+      fetch(url).then((res) => {
+        if (!res.ok) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/> failed:",
+            url,
+            "returned",
+            res.status,
+            "\u2014 the reference renders as an empty placeholder."
+          );
+          return "";
+        }
+        return res.text();
+      }).then((t) => {
+        if (!t) return;
+        const parsed = parseDcText(t);
+        if (!parsed) {
+          console.error(
+            "[dc-runtime] sibling fetch for <" + name + "/>:",
+            url,
+            "has no <x-dc> block \u2014 not a Design Component."
+          );
+          return;
+        }
+        if (parsed.props) r.propsMeta = parsed.props;
+        if (parsed.preview) r.preview = parsed.preview;
+        if (parsed.template && !r.html) updateHtml(name, parsed.template);
+        if (parsed.js && !r.Logic) updateJs(name, parsed.js);
+      }).catch(
+        (e) => console.error(
+          "[dc-runtime] sibling fetch for <" + name + "/> threw:",
+          url,
+          e
+        )
+      );
+    }
+    let rootName = null;
+    function updateHtml(name, html) {
+      const r = registry.get(name);
+      r.html = html;
+      if (name === rootName) {
+        const mode = DESIGN_DOC_MODE_RE.exec(html)?.[1] ?? null;
+        if (mode || !r.htmlStreaming) helmet.setDesignDocMode(mode);
+      }
+      try {
+        r.tpl = compileTemplate(html, host);
+      } catch (e) {
+        console.error("[dc-runtime] template compile FAILED for", name, e);
+      }
+      registry.bump(name);
+    }
+    function updateJs(name, src) {
+      const r = registry.get(name);
+      const seq = r.jsSeq = (r.jsSeq || 0) + 1;
+      try {
+        const Cls = evalDcLogic(src);
+        if (r.jsSeq !== seq) return;
+        if (typeof Cls !== "function") {
+          r.logicError = name + ".dc.html: <script data-dc-script> must define `class Component extends DCLogic`";
+        } else {
+          r.logicError = null;
+          r.Logic = Cls;
+        }
+      } catch (e) {
+        if (r.jsSeq !== seq) return;
+        console.error(
+          "[dc-runtime] logic class eval FAILED for",
+          name,
+          "\u2014 the template renders with props only.",
+          e
+        );
+        r.logicError = name + ": " + (e instanceof Error && e.message ? e.message : String(e));
+      }
+      registry.bump(name);
+    }
+    function setStreaming(name, kind, on) {
+      const r = registry.get(name);
+      if (kind === "html") r.htmlStreaming = !!on;
+      else r.jsStreaming = !!on;
+      let any = false;
+      for (const n in registry.entries) {
+        const e = registry.entries[n];
+        if (e && (e.htmlStreaming || e.jsStreaming)) {
+          any = true;
+          break;
+        }
+      }
+      doc.documentElement.classList.toggle("sc-dc-streaming", any);
+      registry.bump(name);
+    }
+    function dcUpdate(name, kind, content, streaming) {
+      if (streaming) registry.get(name).fetched = true;
+      if (kind === "html") {
+        setStreaming(name, "html", !!streaming);
+        updateHtml(name, content);
+      } else if (kind === "js") {
+        setStreaming(name, "js", !!streaming);
+        if (!streaming) updateJs(name, content);
+      } else if (kind === "props") {
+        const { props, preview } = parseDataProps(content);
+        const r = registry.get(name);
+        r.propsMeta = props ?? void 0;
+        r.preview = preview;
+        registry.bump(name);
+      }
+    }
+    function setProps(name, overrides) {
+      registry.get(name).propOverrides = overrides && typeof overrides === "object" ? { ...overrides } : null;
+      registry.bump(name);
+    }
+    function adoptParsed(name, parsed) {
+      if (!parsed) return;
+      const r = registry.get(name);
+      if (parsed.props) r.propsMeta = parsed.props;
+      if (parsed.preview) r.preview = parsed.preview;
+      if (parsed.template) updateHtml(name, parsed.template);
+      if (parsed.js) updateJs(name, parsed.js);
+    }
+    return {
+      registry,
+      getDC: factory.getDC,
+      updateHtml,
+      updateJs,
+      dcUpdate,
+      setProps,
+      adoptParsed,
+      setRootName: (name) => {
+        rootName = name;
+      },
+      markFetched: (name) => {
+        registry.get(name).fetched = true;
+      },
+      annotatedTemplate: (name) => {
+        const r = registry.get(name);
+        return r.tpl && r.tpl.__annotated || null;
+      },
+      templateSource: (name) => registry.get(name).html || null,
+      StreamableLogic
+    };
+  }
+
+  // src/index.ts
+  var REACT_URL = "https://unpkg.com/react@18.3.1/umd/react.production.min.js";
+  var REACT_SRI = "sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z";
+  var REACT_DOM_URL = "https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js";
+  var REACT_DOM_SRI = "sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1";
+  function hideRawTemplate() {
+    const s = document.createElement("style");
+    s.textContent = "x-dc{display:none!important}";
+    document.head.appendChild(s);
+  }
+  function loadScript(src, integrity) {
+    return new Promise((resolve2, reject) => {
+      //! nosemgrep: create-script-element
+      const s = document.createElement("script");
+      s.src = src;
+      s.integrity = integrity;
+      s.crossOrigin = "anonymous";
+      s.async = false;
+      s.onload = () => resolve2();
+      s.onerror = () => reject(new Error(`failed to load ${src}`));
+      document.head.appendChild(s);
+    });
+  }
+  function loadReactUmd() {
+    const w = window;
+    if (w.React && w.ReactDOM) return Promise.resolve();
+    return Promise.all([
+      loadScript(REACT_URL, REACT_SRI),
+      loadScript(REACT_DOM_URL, REACT_DOM_SRI)
+    ]).then(() => void 0);
+  }
+  function init() {
+    const runtime = createRuntime(document);
+    let rootName = "Root";
+    const baseCss = document.createElement("style");
+    baseCss.textContent = BASE_CSS;
+    document.head.prepend(baseCss);
+    const notifyHost = () => {
+      if (window.parent === window) return;
+      const r = runtime.registry.entries[rootName];
+      try {
+        window.parent.postMessage(
+          {
+            type: "__dc_booted",
+            rootName,
+            propsMeta: r && r.propsMeta || null,
+            preview: r && r.preview || null
+          },
+          "*"
+        );
+      } catch {
+      }
+    };
+    const api = {
+      __dcUpdate: (name, kind, content, streaming) => {
+        runtime.dcUpdate(name, kind, content, streaming);
+        if (name === rootName && !streaming && kind === "props") notifyHost();
+      },
+      __dcSetProps: (name, overrides) => runtime.setProps(name, overrides),
+      /** Name of the component currently mounted as the page root — DC tools
+       *  push their template-stream here when targeting "the open page". */
+      __dcRootName: () => rootName,
+      /** Editor bridge — the encoded, `data-dc-tpl`-annotated template source.
+       *  The host editor parses this into its own template DOM so it can map a
+       *  rendered node (carrying the same `data-dc-tpl`) back to the source
+       *  node that emitted it. Returns the encoded form (`<sc-comp>`,
+       *  `sc-camel-*` attrs); the editor decodes on serialize. */
+      __dcAnnotatedTemplate: (name) => runtime.annotatedTemplate(name),
+      /** Editor bridge — the *original* (decoded) template source. */
+      __dcTemplateSource: (name) => runtime.templateSource(name),
+      __dcBoot: () => {
+        rootName = boot(runtime, document) ?? rootName;
+        notifyHost();
+      },
+      __dcRegistry: runtime.registry.entries,
+      getDC: (name) => runtime.getDC(name),
+      // `DCLogic` is the documented base class name; `StreamableLogic` is the
+      // implementation alias kept for any project that already references it.
+      DCLogic: runtime.StreamableLogic,
+      StreamableLogic: runtime.StreamableLogic
+    };
+    Object.assign(window, api);
+    window.__dcContentKeyed = true;
+    if (document.readyState !== "loading") api.__dcBoot();
+    else document.addEventListener("DOMContentLoaded", () => api.__dcBoot());
+  }
+  hideRawTemplate();
+  loadReactUmd().then(init).catch((err) => {
+    console.error("[dc] failed to load React or boot:", err);
+    throw err;
+  });
+})();
+
+</script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Noto+Sans+JP:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;padding:0}
+*{box-sizing:border-box}
+[data-jema-root]{
+ --bg0:#F6F8FB;--bg1:#FFFFFF;--bg2:#F1F4F8;--bg3:#FAFBFD;
+ --bd:#E8E8E8;--bd2:#E2E7EE;--dv:#EEF1F5;--grid:#E5E9F0;
+ --tx:#1B2A4A;--tx2:#4A5568;--mut:#8A93A3;--fnt:#A7AFBC;--fnt2:#B4BCC9;--fnt3:#CBD2DC;
+ --ac:#00A5CF;--acT:#0090B5;--acHi:#5AB6CC;--acTint:rgba(0,165,207,.10);--acTint2:rgba(0,165,207,.06);--acBadge:#00A5CF;
+ --up:#1F7A6E;--upBg:rgba(42,157,143,.13);--dn:#C92A37;--dnBg:rgba(230,57,70,.10);
+ --warnBg:rgba(244,162,97,.16);--warnTx:#9A6210;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#EEF2F7;--avatar:#1B2A4A;--navyA:#1B2A4A;--navyB:#264653;--tipBg:rgba(27,42,74,.94);
+ --sh1:0 2px 8px rgba(27,42,74,.08);--sh1a:0 2px 8px rgba(27,42,74,.10);--sh2:0 8px 24px rgba(27,42,74,.12);--sh2a:0 8px 24px rgba(27,42,74,.18);--shPop:0 16px 48px rgba(27,42,74,.16);
+}
+[data-jema-root][data-dark="true"]{
+ --bg0:#0D1420;--bg1:#161F31;--bg2:#212E49;--bg3:#1A2438;
+ --bd:#263450;--bd2:#2C3B59;--dv:#232F4A;--grid:#26334D;
+ --tx:#E9EEF7;--tx2:#BBC6DA;--mut:#8493AC;--fnt:#69778F;--fnt2:#5D6B85;--fnt3:#48526B;
+ --ac:#1FB6DC;--acT:#4FCBE9;--acHi:#4FCBE9;--acTint:rgba(31,182,220,.14);--acTint2:rgba(31,182,220,.08);--acBadge:#0FA3C8;
+ --up:#4ED4AE;--upBg:rgba(63,208,163,.15);--dn:#FF8B94;--dnBg:rgba(255,107,118,.15);
+ --warnBg:rgba(240,182,87,.15);--warnTx:#F0C07A;--okDot:#3FD0A3;--warnDot:#F0B657;
+ --hov:#20304E;--avatar:#33425F;--navyA:#131E33;--navyB:#1C333D;--tipBg:rgba(8,14,27,.96);
+ --sh1:0 2px 8px rgba(0,0,0,.35);--sh1a:0 2px 8px rgba(0,0,0,.4);--sh2:0 8px 24px rgba(0,0,0,.45);--sh2a:0 8px 24px rgba(0,0,0,.5);--shPop:0 16px 48px rgba(0,0,0,.55);
+}
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:rgba(139,148,163,.45);border-radius:6px}
+::-webkit-scrollbar-track{background:transparent}
+</style>
+</helmet>
+<div data-screen-label="Capacity &amp; Auctions" data-jema-root="1" data-dark="{{ isDark }}" style="display:flex;height:100vh;min-width:1280px;background:var(--bg0);font-family:'Inter','Noto Sans JP','Hiragino Kaku Gothic ProN','Yu Gothic',system-ui,sans-serif;color:var(--tx);font-size:14px;line-height:1.5;overflow:hidden">
+
+  <!-- ============ SIDEBAR ============ -->
+  <div style="width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);display:flex;flex-direction:column;padding:22px 16px 16px;overflow-y:auto">
+    <div style="padding:0 8px">
+      <div style="display:flex;align-items:center;gap:7px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:23px;height:23px;color:var(--ac);flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+        <span style="font-size:21px;font-weight:700;letter-spacing:.01em">JEMA</span>
+      </div>
+      <div style="font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--mut);margin-top:3px;text-transform:uppercase">Japan Energy Market Analytics</div>
+    </div>
+
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:26px 8px 8px">MENU · メニュー</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goOverview }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg><span>Market Overview</span>
+        <span style="margin-left:auto;font-size:10.5px;font-weight:500;color:var(--mut)">概況</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goMarket }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg><span>Market Data</span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;margin-left:auto;color:var(--mut);flex-shrink:0"><path d="M9 18l6-6-6-6"></path></svg>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:600;color:var(--acT);background:var(--acTint);cursor:pointer;position:relative">
+        <span style="position:absolute;left:-16px;top:8px;bottom:8px;width:3px;background:var(--ac);border-radius:0 2px 2px 0"></span>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg><span>Capacity &amp; Auctions</span>
+        <span style="margin-left:auto;font-size:10.5px;font-weight:500;color:var(--acHi)">容量</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ goPolicy }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg><span>Policy Deep Dive</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">3</span>
+      </div>
+    </div>
+
+    <div style="font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:22px 8px 8px">GENERAL · 全般</div>
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg><span>Watchlist</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">5</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNotif }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg><span>Notifications</span>
+        <span style="margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px">2</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" style-hover="background:var(--acTint2);color:var(--tx)" onClick="{{ tNav }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg><span>Settings</span>
+      </div>
+    </div>
+
+    <div style="flex:1"></div>
+
+    <div style="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" style-hover="background:var(--bg2);color:var(--tx2)" onClick="{{ tCollapse }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path></svg><span>Collapse · 折りたたむ</span>
+    </div>
+
+    <div style="background:linear-gradient(135deg,var(--navyA),var(--navyB));border-radius:16px;padding:15px 15px 13px;color:#FFFFFF;margin-top:12px">
+      <div style="display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>Data freshness · データ鮮度</div>
+      <div style="font-size:12px;color:rgba(255,255,255,.78);margin-top:6px">Last publication <span style="font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1">2026-06-27</span></div>
+      <div style="font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px">OCCTO auction results · event-driven, not daily</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" style-hover="background:rgba(255,255,255,.10)" onClick="{{ tRefresh }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>Refresh · 更新
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ MAIN COLUMN ============ -->
+  <div style="flex:1;min-width:0;display:flex;flex-direction:column;position:relative">
+
+    <!-- Top bar -->
+    <div style="height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30">
+      <div style="font-size:13px;color:var(--mut);flex-shrink:0">Capacity &amp; Auctions <span style="color:var(--fnt3)">·</span> 容量市場・オークション</div>
+      <div style="flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>
+        <input placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style="border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0">
+        <span style="border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0">⌘K</span>
+      </div>
+      <div style="flex:1"></div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ toggleTheme }}" title="Toggle theme · テーマ切替">
+        <sc-if value="{{ isDarkB }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg></sc-if>
+        <sc-if value="{{ isLightB }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg></sc-if>
+      </div>
+      <div style="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" style-hover="background:var(--bg2)" onClick="{{ tNotif }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>
+        <span style="position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)"></span>
+      </div>
+      <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0">
+        <span style="{{ langJaS }}" onClick="{{ setLangJa }}">日本語</span>
+        <span style="{{ langEnS }}" onClick="{{ setLangEn }}">English</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex-shrink:0">
+        <div style="width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600">AN</div>
+        <div style="line-height:1.25">
+          <div style="font-size:13px;font-weight:600">Analyst</div>
+          <div style="font-size:11px;color:var(--mut)">analyst@example.jp</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Scrollable content -->
+    <div style="flex:1;overflow-y:auto;padding:26px 32px 40px">
+      <div style="max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px">
+
+        <!-- Page header -->
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
+          <div>
+            <div style="display:flex;align-items:baseline;gap:10px">
+              <span style="font-size:26px;font-weight:700;letter-spacing:-.01em">Capacity &amp; Auctions</span>
+              <span style="font-size:15px;font-weight:500;color:var(--mut)">容量市場・オークション</span>
+            </div>
+            <div style="font-size:13.5px;color:var(--tx2);margin-top:2px">Main auction results &amp; long-term decarbonization auctions (LTDA) · メインオークションと長期脱炭素電源オークション</div>
+          </div>
+          <div style="display:flex;gap:10px;flex-shrink:0;padding-top:4px">
+            <div style="display:inline-flex;align-items:center;gap:7px;background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" style-hover="background:var(--acTint2);border-color:var(--ac)" onClick="{{ tExport }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>Export CSV · 出力
+            </div>
+          </div>
+        </div>
+
+        <!-- Sub-view switcher -->
+        <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          <div style="display:flex;background:var(--bg2);border-radius:999px;padding:3px">
+            <span style="{{ vmS }}" onClick="{{ viewMain }}">Main Auction メインオークション</span>
+            <span style="{{ vlS }}" onClick="{{ viewLtda }}">LTDA 長期脱炭素</span>
+          </div>
+          <span style="font-size:11.5px;color:var(--mut)">Event-driven OCCTO publications — not a daily feed · 公表ベース（日次更新ではありません）</span>
+        </div>
+
+        <!-- ================= MAIN AUCTION VIEW ================= -->
+        <sc-if value="{{ isMain }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">FY2029 clearing price<br>約定価格（全国）</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">8,190 <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">¥/kW·year</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">main auction Jan 2026 · vs FY2028</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">▼ −558 (−6.4%)</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Procured capacity<br>調達容量</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">166.2 <span style="font-size:13px;font-weight:500;color:var(--mut)">GW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">target 168.0 GW · FY2029 delivery</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)">98.9% of target 目標比</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Hokkaido zone<br>北海道エリア</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">12,050 <span style="font-size:13px;font-weight:500;color:var(--mut)">¥/kW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">separate zone · limited TTC north</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--dnBg);color:var(--dn)">▼ −640 (−5.0%)</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Kyushu zone<br>九州エリア</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">7,410 <span style="font-size:13px;font-weight:500;color:var(--mut)">¥/kW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">separate zone · solar-heavy south</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--dnBg);color:var(--dn)">▼ −570 (−7.1%)</span>
+              </div>
+            </div>
+
+            <!-- Clearing price chart -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Clearing Price by Delivery Year <span style="font-size:12.5px;font-weight:400;color:var(--mut)">実需給年度別 約定価格</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Main auction · ¥/kW·year · Hokkaido &amp; Kyushu cleared as separate zones since FY2027 · 北海道・九州は別価格</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0">auction held ~4 years ahead of delivery</span>
+              </div>
+              <svg viewBox="0 0 960 300" style="width:100%;height:auto;display:block;margin-top:10px">
+                <g style="color:var(--grid)">
+                  <line x1="46" y1="14" x2="944" y2="14" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="99.3" x2="944" y2="99.3" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="184.7" x2="944" y2="184.7" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="270" x2="944" y2="270" stroke="currentColor" stroke-width="1"></line>
+                </g>
+                <g style="color:var(--mut)">
+                  <text x="38" y="18" text-anchor="end" font-size="11" fill="currentColor">15,000</text>
+                  <text x="38" y="103" text-anchor="end" font-size="11" fill="currentColor">10,000</text>
+                  <text x="38" y="188" text-anchor="end" font-size="11" fill="currentColor">5,000</text>
+                  <text x="120.8" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2024</text>
+                  <text x="270.5" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2025</text>
+                  <text x="420.2" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2026</text>
+                  <text x="569.8" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2027</text>
+                  <text x="719.5" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2028</text>
+                  <text x="869.2" y="292" text-anchor="middle" font-size="11" fill="currentColor">FY2029</text>
+                </g>
+                <rect x="100.8" y="28.7" width="40" height="241.3" rx="4" fill="#00A5CF"><title>FY2024 · National ¥14,137/kW</title></rect>
+                <rect x="250.5" y="180.5" width="40" height="89.5" rx="4" fill="#00A5CF"><title>FY2025 · National ¥5,242/kW</title></rect>
+                <rect x="400.2" y="170.5" width="40" height="99.5" rx="4" fill="#00A5CF"><title>FY2026 · National ¥5,832/kW</title></rect>
+                <rect x="523.8" y="106.9" width="40" height="163.1" rx="4" fill="#00A5CF"><title>FY2027 · National ¥9,555/kW</title></rect>
+                <rect x="569.8" y="42.1" width="18" height="227.9" rx="3" fill="#4A6FA5"><title>FY2027 · Hokkaido ¥13,357/kW</title></rect>
+                <rect x="591.8" y="125.6" width="18" height="144.4" rx="3" fill="#8AB17D"><title>FY2027 · Kyushu ¥8,462/kW</title></rect>
+                <rect x="673.5" y="120.7" width="40" height="149.3" rx="4" fill="#00A5CF"><title>FY2028 · National ¥8,748/kW</title></rect>
+                <rect x="719.5" y="53.4" width="18" height="216.6" rx="3" fill="#4A6FA5"><title>FY2028 · Hokkaido ¥12,690/kW</title></rect>
+                <rect x="741.5" y="133.8" width="18" height="136.2" rx="3" fill="#8AB17D"><title>FY2028 · Kyushu ¥7,980/kW</title></rect>
+                <rect x="823.2" y="130.2" width="40" height="139.8" rx="4" fill="#00A5CF"><title>FY2029 · National ¥8,190/kW</title></rect>
+                <rect x="869.2" y="64.3" width="18" height="205.7" rx="3" fill="#4A6FA5"><title>FY2029 · Hokkaido ¥12,050/kW</title></rect>
+                <rect x="891.2" y="143.5" width="18" height="126.5" rx="3" fill="#8AB17D"><title>FY2029 · Kyushu ¥7,410/kW</title></rect>
+                <g font-size="10.5" font-weight="600" text-anchor="middle" style="fill:var(--tx2)">
+                  <text x="120.8" y="22">14,137</text>
+                  <text x="270.5" y="174">5,242</text>
+                  <text x="420.2" y="164">5,832</text>
+                  <text x="543.8" y="100">9,555</text>
+                  <text x="693.5" y="114">8,748</text>
+                  <text x="843.2" y="124">8,190</text>
+                </g>
+              </svg>
+              <div style="display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#00A5CF"></span>National 全国</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#4A6FA5"></span>Hokkaido 北海道</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#8AB17D"></span>Kyushu 九州</span>
+                <span style="margin-left:auto;color:var(--mut)">FY2024 cleared near the price cap · FY2024は上限価格近傍</span>
+              </div>
+            </div>
+
+            <!-- Results table -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Auction Results <span style="font-size:12.5px;font-weight:400;color:var(--mut)">約定結果一覧</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Main auction by delivery year · prices before 経過措置 adjustments</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px">¥/kW·year · GW</span>
+              </div>
+              <div style="display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)">
+                <span>DELIVERY 年度</span><span>HELD 実施</span><span style="text-align:right">NATIONAL 全国</span><span style="text-align:right">HOKKAIDO</span><span style="text-align:right">KYUSHU</span><span style="text-align:right">PROCURED 調達</span><span style="text-align:right">ACHIEVEMENT 達成率</span>
+              </div>
+              <sc-for list="{{ maRows }}" as="m" hint-placeholder-count="6">
+                <div style="display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ tRow }}">
+                  <span style="font-size:13px;font-weight:600;font-feature-settings:'tnum' 1">{{ m.fy }}</span>
+                  <span style="font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1">{{ m.held }}</span>
+                  <span style="text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1">{{ m.natl }}</span>
+                  <span style="text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1">{{ m.hok }}</span>
+                  <span style="text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1">{{ m.kyu }}</span>
+                  <span style="text-align:right;font-size:12.5px;font-feature-settings:'tnum' 1">{{ m.proc }}</span>
+                  <span style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+                    <span style="width:72px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0"><span style="{{ m.bar }}"></span></span>
+                    <span style="font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1">{{ m.ach }}%</span>
+                  </span>
+                </div>
+              </sc-for>
+              <div style="font-size:11px;color:var(--mut);margin-top:10px">Achievement = procured ÷ target capacity 調達容量÷目標調達量 · click a year for the full OCCTO publication</div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ================= LTDA VIEW ================= -->
+        <sc-if value="{{ isLtda }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;flex-direction:column;gap:20px">
+
+            <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:20px">
+              <div style="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)">
+                <div style="font-size:12px;font-weight:600;color:rgba(255,255,255,.85)">Round 3 awarded<br>第3回 落札容量</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">5.24 <span style="font-size:13px;font-weight:500;color:rgba(255,255,255,.8)">GW</span></div>
+                <div style="font-size:11px;color:rgba(255,255,255,.75);margin-top:2px">results Jun 2026 · 84 projects</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1">▲ +0.39 GW vs Round 2</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Battery storage share<br>蓄電池シェア</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">32<span style="font-size:13px;font-weight:500;color:var(--mut)">%</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1">1.68 GW in R3 · largest single tech</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)">R1: 27% · R2: 34%</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Cumulative awarded<br>累計落札</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15">14.10 <span style="font-size:13px;font-weight:500;color:var(--mut)">GW</span></div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">3 rounds · COD FY2027–FY2034</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--upBg);color:var(--up)">storage (battery + pumped) 40%</span>
+              </div>
+              <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" style-hover="box-shadow:var(--sh2)" onClick="{{ goPolicy }}">
+                <div style="font-size:12px;font-weight:600;color:var(--mut)">Round 4 window<br>第4回 応札期間</div>
+                <div style="font-size:33px;font-weight:700;margin-top:10px;line-height:1.15">Nov 2026</div>
+                <div style="font-size:11px;color:var(--mut);margin-top:2px">requirements under committee review · 要件審議中</div>
+                <span style="display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;background:var(--acTint);color:var(--acT)">storage threshold open in committee →</span>
+              </div>
+            </div>
+
+            <!-- Stacked tech chart -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Awarded Capacity by Technology <span style="font-size:12.5px;font-weight:400;color:var(--mut)">技術別落札容量</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">LTDA rounds 1–3 · GW · 20-year fixed revenue contracts · 20年間の固定収入契約</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0">hover a segment for detail</span>
+              </div>
+              <svg viewBox="0 0 960 300" style="width:100%;height:auto;display:block;margin-top:10px">
+                <g style="color:var(--grid)">
+                  <line x1="46" y1="14" x2="944" y2="14" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="99.3" x2="944" y2="99.3" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="184.7" x2="944" y2="184.7" stroke="currentColor" stroke-width="1" stroke-dasharray="4 4"></line>
+                  <line x1="46" y1="270" x2="944" y2="270" stroke="currentColor" stroke-width="1"></line>
+                </g>
+                <g style="color:var(--mut)">
+                  <text x="38" y="18" text-anchor="end" font-size="11" fill="currentColor">6 GW</text>
+                  <text x="38" y="103" text-anchor="end" font-size="11" fill="currentColor">4 GW</text>
+                  <text x="38" y="188" text-anchor="end" font-size="11" fill="currentColor">2 GW</text>
+                  <text x="216" y="292" text-anchor="middle" font-size="11" fill="currentColor">Round 1 · results 2024</text>
+                  <text x="495" y="292" text-anchor="middle" font-size="11" fill="currentColor">Round 2 · results 2025</text>
+                  <text x="774" y="292" text-anchor="middle" font-size="11" fill="currentColor">Round 3 · results 2026</text>
+                </g>
+                <rect x="161" y="223.1" width="110" height="46.9" fill="#00A5CF"><title>R1 · Battery 1.10 GW</title></rect>
+                <rect x="161" y="198.8" width="110" height="24.3" fill="#4A6FA5"><title>R1 · Pumped hydro 0.57 GW</title></rect>
+                <rect x="161" y="104.9" width="110" height="93.9" fill="#E9C46A"><title>R1 · LNG decarb-ready 2.20 GW</title></rect>
+                <rect x="161" y="98.9" width="110" height="6" fill="#2A9D8F"><title>R1 · H2/NH3 0.14 GW</title></rect>
+                <rect x="440" y="200" width="110" height="70" fill="#00A5CF"><title>R2 · Battery 1.64 GW</title></rect>
+                <rect x="440" y="187.2" width="110" height="12.8" fill="#4A6FA5"><title>R2 · Pumped hydro 0.30 GW</title></rect>
+                <rect x="440" y="78.4" width="110" height="108.8" fill="#E9C46A"><title>R2 · LNG decarb-ready 2.55 GW</title></rect>
+                <rect x="440" y="63" width="110" height="15.4" fill="#2A9D8F"><title>R2 · H2/NH3 0.36 GW</title></rect>
+                <rect x="719" y="198.3" width="110" height="71.7" fill="#00A5CF"><title>R3 · Battery 1.68 GW</title></rect>
+                <rect x="719" y="180.4" width="110" height="17.9" fill="#4A6FA5"><title>R3 · Pumped hydro 0.42 GW</title></rect>
+                <rect x="719" y="82.3" width="110" height="98.1" fill="#E9C46A"><title>R3 · LNG decarb-ready 2.30 GW</title></rect>
+                <rect x="719" y="55.8" width="110" height="26.5" fill="#2A9D8F"><title>R3 · H2/NH3 0.62 GW</title></rect>
+                <rect x="719" y="46.4" width="110" height="9.4" fill="#B4BCC9"><title>R3 · Other 0.22 GW</title></rect>
+                <g font-size="11" font-weight="600" text-anchor="middle" style="fill:var(--tx2)">
+                  <text x="216" y="90">4.01 GW</text>
+                  <text x="495" y="54">4.85 GW</text>
+                  <text x="774" y="38">5.24 GW</text>
+                </g>
+              </svg>
+              <div style="display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)">
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#00A5CF"></span>Battery 蓄電池</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#4A6FA5"></span>Pumped 揚水</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#E9C46A"></span>LNG decarb-ready LNG（脱炭素化前提）</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#2A9D8F"></span>H2 · NH3 水素・アンモニア</span>
+                <span style="display:inline-flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:4px;background:#B4BCC9"></span>Other その他</span>
+              </div>
+            </div>
+
+            <!-- Tech table -->
+            <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+              <div style="display:flex;justify-content:space-between;align-items:flex-start">
+                <div>
+                  <div style="font-size:16px;font-weight:600">Technology Breakdown <span style="font-size:12.5px;font-weight:400;color:var(--mut)">技術別内訳</span></div>
+                  <div style="font-size:12px;color:var(--mut);margin-top:1px">Awarded GW per round · cumulative share of all LTDA awards</div>
+                </div>
+                <span style="font-size:11px;color:var(--mut);padding-top:4px">GW</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1.7fr .6fr .6fr .6fr .7fr 1.3fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)">
+                <span>TECHNOLOGY · 電源</span><span style="text-align:right">ROUND 1</span><span style="text-align:right">ROUND 2</span><span style="text-align:right">ROUND 3</span><span style="text-align:right">CUMULATIVE 累計</span><span style="text-align:right">SHARE シェア</span>
+              </div>
+              <sc-for list="{{ ltdaRows }}" as="t" hint-placeholder-count="5">
+                <div style="display:grid;grid-template-columns:1.7fr .6fr .6fr .6fr .7fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" style-hover="background:var(--hov)" onClick="{{ tRow }}">
+                  <span style="display:flex;align-items:center;gap:9px;min-width:0">
+                    <span style="{{ t.dot }}"></span>
+                    <span style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ t.n1 }} <span style="font-weight:400;color:var(--mut);font-size:11.5px">{{ t.n2 }}</span></span>
+                  </span>
+                  <span style="text-align:right;font-size:13px;font-feature-settings:'tnum' 1">{{ t.r1 }}</span>
+                  <span style="text-align:right;font-size:13px;font-feature-settings:'tnum' 1">{{ t.r2 }}</span>
+                  <span style="text-align:right;font-size:13px;font-feature-settings:'tnum' 1">{{ t.r3 }}</span>
+                  <span style="text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1">{{ t.cum }}</span>
+                  <span style="display:flex;align-items:center;gap:8px;justify-content:flex-end">
+                    <span style="width:72px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0"><span style="{{ t.bar }}"></span></span>
+                    <span style="font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1">{{ t.share }}%</span>
+                  </span>
+                </div>
+              </sc-for>
+              <div style="font-size:11px;color:var(--mut);margin-top:10px">Battery threshold lowered to 10 MW from Round 2 · 第2回から蓄電池の応札下限は10MWに引き下げ</div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- Policy thread (always visible) -->
+        <div style="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)">
+          <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px">
+            <div>
+              <div style="display:flex;align-items:center;gap:9px">
+                <span style="font-size:16px;font-weight:600">Policy Thread — Storage × Capacity Market <span style="font-size:12.5px;font-weight:400;color:var(--mut)">政策スレッド：蓄電池×容量市場</span></span>
+              </div>
+              <div style="font-size:12px;color:var(--mut);margin-top:1px">Committee decisions shaping the next auction rounds · 次回オークションに影響する審議</div>
+            </div>
+            <span style="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap;padding-top:4px" style-hover="color:var(--ac)" onClick="{{ goPolicy }}">Open Policy Deep Dive →</span>
+          </div>
+          <div style="display:flex;flex-direction:column;margin-top:8px">
+            <sc-for list="{{ polRows }}" as="p" hint-placeholder-count="3">
+              <div style="display:flex;gap:12px;align-items:flex-start;padding:12px 4px;border-top:1px solid var(--dv);cursor:pointer;border-radius:8px" style-hover="background:var(--hov)" onClick="{{ goPolicy }}">
+                <span style="{{ p.tierDot }}"></span>
+                <div style="flex:1;min-width:0">
+                  <div style="display:flex;align-items:center;gap:8px;min-width:0">
+                    <span style="font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.n1 }}</span>
+                    <sc-if value="{{ p.sched }}" hint-placeholder-val="{{ false }}"><span style="font-size:10.5px;font-weight:600;background:var(--upBg);color:var(--up);border-radius:6px;padding:1px 7px;flex-shrink:0">Scheduled 開催予定</span></sc-if>
+                  </div>
+                  <div style="font-size:11.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-feature-settings:'tnum' 1">{{ p.meta }}</div>
+                  <div style="font-size:12.5px;color:var(--tx2);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.summary }}</div>
+                </div>
+                <span style="font-size:12.5px;font-weight:600;color:var(--acT);white-space:nowrap;flex-shrink:0;padding-top:2px">{{ p.cta }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+
+        <div style="font-size:12px;color:var(--mut);text-align:center;padding:2px 0 6px">Published by OCCTO · 容量市場・長期脱炭素電源オークション約定結果 · event-driven · last publication 2026-06-27</div>
+
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <sc-if value="{{ toastOn }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;bottom:24px;right:24px;background:var(--bg1);border-left:3px solid var(--ac);border-radius:12px;box-shadow:var(--sh2a);padding:12px 18px;font-size:13px;color:var(--tx);z-index:100;max-width:420px">{{ toastMsg }}</div>
+    </sc-if>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{
+  &quot;lang&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;en&quot;, &quot;ja&quot;], &quot;default&quot;: &quot;en&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Localization&quot; },
+  &quot;theme&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;light&quot;, &quot;dark&quot;], &quot;default&quot;: &quot;light&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Appearance&quot; },
+  &quot;defaultView&quot;: { &quot;editor&quot;: &quot;enum&quot;, &quot;options&quot;: [&quot;main&quot;, &quot;ltda&quot;], &quot;default&quot;: &quot;main&quot;, &quot;tsType&quot;: &quot;string&quot;, &quot;section&quot;: &quot;Content&quot; }
+}">
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    let st = null, sl = null;
+    try { st = localStorage.getItem('jema-theme'); sl = localStorage.getItem('jema-lang'); } catch (e) {}
+    this.state = { theme: st, lang: sl, view: null, toast: null };
+    this._toastT = null;
+
+    this.maData = [
+      { fy: 'FY2024', held: 'Jul 2020', natl: '¥14,137', hok: '—', kyu: '—', proc: '167.8 GW', ach: 95 },
+      { fy: 'FY2025', held: 'Jul 2021', natl: '¥5,242', hok: '—', kyu: '—', proc: '165.3 GW', ach: 100 },
+      { fy: 'FY2026', held: 'Jul 2022', natl: '¥5,832', hok: '—', kyu: '—', proc: '168.1 GW', ach: 99 },
+      { fy: 'FY2027', held: 'Jul 2023', natl: '¥9,555', hok: '¥13,357', kyu: '¥8,462', proc: '165.9 GW', ach: 98 },
+      { fy: 'FY2028', held: 'Jul 2024', natl: '¥8,748', hok: '¥12,690', kyu: '¥7,980', proc: '166.5 GW', ach: 99 },
+      { fy: 'FY2029', held: 'Jan 2026', natl: '¥8,190', hok: '¥12,050', kyu: '¥7,410', proc: '166.2 GW', ach: 99 }
+    ];
+
+    this.ltdaData = [
+      { en: 'Battery storage', ja: '蓄電池', r1: '1.10', r2: '1.64', r3: '1.68', cum: '4.42', share: 31, c: '#00A5CF', cd: '#1FB6DC' },
+      { en: 'Pumped hydro', ja: '揚水', r1: '0.57', r2: '0.30', r3: '0.42', cum: '1.29', share: 9, c: '#4A6FA5', cd: '#7C9CD1' },
+      { en: 'LNG (decarb-ready)', ja: 'LNG（脱炭素化前提）', r1: '2.20', r2: '2.55', r3: '2.30', cum: '7.05', share: 50, c: '#E9C46A', cd: '#E9C46A' },
+      { en: 'Hydrogen · Ammonia', ja: '水素・アンモニア', r1: '0.14', r2: '0.36', r3: '0.62', cum: '1.12', share: 8, c: '#2A9D8F', cd: '#2A9D8F' },
+      { en: 'Other (biomass etc.)', ja: 'その他', r1: '—', r2: '—', r3: '0.22', cum: '0.22', share: 2, c: '#B4BCC9', cd: '#5D6B85' }
+    ];
+
+    this.polData = [
+      { en: 'E&G Basic Policy Subcommittee', ja: '電力・ガス基本政策小委員会', tier: 'METI', no: 84, m: 6, day: 27,
+        sEn: 'Debated capacity-market linkage for long-duration storage; secretariat to draft options for August.',
+        sJa: '長期蓄電池の容量市場連携を審議。8月会合に向け事務局が選択肢を整理へ。' },
+      { en: 'Mid- & Long-term Power Supply WG', ja: '中長期の供給力確保ワーキンググループ', tier: 'OCCTO', no: 12, m: 6, day: 19,
+        sEn: 'Reviewed LTDA auction parameters for FY2028; storage participation thresholds remain open.',
+        sJa: 'FY2028長期脱炭素オークションの諸元を点検。蓄電池の参入閾値は継続審議。' },
+      { en: 'E&G Basic Policy Subcommittee', ja: '電力・ガス基本政策小委員会', tier: 'METI', no: 85, m: 8, day: 5, sched: true,
+        sEn: 'Agenda: 3 design options for long-duration storage capacity-market linkage.',
+        sJa: '議題：長期蓄電池の容量市場連携に関する3つの設計オプション。' }
+    ];
+  }
+
+  toast(msg) {
+    clearTimeout(this._toastT);
+    this.setState({ toast: msg });
+    this._toastT = setTimeout(() => this.setState({ toast: null }), 3800);
+  }
+
+  theme() { return this.state.theme ?? this.props.theme ?? 'light'; }
+
+  setLangEn = () => { try { localStorage.setItem('jema-lang', 'en'); } catch (e) {} this.setState({ lang: 'en' }); };
+  setLangJa = () => { try { localStorage.setItem('jema-lang', 'ja'); } catch (e) {} this.setState({ lang: 'ja' }); };
+  toggleTheme = () => {
+    const next = this.theme() === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('jema-theme', next); } catch (e) {}
+    this.setState({ theme: next });
+  };
+  goOverview = () => { window.location.href = 'market-overview.html'; };
+  goMarket = () => { window.location.href = 'market-data.html'; };
+  goPolicy = () => { window.location.href = 'policy-deep-dive.html'; };
+  viewMain = () => this.setState({ view: 'main' });
+  viewLtda = () => this.setState({ view: 'ltda' });
+  tExport = () => this.toast('CSV export of auction results queued · 約定結果をCSVで出力します');
+  tRow = () => this.toast('Full OCCTO publication (per-project detail) — not in this prototype · 公表資料の詳細は対象外');
+  tNotif = () => this.toast('Notifications live on the Overview screen · 通知は概況画面にあります');
+  tNav = () => this.toast('Placeholder destination in this prototype · 本プロトタイプ対象外');
+  tRefresh = () => this.toast('Checked for new publications — none since 2026-06-27 · 新規公表なし');
+  tCollapse = () => this.toast('Collapse state persists per user (Settings) · 折りたたみ状態は保存されます');
+
+  renderVals() {
+    const L = this.state.lang ?? this.props.lang ?? 'en';
+    const dark = this.theme() === 'dark';
+    const view = this.state.view ?? this.props.defaultView ?? 'main';
+
+    const segBase = on => ({ padding: '4px 13px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer', background: on ? 'var(--ac)' : 'transparent', color: on ? '#FFFFFF' : 'var(--mut)', transition: 'all .15s', whiteSpace: 'nowrap' });
+
+    const maRows = this.maData.map(m => ({
+      ...m,
+      bar: { display: 'block', width: m.ach + '%', height: '100%', borderRadius: 3, background: m.ach >= 99 ? 'var(--ac)' : '#EF9F27' }
+    }));
+
+    const ltdaRows = this.ltdaData.map(t => ({
+      n1: L === 'ja' ? t.ja : t.en, n2: L === 'ja' ? t.en : t.ja,
+      r1: t.r1, r2: t.r2, r3: t.r3, cum: t.cum, share: t.share,
+      dot: { width: 8, height: 8, borderRadius: 999, background: dark ? t.cd : t.c, flexShrink: 0 },
+      bar: { display: 'block', width: t.share + '%', height: '100%', borderRadius: 3, background: dark ? t.cd : t.c }
+    }));
+
+    const MO = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const tierColors = { METI: 'var(--ac)', OCCTO: dark ? '#7C9CD1' : '#4A6FA5' };
+    const polRows = this.polData.map(p => ({
+      n1: L === 'ja' ? p.ja : p.en,
+      meta: (L === 'ja' ? ('第' + p.no + '回 · 2026年' + p.m + '月' + p.day + '日 · ' + p.tier) : ('No. ' + p.no + ' · ' + p.day + ' ' + MO[p.m] + ' 2026 · ' + p.tier)),
+      summary: L === 'ja' ? p.sJa : p.sEn,
+      sched: !!p.sched,
+      cta: p.sched ? (L === 'ja' ? '議題を見る →' : 'View agenda →') : (L === 'ja' ? '詳細を見る →' : 'Deep dive →'),
+      tierDot: { width: 9, height: 9, borderRadius: 999, background: tierColors[p.tier], flexShrink: 0, marginTop: 6 }
+    }));
+
+    return {
+      isDark: dark ? 'true' : 'false', isDarkB: dark, isLightB: !dark,
+      toggleTheme: this.toggleTheme,
+      setLangEn: this.setLangEn, setLangJa: this.setLangJa,
+      langJaS: segBase(L === 'ja'), langEnS: segBase(L === 'en'),
+      goOverview: this.goOverview, goMarket: this.goMarket, goPolicy: this.goPolicy,
+      tNav: this.tNav, tRefresh: this.tRefresh, tCollapse: this.tCollapse, tNotif: this.tNotif,
+      tExport: this.tExport, tRow: this.tRow,
+      viewMain: this.viewMain, viewLtda: this.viewLtda,
+      vmS: segBase(view === 'main'), vlS: segBase(view === 'ltda'),
+      isMain: view === 'main', isLtda: view === 'ltda',
+      maRows, ltdaRows, polRows,
+      toastOn: !!this.state.toast, toastMsg: this.state.toast
+    };
+  }
+}
+</script>
+</body>
+</html>
