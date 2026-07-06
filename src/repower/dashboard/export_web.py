@@ -27,6 +27,8 @@ from pathlib import Path
 # run inside this CLI/CI process (correctness is unaffected).
 logging.getLogger("streamlit").setLevel(logging.ERROR)
 
+logger = logging.getLogger(__name__)
+
 import pandas as pd  # noqa: E402
 from sqlalchemy import func, select, text  # noqa: E402
 
@@ -37,6 +39,7 @@ from repower.db import (  # noqa: E402
     JepxSpot30m,
     get_engine,
     get_session,
+    init_db,
 )
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
@@ -675,6 +678,12 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Ensure the schema exists so a missing/empty DB (e.g. a deploy where the HF
+    # pull failed) degrades gracefully — the market exporters emit empty series
+    # and the curated capacity dataset still renders — instead of raising
+    # "no such table" and aborting the whole export.
+    init_db(db_path)
+
     maxes = source_max_dates(db_path)
     anchor = _anchor_date(maxes)
 
@@ -687,12 +696,24 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
         "sources": maxes,
         "datasets": {},
     }
-    manifest["datasets"]["wholesale"] = export_wholesale(out, anchor)
-    manifest["datasets"]["system"] = export_system(out, anchor, db_path)
-    manifest["datasets"]["balancing"] = export_balancing(out, anchor)
-    manifest["datasets"]["tieline"] = export_tieline(out, anchor)
-    manifest["datasets"]["drivers"] = export_drivers(out, anchor, db_path)
-    manifest["datasets"]["policy"] = export_policy(out, db_path)
-    manifest["datasets"]["capacity"] = export_capacity(out)
+    # Each dataset is isolated: a failure (e.g. an empty/partial DB on a deploy
+    # where the HF pull failed) is logged and recorded in the manifest but does
+    # not abort the others — so the curated capacity dataset and any datasets
+    # that did succeed still publish, and the frontend falls back to fixtures for
+    # the rest.
+    def _safe(name: str, fn) -> dict:
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("export-web: dataset %r failed: %s", name, e)
+            return {"files": 0, "bytes": 0, "error": str(e)}
+
+    manifest["datasets"]["wholesale"] = _safe("wholesale", lambda: export_wholesale(out, anchor))
+    manifest["datasets"]["system"] = _safe("system", lambda: export_system(out, anchor, db_path))
+    manifest["datasets"]["balancing"] = _safe("balancing", lambda: export_balancing(out, anchor))
+    manifest["datasets"]["tieline"] = _safe("tieline", lambda: export_tieline(out, anchor))
+    manifest["datasets"]["drivers"] = _safe("drivers", lambda: export_drivers(out, anchor, db_path))
+    manifest["datasets"]["policy"] = _safe("policy", lambda: export_policy(out, db_path))
+    manifest["datasets"]["capacity"] = _safe("capacity", lambda: export_capacity(out))
     _write_json(out / "manifest.json", manifest)
     return manifest

@@ -153,12 +153,16 @@ export function MarketDataScreen() {
       const a = live.areas[key]
       if (!a) continue
       const label = areas.find((x) => x.key === key)?.en || key
+      const num = (x: number) => (Number.isFinite(x) ? x : '')
+      // avg/max/min are aligned to dt at the current granularity (dAvg/dMax are
+      // the gran-independent Daily series used only for KPIs — not for export).
       for (let i = 0; i < a.dt.length; i++) {
         rows.push({
           datetime: a.dt[i],
           area: label,
-          avg_price_yen_kwh: a.dAvg[i],
-          max_price_yen_kwh: a.dMax[i],
+          avg_price_yen_kwh: num(a.avg[i]),
+          max_price_yen_kwh: num(a.max[i]),
+          min_price_yen_kwh: num(a.min[i]),
         })
       }
     }

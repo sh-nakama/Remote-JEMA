@@ -74,18 +74,27 @@ export function CapacityAuctionsScreen() {
   // the cards and bar chart always agree with the results table. ----
   const numOf = (v: string | number | undefined): number => {
     if (typeof v === 'number') return v
-    const n = Number(String(v ?? '').replace(/[^0-9.]/g, ''))
+    // Strip ¥ / commas / units. A non-numeric placeholder like "—" must become
+    // NaN (not 0) — Number("") is 0, which would draw spurious zero-height bars.
+    const cleaned = String(v ?? '').replace(/[^0-9.]/g, '')
+    if (cleaned === '') return NaN
+    const n = Number(cleaned)
     return Number.isFinite(n) ? n : NaN
   }
   const CH_Y0 = 270
   const CH_TOP = 14
-  const CH_VMAX = 15000
+  // Axis tops out at 16,000 so the FY2029 cap-clearing zones (¥15,112) sit below
+  // the top gridline rather than overflowing it. Gridlines/labels below are
+  // positioned to match (15,000 -> y30, 10,000 -> y110, 5,000 -> y190).
+  const CH_VMAX = 16000
   const yOf = (v: number) => CH_TOP + ((CH_VMAX - v) / CH_VMAX) * (CH_Y0 - CH_TOP)
-  // Fixed x-slots per delivery-year column; zonal bars appear for FY2027+.
+  // Fixed x-slots per delivery-year column. Zonal bars are drawn wherever the row
+  // carries distinct Hokkaido/Kyushu prices (FY2025+); FY2024 priced uniformly
+  // ("—") is excluded by the isFinite guard in maChart below.
   const chSlots = [
-    { x: 100.8, zonal: false },
-    { x: 250.5, zonal: false },
-    { x: 400.2, zonal: false },
+    { x: 100.8, zonal: true },
+    { x: 250.5, zonal: true },
+    { x: 400.2, zonal: true },
     { x: 523.8, zonal: true },
     { x: 673.5, zonal: true },
     { x: 823.2, zonal: true },
@@ -362,21 +371,21 @@ export function CapacityAuctionsScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Delivery Year <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>実需給年度別 約定価格</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · Hokkaido &amp; Kyushu cleared as separate zones since FY2027 · 北海道・九州は別価格</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · Hokkaido &amp; Kyushu cleared as separate zones since FY2025 · 北海道・九州は別価格</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>auction held ~4 years ahead of delivery</span>
                   </div>
                   <svg viewBox="0 0 960 300" style={s('width:100%;height:auto;display:block;margin-top:10px')}>
                     <g style={s('color:var(--grid)')}>
-                      <line x1="46" y1="14" x2="944" y2="14" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
-                      <line x1="46" y1="99.3" x2="944" y2="99.3" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
-                      <line x1="46" y1="184.7" x2="944" y2="184.7" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
+                      <line x1="46" y1="30" x2="944" y2="30" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
+                      <line x1="46" y1="110" x2="944" y2="110" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
+                      <line x1="46" y1="190" x2="944" y2="190" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
                       <line x1="46" y1="270" x2="944" y2="270" stroke="currentColor" strokeWidth="1"></line>
                     </g>
                     <g style={s('color:var(--mut)')}>
-                      <text x="38" y="18" textAnchor="end" fontSize="11" fill="currentColor">15,000</text>
-                      <text x="38" y="103" textAnchor="end" fontSize="11" fill="currentColor">10,000</text>
-                      <text x="38" y="188" textAnchor="end" fontSize="11" fill="currentColor">5,000</text>
+                      <text x="38" y="34" textAnchor="end" fontSize="11" fill="currentColor">15,000</text>
+                      <text x="38" y="114" textAnchor="end" fontSize="11" fill="currentColor">10,000</text>
+                      <text x="38" y="194" textAnchor="end" fontSize="11" fill="currentColor">5,000</text>
                       <text x="120.8" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2024</text>
                       <text x="270.5" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2025</text>
                       <text x="420.2" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2026</text>

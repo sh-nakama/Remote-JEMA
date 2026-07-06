@@ -52,12 +52,43 @@ function icsEscape(s: string): string {
 }
 
 function ymd(d: string | Date): string {
+  // A date-only string ('YYYY-MM-DD') is a calendar date, not an instant —
+  // read its digits directly. `new Date('YYYY-MM-DD')` would parse it as UTC
+  // midnight and then local getters could shift it a day (off-by-one west of UTC).
+  if (typeof d === 'string') {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d)
+    if (m) return m[1] + m[2] + m[3]
+  }
   const dt = typeof d === 'string' ? new Date(d) : d
   if (Number.isNaN(dt.getTime())) return ''
   const y = dt.getFullYear()
-  const m = String(dt.getMonth() + 1).padStart(2, '0')
+  const mo = String(dt.getMonth() + 1).padStart(2, '0')
   const day = String(dt.getDate()).padStart(2, '0')
-  return `${y}${m}${day}`
+  return `${y}${mo}${day}`
+}
+
+/** RFC 5545 §3.1 content-line folding: no line exceeds 75 octets; continuation
+ *  lines begin with a single space. Splits on code-point boundaries so multi-byte
+ *  (CJK) characters are never cut. */
+function foldLine(line: string): string {
+  const enc = new TextEncoder()
+  if (enc.encode(line).length <= 75) return line
+  const segments: string[] = []
+  let cur = ''
+  let bytes = 0
+  for (const ch of line) {
+    const b = enc.encode(ch).length
+    const limit = segments.length === 0 ? 75 : 74 // continuation lines carry a leading space
+    if (bytes + b > limit) {
+      segments.push(cur)
+      cur = ''
+      bytes = 0
+    }
+    cur += ch
+    bytes += b
+  }
+  if (cur) segments.push(cur)
+  return segments.join('\r\n ')
 }
 
 /** Build an iCalendar document (all-day VEVENTs) from `events`. */
@@ -83,7 +114,7 @@ export function buildIcs(events: IcsEvent[]): string {
     lines.push('END:VEVENT')
   }
   lines.push('END:VCALENDAR')
-  return lines.join('\r\n')
+  return lines.map(foldLine).join('\r\n')
 }
 
 /** Build + download an .ics from `events`. Returns the number of events written. */
