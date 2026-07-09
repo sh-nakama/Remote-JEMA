@@ -1,5 +1,5 @@
 // Ported from screens/policy-deep-dive.html
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import {
@@ -22,8 +22,59 @@ function dUntil(ds: string): number {
   return Math.round((new Date(ds).getTime() - new Date(2026, 6, 2).getTime()) / 864e5)
 }
 
+// Minimal markdown → React for the committee-level synthesis (raw markdown from
+// NotebookLM). Handles `#`/`##`/`###` headings, `-`/`•`/`*` bullets, and blank-line
+// paragraphs — no dependency. Inline `**bold**` is stripped to plain text.
+function renderMd(md: string): ReactNode[] {
+  const strip = (t: string) => t.replace(/\*\*(.+?)\*\*/g, '$1').replace(/`([^`]+)`/g, '$1')
+  const out: ReactNode[] = []
+  const lines = (md || '').replace(/\r/g, '').split('\n')
+  let para: string[] = []
+  const flush = () => {
+    if (para.length) {
+      out.push(
+        <div key={'p' + out.length} style={s('font-size:12.5px;color:var(--tx2);margin-top:6px;line-height:1.6')}>
+          {strip(para.join(' '))}
+        </div>,
+      )
+      para = []
+    }
+  }
+  for (const raw of lines) {
+    const line = raw.trim()
+    if (!line) {
+      flush()
+      continue
+    }
+    const h = /^(#{1,3})\s+(.*)$/.exec(line)
+    if (h) {
+      flush()
+      out.push(
+        <div key={'h' + out.length} style={s('font-size:13px;font-weight:600;color:var(--tx);margin-top:11px')}>
+          {strip(h[2])}
+        </div>,
+      )
+      continue
+    }
+    const b = /^[-•*]\s+(.*)$/.exec(line)
+    if (b) {
+      flush()
+      out.push(
+        <div key={'b' + out.length} style={s('display:flex;gap:8px;font-size:12.5px;color:var(--tx2);margin-top:4px;line-height:1.55')}>
+          <span style={s('width:5px;height:5px;border-radius:999px;background:var(--ac);margin-top:7px;flex-shrink:0')}></span>
+          <span style={s('flex:1')}>{strip(b[1])}</span>
+        </div>,
+      )
+      continue
+    }
+    para.push(line)
+  }
+  flush()
+  return out
+}
+
 export function PolicyDeepDiveScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, interactive } = useApp()
   const dark = theme === 'dark'
   const L: 'en' | 'ja' = lang
 
@@ -33,41 +84,95 @@ export function PolicyDeepDiveScreen() {
   const [followedOnly, setFollowedOnly] = useState(false)
   const [jpOpen, setJpOpen] = useState(false)
   const [q, setQ] = useState('')
+  const [comQ, setComQ] = useState('') // committee-name search (explorer)
   const [coverage, setCoverage] = useState<'tracked' | 'all'>('tracked')
   const [queued, setQueued] = useState<Record<string, boolean>>({})
+  // Detail pane: 'committee' shows the committee-level synthesis overview; 'meeting'
+  // shows one session's digest. Selecting a committee vs a session flips it.
+  const [detailMode, setDetailMode] = useState<'committee' | 'meeting'>('committee')
+  const [synthJpOpen, setSynthJpOpen] = useState(false)
+  // Working filters (were placeholder toasts): committee dropdown + date-range dropdown.
+  const [comOpen, setComOpen] = useState(false)
+  const [dateOpen, setDateOpen] = useState(false)
+  const [dateFilter, setDateFilter] = useState<'all' | '30d' | '90d' | 'year' | 'upcoming'>('all')
 
   // showAudioCard default prop = true
   const showAudioCard = true
 
   // ---- live policy data (falls back to fixtures while loading) ----
-  const pol = usePolicyLive()
-  const committees = pol.ready ? pol.committees : fxCommittees
+  // Interactive (local master) reads the live DB via /api/policy/deepdive; the
+  // read-only deploy reads the static snapshots. Either way the shape is identical.
+  const pol = usePolicyLive(interactive)
+  // The catalog (committees.json) now carries the full energy catalog — the
+  // explorer/feed show only the *tracked* set; the full catalog (incl. discovered
+  // committees) lives in the Manage modal. Fixtures are the loading fallback.
+  const committees = pol.ready ? pol.committees.filter((c) => c.tracked) : fxCommittees
+  const discoveredCount = pol.ready ? pol.committees.filter((c) => c.discovered).length : 6
   const meetings = pol.ready ? pol.meetings : fxMeetings
   const untracked: Meeting[] = pol.ready ? [] : fxUntracked
-  const upcoming: Upcoming[] = pol.ready ? [] : fxUpcoming
+  const upcoming: Upcoming[] = pol.ready ? pol.upcoming : fxUpcoming
 
   // ---- handlers ----
-  const selAll = () => setCommittee('all')
+  const selAll = () => {
+    setCommittee('all')
+    setDetailMode('meeting')
+  }
   const toggleFollowed = () => setFollowedOnly((v) => !v)
   const toggleJp = () => setJpOpen((v) => !v)
   const clearQ = () => setQ('')
   const covTracked = () => setCoverage('tracked')
   const covAll = () => setCoverage('all')
-  const selectCommittee = (key: string) => setCommittee(key)
+  // Selecting a committee shows its high-level synthesis; selecting a session shows
+  // that session's digest.
+  const selectCommittee = (key: string) => {
+    setCommittee(key)
+    setDetailMode('committee')
+    setSynthJpOpen(false)
+  }
   const selectMeeting = (key: string) => {
     setMeeting(key)
     setJpOpen(false)
+    setDetailMode('meeting')
   }
   const queueMeeting = (key: string) => {
     setQueued((s2) => ({ ...s2, [key]: true }))
     toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (daily 06:10 JST) · 追跡し、要約キューに登録しました')
   }
 
-  const runCatchup = () => toast('Catch-up run complete — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · 差分取得が完了しました')
-  const tManage = () => toast('Committee registry management (follow / tiers / sources) — not in this prototype · 委員会管理は対象外')
-  const tFilter = () => toast('Filter dropdown — not in this prototype · フィルタは対象外')
+  // Run catch-up (interactive/local only): kick the auth-free refresh on the local
+  // API, then poll the job to completion and report the result. Hidden on the
+  // read-only GitHub Pages deployment (no /api).
+  const runCatchup = () => {
+    if (!interactive) return
+    toast(L === 'ja' ? '差分取得を開始しました…' : 'Catch-up started…')
+    const poll = () => {
+      fetch('/api/policy/catchup')
+        .then((r) => r.json())
+        .then((j) => {
+          if (j.state === 'running') {
+            window.setTimeout(poll, 1500)
+            return
+          }
+          if (j.state === 'done' && j.result) {
+            const r = j.result
+            toast(
+              L === 'ja'
+                ? `差分取得完了 — 新規会合 ${r.new_meetings} · 日付 ${r.dated} · 発見 ${r.discovered} · 要約待ち ${r.pending}`
+                : `Catch-up done — ${r.new_meetings} new · ${r.dated} dated · ${r.discovered} discovered · ${r.pending} pending`,
+            )
+          } else {
+            toast(L === 'ja' ? '差分取得に失敗しました' : 'Catch-up failed')
+          }
+        })
+        .catch(() => toast(L === 'ja' ? '差分取得の状態を取得できません' : 'Could not read catch-up status'))
+    }
+    fetch('/api/policy/catchup', { method: 'POST' })
+      .then(() => window.setTimeout(poll, 1500))
+      .catch(() => toast(L === 'ja' ? '差分取得を開始できませんでした' : 'Could not start catch-up'))
+  }
+  const tManage = () => openOverlay('committees')
   const tViewAll = () => toast('Full “newly summarised” list — not in this prototype · 一覧表示は対象外')
-  const tAdd = () => toast('Add discovered committees to the registry — not in this prototype · 追跡追加は対象外')
+  const tAdd = () => openOverlay('committees')
   const tSource = () => toast('Opens the committee’s official METI/OCCTO page in a new tab · 公式ページを開きます')
   const tRef = () => toast('Citation deep-link: opens the source PDF at the cited page · 引用元PDFの該当ページを開きます')
   const tDoc = () => toast('Opens the original PDF from METI · 元資料PDFを開きます')
@@ -94,13 +199,39 @@ export function PolicyDeepDiveScreen() {
 
   const orgColors: Record<string, string> = { METI: 'var(--ac)', OCCTO: dark ? '#7C9CD1' : '#4A6FA5', EGC: dark ? '#C77BD8' : '#7B2D8E' }
 
+  // ---- committee search + "recommended to follow" ranking ----
+  const cq = comQ.trim().toLowerCase()
+  const matchComQ = (c: (typeof committees)[number]) =>
+    !cq || (c.en + ' ' + c.ja + ' ' + c.org + ' ' + c.key).toLowerCase().includes(cq)
+
+  const nowMs = Date.now()
+  const recScore = (c: (typeof committees)[number]) => {
+    const orgW = c.org === 'METI' ? 3 : c.org === 'OCCTO' ? 2 : 1
+    const activity = Math.min(c.sourceCount || c.meetings || 0, 60)
+    const days = c.lastDate ? Math.max(0, (nowMs - Date.parse(c.lastDate)) / 864e5) : 400
+    const recW = Math.max(0, 1 - days / 365)
+    return orgW * 2 + activity / 12 + recW * 5
+  }
+  // Follow uses the real committee keys, which only exist once live data loads.
+  // While falling back to fixtures (fixture keys ≠ real keys) show the fixture's
+  // own `followed` flag and don't write to the real follow store.
+  const isFol = (c: (typeof committees)[number]) => (pol.ready ? isFollowing(c.key) : c.followed)
+  const recommended = !pol.ready
+    ? []
+    : committees
+        .filter((c) => !isFollowing(c.key) && matchComQ(c))
+        .sort((a, b) => recScore(b) - recScore(a))
+        .slice(0, 3)
+        .map((c) => ({ key: c.key, n1: L === 'ja' ? c.ja : c.en, org: c.org, last: c.last }))
+
   // ---- explorer ----
   const orgs: Array<'METI' | 'OCCTO' | 'EGC'> = ['METI', 'OCCTO', 'EGC']
   const explorerGroups = orgs.map((org) => {
     const items = committees
-      .filter((c) => c.org === org && (!fOnly || c.followed))
+      .filter((c) => c.org === org && (!fOnly || isFol(c)) && matchComQ(c))
       .map((c) => {
         const on = selCom === c.key
+        const following = isFol(c)
         let nx = ''
         if (c.nextDate) {
           const dd = dUntil(c.nextDate)
@@ -114,16 +245,18 @@ export function PolicyDeepDiveScreen() {
           key: c.key,
           n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
           next: nx, hasNext: !!c.nextDate,
+          following,
           s: {
             padding: '7px 9px', borderRadius: 10, cursor: 'pointer',
             background: on ? 'var(--acTint)' : 'transparent',
             borderLeft: on ? '3px solid var(--ac)' : '3px solid transparent', minWidth: 0,
           } as CSS,
           click: () => selectCommittee(c.key),
-          folTxt: c.followed ? 'Following フォロー中' : 'Not followed 未フォロー',
-          folS: (c.followed
-            ? { fontSize: 9.5, fontWeight: 600, background: 'var(--acBadge)', color: '#FFFFFF', borderRadius: 999, padding: '1px 8px' }
-            : { fontSize: 9.5, fontWeight: 500, border: '1px solid var(--bd2)', color: 'var(--mut)', borderRadius: 999, padding: '0 8px' }) as CSS,
+          folClick: pol.ready ? () => toggleFollow(c.key) : () => {},
+          folTxt: following ? (L === 'ja' ? 'フォロー中' : 'Following') : (L === 'ja' ? '＋ フォロー' : '+ Follow'),
+          folS: (following
+            ? { fontSize: 9.5, fontWeight: 600, background: 'var(--acBadge)', color: '#FFFFFF', borderRadius: 999, padding: '1px 8px', cursor: 'pointer' }
+            : { fontSize: 9.5, fontWeight: 600, border: '1px solid var(--bd2)', color: 'var(--acT)', borderRadius: 999, padding: '0 8px', cursor: 'pointer' }) as CSS,
         }
       })
     const count = committees.filter((c) => c.org === org).length
@@ -151,11 +284,33 @@ export function PolicyDeepDiveScreen() {
     return { txt: 'Pending · Queued', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
   }
   const followedSet: Record<string, boolean> = {}
-  committees.forEach((c) => { followedSet[c.key] = c.followed })
+  committees.forEach((c) => { followedSet[c.key] = isFol(c) })
   const comOrg: Record<string, string> = {}
   committees.forEach((c) => { comOrg[c.key] = c.org })
 
   const qNorm = (q || '').trim().toLowerCase()
+
+  // Date-range filter (the "Date 期間 ▾" chip). Ranges are relative to the current
+  // date; 'upcoming' hides the recent feed and shows only scheduled meetings.
+  const nowD = Date.now()
+  const ageDays = (ds: string) => (nowD - Date.parse(ds)) / 864e5
+  const dateOkRecent = (ds: string): boolean => {
+    if (dateFilter === 'all') return true
+    if (dateFilter === 'upcoming') return false
+    if (!ds || Number.isNaN(Date.parse(ds))) return dateFilter === 'year' ? false : true
+    if (dateFilter === '30d') return ageDays(ds) <= 30
+    if (dateFilter === '90d') return ageDays(ds) <= 90
+    if (dateFilter === 'year') return new Date(ds).getFullYear() === new Date(nowD).getFullYear()
+    return true
+  }
+  const showUpcoming = dateFilter === 'all' || dateFilter === 'upcoming'
+  const DATE_LABELS: Record<typeof dateFilter, string> = {
+    all: L === 'ja' ? '期間' : 'Date',
+    '30d': L === 'ja' ? '過去30日' : 'Last 30d',
+    '90d': L === 'ja' ? '過去90日' : 'Last 90d',
+    year: L === 'ja' ? '今年' : 'This year',
+    upcoming: L === 'ja' ? '開催予定のみ' : 'Upcoming',
+  }
 
   let pool: Meeting[] = meetings.slice()
   if (coverage === 'all' || qNorm) pool = pool.concat(untracked)
@@ -167,6 +322,7 @@ export function PolicyDeepDiveScreen() {
       if (fOnly && m.com && !followedSet[m.com]) return false
       if (coverage === 'tracked' && !qNorm && m.status === 'pending') return false
     }
+    if (!dateOkRecent(m.date)) return false
     if (qNorm) {
       const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', m.com ? comOrg[m.com] : m.org || '']
         .concat(m.digest ? m.digest.map((sec) => sec.h + ' ' + sec.items.join(' ')) : [])
@@ -216,6 +372,7 @@ export function PolicyDeepDiveScreen() {
   const feed = feedList.map(mapFeed)
 
   const upList = upcoming.filter((m) => {
+    if (!showUpcoming) return false
     if (!(selCom === 'all' || m.com === selCom)) return false
     if (fOnly && !followedSet[m.com]) return false
     if (qNorm) {
@@ -271,6 +428,18 @@ export function PolicyDeepDiveScreen() {
   const openUrl = (url: string) => window.open(url, '_blank', 'noopener,noreferrer')
   const showAudio = showAudioCard && !hasAgenda
 
+  // ---- committee overview (detail pane when a committee, not a session, is selected) ----
+  const selCommittee = committees.find((c) => c.key === selCom)
+  const showCommittee = detailMode === 'committee' && !!selCommittee
+  const coSynthEn = selCommittee?.synthesisEn || ''
+  const coSynthJa = selCommittee?.synthesisJa || ''
+  const coHasSynth = !!(coSynthEn || coSynthJa)
+  const coSessions = selCommittee
+    ? meetings
+        .filter((m) => m.com === selCommittee.key)
+        .sort((a, b) => (typeof a.num === 'number' && typeof b.num === 'number' ? b.num - a.num : b.date < a.date ? -1 : 1))
+    : []
+
   const feedNote = qNorm
     ? 'Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')
     : feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
@@ -292,7 +461,7 @@ export function PolicyDeepDiveScreen() {
   const langJaS = segBase(L === 'ja')
   const langEnS = segBase(L === 'en')
   const chipCommittee = chipBase(selCom !== 'all')
-  const chipDate = chipBase(false)
+  const chipDate = chipBase(dateFilter !== 'all')
   const chipFollowed = chipBase(fOnly)
   const covTS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'tracked' ? 'var(--ac)' : 'transparent', color: coverage === 'tracked' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
   const covAS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'all' ? 'var(--ac)' : 'transparent', color: coverage === 'all' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
@@ -379,9 +548,11 @@ export function PolicyDeepDiveScreen() {
                 <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>Committee tracking &amp; AI briefings · METI · OCCTO · EGC · 委員会追跡とAIブリーフィング</div>
               </div>
               <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>
-                <Hoverable base="display:inline-flex;align-items:center;gap:7px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer;box-shadow:var(--sh1a)" hover="background:var(--acT);box-shadow:var(--sh2)" onClick={runCatchup}>
-                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Run catch-up · 差分取得
-                </Hoverable>
+                {interactive && (
+                  <Hoverable base="display:inline-flex;align-items:center;gap:7px;background:var(--ac);color:#FFFFFF;border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer;box-shadow:var(--sh1a)" hover="background:var(--acT);box-shadow:var(--sh2)" onClick={runCatchup}>
+                    <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Run catch-up · 差分取得
+                  </Hoverable>
+                )}
                 <Hoverable base="background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" hover="background:var(--acTint2);border-color:var(--ac)" onClick={tManage}>Manage · 管理</Hoverable>
               </div>
             </div>
@@ -397,8 +568,54 @@ export function PolicyDeepDiveScreen() {
                 <span style={s('font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0')} title="Search covers titles, committees & digests — incl. untracked meetings. Full text of source PDFs (FTS5) is proposed. · 検索は未追跡会合も対象。PDF全文検索は提案中">PDF full-text = PROPOSED</span>
               </div>
               <span style={s('width:1px;height:22px;background:var(--dv)')}></span>
-              <span style={chipCommittee} onClick={tFilter}>Committee 委員会 ▾</span>
-              <span style={chipDate} onClick={tFilter}>Date 期間 ▾</span>
+              {/* Committee filter dropdown */}
+              <span style={s('position:relative')}>
+                <span style={chipCommittee} onClick={() => { setComOpen((o) => !o); setDateOpen(false) }}>
+                  {selCom === 'all'
+                    ? (L === 'ja' ? '委員会 ▾' : 'Committee ▾')
+                    : ((L === 'ja' ? selCommittee?.ja : selCommittee?.en) || selCom) + ' ▾'}
+                </span>
+                {comOpen && (
+                  <>
+                    <div onClick={() => setComOpen(false)} style={s('position:fixed;inset:0;z-index:40')}></div>
+                    <div style={s('position:absolute;top:calc(100% + 6px);left:0;z-index:50;width:310px;max-height:360px;overflow-y:auto;background:var(--bg1);border:1px solid var(--bd);border-radius:12px;box-shadow:var(--shPop);padding:6px')}>
+                      <Hoverable base={`display:block;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:600;color:${selCom === 'all' ? 'var(--acT)' : 'var(--tx)'}`} hover="background:var(--hov)" onClick={() => { selAll(); setComOpen(false) }}>All committees · すべて</Hoverable>
+                      {orgs.map((org) => {
+                        const items = committees.filter((c) => c.org === org)
+                        if (!items.length) return null
+                        return (
+                          <div key={org}>
+                            <div style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut);margin:8px 8px 3px')}>{org}</div>
+                            {items.map((c) => (
+                              <Hoverable key={c.key} base={`display:block;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${selCom === c.key ? 'var(--acT)' : 'var(--tx2)'};background:${selCom === c.key ? 'var(--acTint)' : 'transparent'}`} hover="background:var(--hov)" onClick={() => { selectCommittee(c.key); setComOpen(false) }}>{L === 'ja' ? c.ja : c.en}</Hoverable>
+                            ))}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </>
+                )}
+              </span>
+              {/* Date-range filter dropdown */}
+              <span style={s('position:relative')}>
+                <span style={chipDate} onClick={() => { setDateOpen((o) => !o); setComOpen(false) }}>{DATE_LABELS[dateFilter]} ▾</span>
+                {dateOpen && (
+                  <>
+                    <div onClick={() => setDateOpen(false)} style={s('position:fixed;inset:0;z-index:40')}></div>
+                    <div style={s('position:absolute;top:calc(100% + 6px);left:0;z-index:50;width:200px;background:var(--bg1);border:1px solid var(--bd);border-radius:12px;box-shadow:var(--shPop);padding:6px')}>
+                      {([
+                        ['all', L === 'ja' ? 'すべての期間' : 'All time'],
+                        ['30d', L === 'ja' ? '過去30日' : 'Last 30 days'],
+                        ['90d', L === 'ja' ? '過去90日' : 'Last 90 days'],
+                        ['year', L === 'ja' ? '今年' : 'This year'],
+                        ['upcoming', L === 'ja' ? '開催予定のみ' : 'Upcoming only'],
+                      ] as const).map(([v, label]) => (
+                        <Hoverable key={v} base={`display:block;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;color:${dateFilter === v ? 'var(--acT)' : 'var(--tx2)'};background:${dateFilter === v ? 'var(--acTint)' : 'transparent'}`} hover="background:var(--hov)" onClick={() => { setDateFilter(v); setDateOpen(false) }}>{label}</Hoverable>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </span>
               <span style={chipFollowed} onClick={toggleFollowed}>Followed only フォロー中のみ</span>
             </div>
 
@@ -429,8 +646,33 @@ export function PolicyDeepDiveScreen() {
               <div style={s('background:var(--bg1);border-radius:20px;padding:16px;box-shadow:var(--sh1)')}>
                 <div style={s('display:flex;align-items:baseline;justify-content:space-between')}>
                   <span style={s('font-size:14px;font-weight:600')}>Committees <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>委員会</span></span>
-                  <span style={s('font-size:11px;color:var(--mut)')}>14 tracked</span>
+                  <span style={s('font-size:11px;color:var(--mut)')}>{committees.length} tracked</span>
                 </div>
+                {/* committee search */}
+                <div style={s('display:flex;align-items:center;gap:7px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;padding:6px 10px;margin-top:9px')}>
+                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;color:var(--mut);flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`} />
+                  <input placeholder={L === 'ja' ? '委員会を検索…' : 'Search committees…'} value={comQ} onChange={(e) => setComQ(e.target.value)} style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:12.5px;background:transparent;color:var(--tx);min-width:0')} />
+                  {comQ && (
+                    <span onClick={() => setComQ('')} style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}>✕</span>
+                  )}
+                </div>
+                {/* recommended to follow */}
+                {recommended.length > 0 && !fOnly && (
+                  <div style={s('margin-top:12px')}>
+                    <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.06em;color:var(--mut);margin:0 2px 5px')}>{L === 'ja' ? 'おすすめのフォロー' : 'RECOMMENDED TO FOLLOW'}</div>
+                    <div style={s('display:flex;flex-direction:column;gap:5px')}>
+                      {recommended.map((r) => (
+                        <div key={r.key} style={s('display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 9px;border:1px solid var(--bd2);border-radius:10px')}>
+                          <span style={s('display:flex;flex-direction:column;min-width:0')}>
+                            <span style={s('font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{r.n1}</span>
+                            <span style={s("font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>{r.org} · {r.last}</span>
+                          </span>
+                          <Hoverable as="span" base="font-size:11px;font-weight:600;padding:3px 10px;border-radius:999px;border:1px solid var(--ac);color:var(--acT);cursor:pointer;background:var(--acTint);white-space:nowrap;flex-shrink:0" hover="background:var(--ac);color:#FFFFFF" onClick={() => toggleFollow(r.key)}>{L === 'ja' ? '＋ フォロー' : '+ Follow'}</Hoverable>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div style={allRowS} onClick={selAll}>All committees · すべて</div>
                 {explorerGroups.map((g, gi) => (
                   <div key={gi}>
@@ -441,7 +683,7 @@ export function PolicyDeepDiveScreen() {
                           <div style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</div>
                           <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
                           <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
-                            <span style={c.folS}>{c.folTxt}</span>
+                            <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following ? (L === 'ja' ? 'クリックでフォロー解除' : 'Click to unfollow') : (L === 'ja' ? 'クリックでフォロー' : 'Click to follow')}>{c.folTxt}</span>
                             <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
                           </div>
                           {c.hasNext && (
@@ -456,8 +698,8 @@ export function PolicyDeepDiveScreen() {
                   </div>
                 ))}
                 <div style={s('border:1px dashed var(--fnt2);border-radius:12px;padding:9px 11px;margin-top:12px;display:flex;justify-content:space-between;align-items:center')}>
-                  <span style={s('font-size:11px;color:var(--mut)')}>Discovered · 6 committees · 24 mtgs<br />未追跡 — 「All METI」で表示</span>
-                  <Hoverable as="span" base="font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1)" hover="border-color:var(--ac);color:var(--acT)" onClick={tAdd}>Add 追加</Hoverable>
+                  <span style={s('font-size:11px;color:var(--mut)')}>Discovered · {discoveredCount} committees<br />未追跡 — 「管理」で追跡</span>
+                  <Hoverable as="span" base="font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1)" hover="border-color:var(--ac);color:var(--acT)" onClick={tAdd}>Manage 管理</Hoverable>
                 </div>
               </div>
 
@@ -513,6 +755,84 @@ export function PolicyDeepDiveScreen() {
 
               {/* DETAIL */}
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);min-width:0')}>
+                {/* ---- Committee overview (high-level synthesis) ---- */}
+                {showCommittee && (
+                  <>
+                    <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
+                      <div style={s('min-width:0')}>
+                        <div style={s('display:flex;align-items:center;gap:9px;flex-wrap:wrap')}>
+                          <span style={s('font-size:17px;font-weight:700')}>{L === 'ja' ? selCommittee?.ja : selCommittee?.en}</span>
+                          <span style={s(`font-size:10.5px;font-weight:600;background:var(--acTint);color:${orgColors[selCommittee?.org || 'METI']};border-radius:6px;padding:1px 7px`)}>{selCommittee?.org}</span>
+                          {selCommittee?.discovered && (
+                            <span style={s('font-size:9.5px;font-weight:600;color:var(--mut);border:1px dashed var(--fnt2);border-radius:6px;padding:0 6px')}>{L === 'ja' ? '未追跡発見' : 'discovered'}</span>
+                          )}
+                        </div>
+                        <div style={s("font-size:12px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{L === 'ja' ? selCommittee?.en : selCommittee?.ja} · {selCommittee?.tier}</div>
+                      </div>
+                      <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" hover="color:var(--ac)" onClick={() => (selCommittee?.url ? openUrl(selCommittee.url) : tSource())}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`} />METI page · 元ページ</Hoverable>
+                    </div>
+                    {/* Status rollup */}
+                    <div style={s('display:flex;gap:7px;flex-wrap:wrap;margin-top:12px')}>
+                      <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;background:var(--upBg);color:var(--up);font-feature-settings:'tnum' 1")}>{selCommittee?.done || 0} {L === 'ja' ? '要約済み' : 'summarised'}</span>
+                      <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;background:var(--bg2);color:var(--mut);font-feature-settings:'tnum' 1")}>{selCommittee?.pending || 0} {L === 'ja' ? '要約待ち' : 'pending'}</span>
+                      {!!(selCommittee?.error) && (
+                        <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;background:var(--dnBg);color:var(--dn);font-feature-settings:'tnum' 1")}>{selCommittee?.error} {L === 'ja' ? 'エラー' : 'errored'}</span>
+                      )}
+                      {!!(selCommittee?.lastSynth) && (
+                        <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;border:1px solid var(--bd2);color:var(--tx2);font-feature-settings:'tnum' 1")}>{L === 'ja' ? `第${selCommittee?.lastSynth}回まで統合` : `synthesised thru No. ${selCommittee?.lastSynth}`}</span>
+                      )}
+                    </div>
+                    {coHasSynth ? (
+                      <>
+                        {coSynthEn && (
+                          <div style={s('margin-top:16px')}>
+                            <div style={s('font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>SYNTHESIS OVERVIEW · 横断サマリー（英語）</div>
+                            {renderMd(coSynthEn)}
+                          </div>
+                        )}
+                        {coSynthJa && (
+                          <div style={s('border:1px solid var(--bd);border-radius:14px;margin-top:14px;overflow:hidden')}>
+                            <Hoverable base="display:flex;justify-content:space-between;align-items:center;padding:11px 14px;cursor:pointer;background:var(--bg3)" hover="background:var(--bg2)" onClick={() => setSynthJpOpen((v) => !v)}>
+                              <span style={s('font-size:13px;font-weight:600')}>議論の総括（会合横断） <span style={s('font-size:11px;font-weight:400;color:var(--mut)')}>JP authoritative · 日本語正</span></span>
+                              <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:var(--mut)"><path d="${synthJpOpen ? 'M18 15l-6-6-6 6' : 'M6 9l6 6 6-6'}"></path></svg>`} />
+                            </Hoverable>
+                            {synthJpOpen && (
+                              <div style={s('padding:4px 14px 13px;border-top:1px solid var(--dv)')}>{renderMd(coSynthJa)}</div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={s('margin-top:16px;border:1px dashed var(--fnt2);border-radius:14px;padding:22px;text-align:center')}>
+                        <div style={s('font-size:13.5px;font-weight:600;color:var(--tx2)')}>{L === 'ja' ? '横断サマリーは未作成です' : 'No cross-meeting synthesis yet'}</div>
+                        <div style={s('font-size:12px;color:var(--mut);margin-top:3px')}>{L === 'ja' ? 'この委員会の会合を要約すると総括が作成されます（「管理」→▶ で実行）' : "Summarise this committee's meetings to build its synthesis (Manage → ▶)"}</div>
+                      </div>
+                    )}
+                    {/* Sessions */}
+                    <div style={s('margin-top:16px;border-top:1px solid var(--dv);padding-top:12px')}>
+                      <div style={s('font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>SESSIONS · 会合一覧 ({coSessions.length})</div>
+                      <div style={s('display:flex;flex-direction:column;gap:2px;margin-top:6px')}>
+                        {coSessions.length === 0 && (
+                          <div style={s('font-size:12px;color:var(--mut);padding:6px 2px')}>{L === 'ja' ? 'まだ会合が検出されていません' : 'No sessions detected yet'}</div>
+                        )}
+                        {coSessions.map((m) => {
+                          const st = stChip(m.status)
+                          return (
+                            <Hoverable key={m.key} base="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={() => selectMeeting(m.key)}>
+                              <span style={s("font-size:12.5px;font-weight:600;color:var(--tx2);white-space:nowrap;font-feature-settings:'tnum' 1")}>{L === 'ja' ? '第' + m.num + '回' : 'No. ' + m.num}{m.tori ? ' 🏁' : ''}</span>
+                              <span style={s('flex:1')}></span>
+                              <span style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{m.date}</span>
+                              <span style={st.s}>{st.txt}</span>
+                            </Hoverable>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  </>
+                )}
+                {/* ---- Session (meeting) detail ---- */}
+                {!showCommittee && (
+                <>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                   <div style={s('min-width:0')}>
                     <div style={s('display:flex;align-items:center;gap:9px;flex-wrap:wrap')}>
@@ -634,6 +954,8 @@ export function PolicyDeepDiveScreen() {
                     ))}
                   </div>
                 </div>
+                </>
+                )}
               </div>
             </div>
 

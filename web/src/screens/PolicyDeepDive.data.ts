@@ -11,6 +11,22 @@ export interface Committee {
   url?: string
   nextNo?: number
   nextDate?: string
+  /** Backend flags (live rows): `tracked` = scraped/summarised by the pipeline;
+   * `discovered` = found by catalog discovery, not a curated config committee. */
+  tracked?: boolean
+  discovered?: boolean
+  /** Ranking signals for "recommended to follow" (live rows). */
+  sourceCount?: number
+  meetings?: number
+  lastDate?: string | null
+  /** Committee-level cross-meeting synthesis (raw markdown, may be null) + how far
+   * it's been synthesised, and a status rollup of its meetings (live rows). */
+  synthesisEn?: string | null
+  synthesisJa?: string | null
+  lastSynth?: number | null
+  done?: number
+  pending?: number
+  error?: number
 }
 
 export interface DigestSection {

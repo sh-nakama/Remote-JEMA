@@ -156,6 +156,20 @@ class PolicyCommittee(Base):
     running_digest_en_md = Column(Text)  # compact English running digest
     last_checked = Column(DateTime)  # last detection run
     last_refreshed_at = Column(DateTime)  # last summarisation run
+    # Tracked-set state (see repower.policy.store):
+    #   enabled     — the daily detect/summarise pipeline processes this committee.
+    #   user_added  — added at runtime (discovery / UI) vs seeded from committees.py.
+    #   priority    — summarisation priority (mirrors the config value; lower first).
+    enabled = Column(Boolean, default=True, nullable=False)
+    user_added = Column(Boolean, default=False, nullable=False)
+    priority = Column(Integer, default=100)
+    # Per-source scraper config (mirrors committees.Committee) so a committee added
+    # at runtime is scrapeable without a code change. OCCTO: max_meeting/prefix;
+    # EGC: log_pages (JSON array of log-page filenames) / min_meeting.
+    max_meeting = Column(Integer)
+    prefix = Column(String(64))
+    log_pages = Column(Text)
+    min_meeting = Column(Integer)
 
 
 class PolicyMeeting(Base):
@@ -186,6 +200,35 @@ class PolicyMeeting(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
+    )
+
+
+class PolicyUpcoming(Base):
+    """A scheduled (future) committee meeting from an external schedule source.
+
+    Committee pages only list a meeting once its materials exist, so upcoming
+    meetings come from forward-looking calendars (METI committee calendar +
+    電気新聞 weekly schedule). This table is a rolling snapshot — it is fully
+    replaced on each ``policy schedule`` refresh — so it needs no lifecycle state.
+
+    ``committee_key`` is set when the entry matches a tracked committee (nullable
+    otherwise). Deduped on ``(meeting_date, source_key)`` where ``source_key`` is a
+    normalised name, so the same meeting listed by two sources collapses to one row.
+    """
+
+    __tablename__ = "policy_upcoming"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    meeting_date = Column(Date, nullable=False)
+    name_ja = Column(Text, nullable=False)
+    source_key = Column(String(160), nullable=False)  # normalised name for dedup
+    org = Column(String(16))  # METI | OCCTO | EGC | other
+    committee_key = Column(String(64))  # matched tracked committee, else NULL
+    meeting_num = Column(Integer)  # from 第N回, if present
+    source = Column(String(16))  # meti (the METI committee calendar)
+    source_url = Column(Text)
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("meeting_date", "source_key", name="uq_policy_upcoming"),
     )
 
 
@@ -241,6 +284,7 @@ def init_db(db_path: str | None = None) -> Engine:
             Base.metadata.create_all(engine)
             _migrate_add_area_column(engine)
             _migrate_add_policy_synth_done(engine)
+            _migrate_add_policy_committee_cols(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -317,6 +361,38 @@ def _migrate_add_policy_synth_done(engine) -> None:
             "  SELECT COALESCE(c.last_synth_meeting, -1) FROM policy_committee c"
             "  WHERE c.committee_key = policy_meeting.committee_key)"
         ))
+
+
+def _migrate_add_policy_committee_cols(engine) -> None:
+    """Add the tracked-set + scraper-config columns to ``policy_committee`` (additive).
+
+    ``enabled`` gates whether the daily detect/summarise pipeline processes a
+    committee; ``user_added`` marks committees added at runtime (discovery / UI)
+    vs seeded from ``committees.py``; ``priority`` mirrors the config value; the
+    remaining columns carry the per-source scraper config so a runtime-added
+    committee is scrapeable. Defaults describe the "known, tracked config
+    committee" case so pre-existing rows keep behaving as before.
+    """
+    from sqlalchemy import inspect, text as sql_text
+    insp = inspect(engine)
+    if "policy_committee" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("policy_committee")}
+    adds = {
+        "enabled": "ALTER TABLE policy_committee ADD COLUMN enabled BOOLEAN DEFAULT 1",
+        "user_added": "ALTER TABLE policy_committee ADD COLUMN user_added BOOLEAN DEFAULT 0",
+        "priority": "ALTER TABLE policy_committee ADD COLUMN priority INTEGER DEFAULT 100",
+        "max_meeting": "ALTER TABLE policy_committee ADD COLUMN max_meeting INTEGER",
+        "prefix": "ALTER TABLE policy_committee ADD COLUMN prefix VARCHAR(64)",
+        "log_pages": "ALTER TABLE policy_committee ADD COLUMN log_pages TEXT",
+        "min_meeting": "ALTER TABLE policy_committee ADD COLUMN min_meeting INTEGER",
+    }
+    missing = [sql for name, sql in adds.items() if name not in cols]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for sql in missing:
+            conn.execute(sql_text(sql))
 
 
 def get_session(db_path: str | None = None) -> Session:

@@ -12,14 +12,33 @@ from __future__ import annotations
 
 import logging
 
-from repower.policy.committees import COMMITTEES, committee_by_key
-from repower.policy.scraper import discover_meetings, list_materials
+import time
+
+from repower.policy.scraper import (
+    POLITE_DELAY,
+    discover_meetings,
+    fetch_committee_dates,
+    fetch_occto_meeting_date,
+    list_materials,
+)
 from repower.policy.store import (
+    committee_or_config,
+    enabled_committees,
     known_meeting_nums,
+    meetings_missing_date,
     record_meeting,
     set_committee_checked,
+    set_meeting_dates,
     sync_committees,
 )
+
+
+def _select_committees(keys: list[str] | None, db_path: str | None):
+    """Committees to process: the given *keys* (resolved DB-first so runtime-added
+    ones work), or all tracked (``enabled=1``) committees when *keys* is None."""
+    if keys:
+        return [c for c in (committee_or_config(k, db_path=db_path) for k in keys) if c is not None]
+    return enabled_committees(db_path)
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +62,7 @@ def detect(
     if not dry_run:
         sync_committees(db_path)
 
-    committees = [committee_by_key(k) for k in keys] if keys else COMMITTEES
+    committees = _select_committees(keys, db_path)
     results: list[dict] = []
 
     for c in committees:
@@ -94,5 +113,52 @@ def detect(
             "policy detect %-26s online=%s known=%s new=%d enumerated=%d",
             c.key, res["latest_online"], known_latest, res["new"], res["enumerated"],
         )
+
+    return results
+
+
+def backfill_dates(
+    keys: list[str] | None = None,
+    *,
+    db_path: str | None = None,
+    only_missing: bool = True,
+    occto_limit: int | None = None,
+) -> list[dict]:
+    """Populate ``policy_meeting.meeting_date`` from the committees' official pages.
+
+    METI/EGC dates come from one index (+ EGC log pages) fetch per committee, so
+    they are cheap and always refreshed. OCCTO dates live on per-meeting subpages,
+    so they are fetched one page at a time (polite delay) and, by default, only for
+    meetings that still lack a date — making the steady-state daily cost tiny while
+    a first run backfills everything. ``occto_limit`` caps OCCTO subpage fetches per
+    committee per run (None = no cap). Returns one result dict per committee.
+    """
+    sync_committees(db_path)
+    committees = _select_committees(keys, db_path)
+    results: list[dict] = []
+
+    for c in committees:
+        updated = 0
+        if c.is_occto:
+            nums = meetings_missing_date(c.key, db_path) if only_missing else known_meeting_nums(c.key, db_path)
+            nums = sorted(nums, reverse=True)
+            if occto_limit is not None:
+                nums = nums[:occto_limit]
+            dates = {}
+            for n in nums:
+                d = fetch_occto_meeting_date(c, n, db_path=db_path)
+                if d is not None:
+                    dates[n] = d
+                time.sleep(POLITE_DELAY)
+            updated = set_meeting_dates(c.key, dates, db_path=db_path)
+        else:
+            dates = fetch_committee_dates(c, db_path=db_path)
+            if only_missing:
+                missing = set(meetings_missing_date(c.key, db_path))
+                dates = {n: d for n, d in dates.items() if n in missing}
+            updated = set_meeting_dates(c.key, dates, db_path=db_path)
+        results.append({"key": c.key, "source": c.source, "dated": updated})
+        logger.info("policy dates %-26s updated=%d", c.key, updated)
+        time.sleep(POLITE_DELAY)  # be gentle on meti.go.jp between committees
 
     return results

@@ -27,6 +27,15 @@ export interface Meeting {
   done: boolean
   sEn?: string
   sJa?: string
+  /** Real ISO meeting date (YYYY-MM-DD) when known — set by the live adapter.
+   * Fixtures use m/day (year 2026); live rows carry the true date. */
+  date?: string
+  /** True when `date` is the committee's real published meeting date (not a
+   * fallback timestamp). Only real-dated meetings are placed on the timeline. */
+  dateReal?: boolean
+  /** Tracked-committee key this meeting belongs to (for follow state); null for
+   * an unmatched scheduled meeting. */
+  key?: string
 }
 
 export interface FreshRow {

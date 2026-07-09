@@ -5,6 +5,11 @@ name: Deploy Web (JEMA)
 # pulling the latest DB from the Hugging Face dataset, so the deployed site is a
 # self-contained static bundle (app + data/web/**) with no runtime server.
 #
+# The scheduled run is idempotent: it fingerprints the pulled DB and skips the
+# rebuild + deploy when it matches the last-deployed one (so an unchanged HF
+# dataset doesn't redeploy identical data). Pushes to main and manual dispatch
+# always rebuild, since those imply the app/exporter changed.
+#
 # Prerequisites (one-time):
 #   • Repo Settings → Pages → Build and deployment → Source = "GitHub Actions".
 #   • Repo secrets HF_TOKEN + HF_DATASET_REPO (same as the daily workflow) so the
@@ -17,6 +22,12 @@ name: Deploy Web (JEMA)
 
 on:
   workflow_dispatch:
+  schedule:
+    # 21:30 UTC = 06:30 JST — ~1h after the daily data cron (daily.yml, 20:30 UTC)
+    # pushes the refreshed DB (incl. the upcoming-meeting + detection snapshot) to
+    # Hugging Face, so this rebuild picks up that day's data. Keeps the static site
+    # (and the "Recent & Scheduled" strip) current without a manual redeploy.
+    - cron: "30 21 * * *"
   push:
     branches: [main]
     paths:
@@ -41,6 +52,9 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
       VITE_BASE: ${{ vars.VITE_BASE || format('/{0}/', github.event.repository.name) }}
+    outputs:
+      # Whether we actually built + should deploy (see the change-detection step).
+      changed: ${{ steps.decide.outputs.changed }}
     steps:
       - uses: actions/checkout@v5
 
@@ -55,32 +69,86 @@ jobs:
         run: python -m repower.cli pull-hf
         continue-on-error: true # first run / missing secrets: fall back to curated data
 
+      # ---- Change detection: skip the daily rebuild when the HF DB is unchanged ----
+      # Fingerprint the pulled DB. A `actions/cache` entry keyed on that fingerprint
+      # acts as a "have I already deployed this exact DB?" marker: a cache hit means
+      # unchanged. Pushes / manual dispatch always rebuild (code changed); only the
+      # scheduled run skips on an unchanged DB. If the pull failed (no DB), the
+      # fingerprint is unique so we always fall through and deploy the curated data.
+      - name: Fingerprint the DB
+        id: fp
+        run: |
+          if [ -f data/repower.db ]; then
+            echo "fp=$(sha256sum data/repower.db | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "fp=nodb-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Look up last-deployed DB fingerprint
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .dbfp
+          key: web-deploy-dbfp-${{ steps.fp.outputs.fp }}
+
+      - name: Decide whether to rebuild
+        id: decide
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HF DB unchanged since the last deploy — skipping rebuild."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Export web snapshots
+        if: steps.decide.outputs.changed == 'true'
         run: python -m repower.cli export-web --out web/public/data/web
 
       - uses: actions/setup-node@v4
+        if: steps.decide.outputs.changed == 'true'
         with:
           node-version: "20"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
       - name: Install web dependencies
+        if: steps.decide.outputs.changed == 'true'
         run: npm --prefix web ci
 
       - name: Build web (Vite)
+        if: steps.decide.outputs.changed == 'true'
         run: npm --prefix web run build
 
       - name: Disable Jekyll processing
+        if: steps.decide.outputs.changed == 'true'
         run: touch web/dist/.nojekyll
 
       - uses: actions/configure-pages@v5
+        if: steps.decide.outputs.changed == 'true'
 
       - uses: actions/upload-pages-artifact@v3
+        if: steps.decide.outputs.changed == 'true'
         with:
           path: web/dist
 
+      # Remember this DB fingerprint so the next scheduled run can skip an identical
+      # rebuild. Only saved when the fingerprint is new (a cache miss), so re-saving
+      # an existing key never errors.
+      - name: Record deployed DB fingerprint
+        if: steps.decide.outputs.changed == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: echo "${{ steps.fp.outputs.fp }}" > .dbfp
+
+      - uses: actions/cache/save@v4
+        if: steps.decide.outputs.changed == 'true' && steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: .dbfp
+          key: web-deploy-dbfp-${{ steps.fp.outputs.fp }}
+
   deploy:
     needs: build
+    # Skip when the build was skipped (scheduled run, HF DB unchanged) — no artifact.
+    if: needs.build.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment:
       name: github-pages

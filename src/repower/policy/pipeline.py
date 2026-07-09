@@ -27,9 +27,10 @@ import httpx
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
 from repower.policy import notebook as nb
-from repower.policy.committees import Committee, committee_by_key
+from repower.policy.committees import Committee
 from repower.policy.scraper import _UA, list_materials
 from repower.policy.store import (
+    committee_or_config,
     get_committee,
     mark_synthesized,
     meeting_materials,
@@ -337,7 +338,10 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     """
     nb.require_auth()
 
-    work = pending_meetings(db_path=db_path)
+    # When no committees are named ("all"), restrict to tracked (enabled) ones so
+    # untracking a committee removes it from the daily run. Explicit --committee
+    # keys are an intentional override and run regardless of the enabled flag.
+    work = pending_meetings(db_path=db_path, only_enabled=(not keys))
     if keys:
         work = [m for m in work if m["committee_key"] in keys]
     if states:
@@ -349,7 +353,9 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     rate_limited = False
     touched_committees: set[str] = set()
     for item in work:
-        committee = committee_by_key(item["committee_key"])
+        committee = committee_or_config(item["committee_key"], db_path=db_path)
+        if committee is None:
+            continue
         try:
             state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
         except nb.NotebookLMRateLimitError:
@@ -366,8 +372,11 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     synthesized = 0
     if not rate_limited:
         for key in sorted(touched_committees):
+            committee = committee_or_config(key, db_path=db_path)
+            if committee is None:
+                continue
             try:
-                if synthesize_committee(committee_by_key(key), db_path=db_path):
+                if synthesize_committee(committee, db_path=db_path):
                     synthesized += 1
             except nb.NotebookLMRateLimitError:
                 logger.warning("NotebookLM rate limit during synthesis of %s — deferring", key)

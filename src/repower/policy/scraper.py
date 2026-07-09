@@ -17,6 +17,7 @@ done only for genuinely new meetings.
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 import time
@@ -90,6 +91,103 @@ def meeting_num_from_url(url: str) -> int | None:
     """Meeting number from a meeting-page URL like ``.../001.html`` or ``.../71.html``."""
     m = re.search(r"/(\d+)\.html(?:[?#].*)?$", url)
     return int(m.group(1)) if m else None
+
+
+# ── Meeting-date parsing (no network) ────────────────────────────────────────
+# Japanese era → the number you add to the era-year to get the Gregorian year:
+#   令和 (Reiwa) 1 = 2019, 平成 (Heisei) 1 = 1989, 昭和 (Showa) 1 = 1926.
+_ERA_OFFSET = {"令和": 2018, "平成": 1988, "昭和": 1925}
+_ERA_DATE_RE = re.compile(r"(令和|平成|昭和)\s*(元|\d{1,2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+_GREG_DATE_RE = re.compile(r"(20\d{2})\s*[年./\-]\s*(\d{1,2})\s*[月./\-]\s*(\d{1,2})")
+
+
+def parse_jp_date(text: str | None) -> datetime.date | None:
+    """First Japanese meeting date in *text*, or None.
+
+    Handles both era dates (``令和6年8月27日``, ``令和元年…``) and Gregorian dates
+    (``2026年5月8日`` / ``2026/5/8`` / ``2026-05-08``). Era form is tried first so a
+    stray ``2019`` inside an era string can't shadow it. Out-of-range values (e.g.
+    ``13月``) return None rather than raising.
+    """
+    if not text:
+        return None
+    m = _ERA_DATE_RE.search(text)
+    if m:
+        era, yr, mo, day = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        era_year = 1 if yr == "元" else int(yr)
+        if era_year < 1:  # era years start at 1 (元年); 令和0年 is invalid
+            return None
+        try:
+            return datetime.date(_ERA_OFFSET[era] + era_year, mo, day)
+        except ValueError:
+            return None
+    m = _GREG_DATE_RE.search(text)
+    if m:
+        try:
+            return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    return None
+
+
+def parse_meti_meeting_dates(content: bytes | str, index_url: str) -> dict[int, datetime.date]:
+    """Map ``meeting_num → date`` from a METI index page.
+
+    Each meeting is a list row carrying both its date and its ``NNN.html`` link
+    (e.g. ``2026年5月8日 第114回`` → ``114.html``). The date is read from the row
+    (``<li>``/``<tr>``/…) enclosing the meeting link. First date per meeting wins.
+    """
+    soup = _soup(content)
+    out: dict[int, datetime.date] = {}
+    for a in soup.find_all("a", href=True):
+        full = a["href"] if a["href"].startswith("http") else urljoin(index_url, a["href"])
+        num = meeting_num_from_url(full)
+        if num is None or num in out:
+            continue
+        row = a.find_parent(["li", "tr", "dd", "dt", "p"]) or a
+        d = parse_jp_date(row.get_text(" ", strip=True))
+        if d is not None:
+            out[num] = d
+    return out
+
+
+def parse_egc_meeting_dates(content: bytes | str) -> dict[int, datetime.date]:
+    """Map ``meeting_num → date`` from an EGC index/log table.
+
+    Rows look like ``令和6年8月27日 第100回 議事概要 議事録 …``. First date per
+    meeting wins (index before older log pages when merged by the caller).
+    """
+    soup = _soup(content)
+    out: dict[int, datetime.date] = {}
+    for tr in soup.find_all("tr"):
+        text = tr.get_text(" ", strip=True)
+        nm = re.search(r"第(\d+)回", text)
+        if not nm:
+            continue
+        num = int(nm.group(1))
+        if num in out:
+            continue
+        d = parse_jp_date(text)
+        if d is not None:
+            out[num] = d
+    return out
+
+
+def parse_page_date(content: bytes | str) -> datetime.date | None:
+    """The meeting date from a single meeting subpage (used for OCCTO).
+
+    Prefers a date next to an explicit ``開催日`` / ``日時`` label; otherwise falls
+    back to the first date anywhere on the page.
+    """
+    soup = _soup(content)
+    txt = soup.get_text(" ", strip=True)
+    for label in ("開催日時", "開催日", "日時"):
+        idx = txt.find(label)
+        if idx != -1:
+            d = parse_jp_date(txt[idx : idx + 60])
+            if d is not None:
+                return d
+    return parse_jp_date(txt)
 
 
 def extract_pdf_id(filename: str) -> str:
@@ -335,20 +433,53 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
     status, content = _fetch(committee.url, db_path=db_path)
     if status == "not_modified":
         return Discovery("unchanged", [])
-    if status != "ok" or content is None:
-        return Discovery("error", [])
 
-    if committee.is_egc:
-        meetings = parse_egc_index(content, committee.url)
-        nums = sorted({m["meeting_num"] for m in meetings}, reverse=True)
-        return Discovery("ok", nums)
-
-    # METI
-    url_map = parse_meti_meeting_urls(content, committee.url)
-    if not url_map:
+    if status == "ok" and content is not None:
+        if committee.is_egc:
+            meetings = parse_egc_index(content, committee.url)
+            nums = sorted({m["meeting_num"] for m in meetings}, reverse=True)
+            return Discovery("ok", nums)
+        # METI
+        url_map = parse_meti_meeting_urls(content, committee.url)
+        if url_map:
+            return Discovery("ok", sorted(url_map, reverse=True))
         logger.info("policy: no numbered meeting subpages for %s", committee.key)
-        return Discovery("ok", [])
-    return Discovery("ok", sorted(url_map, reverse=True))
+
+    # Primary METI fetch failed (or the index had no meetings) — fall back to the
+    # energy-board aggregator so a blocked/500 METI index still surfaces the recent
+    # meetings. OCCTO/EGC aren't on that (METI-only) aggregator.
+    if committee.is_meti:
+        nums = _energy_board_nums(committee, db_path=db_path)
+        if nums:
+            logger.info("policy: %s METI index unavailable — energy-board backup (%d meetings)",
+                        committee.key, len(nums))
+            return Discovery("ok", sorted(nums, reverse=True))
+
+    return Discovery("ok", []) if status == "ok" else Discovery("error", [])
+
+
+def _energy_board_nums(committee: Committee, *, db_path: str | None = None) -> list[int]:
+    """Recent meeting numbers from the energy-board backup (lazy import to avoid a
+    scraper<->energy_board cycle). Never raises — an unavailable backup is []."""
+    try:
+        from repower.policy import energy_board
+
+        return energy_board.recent_meeting_nums(committee, db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("energy-board backup failed for %s: %s", committee.key, e)
+        return []
+
+
+def _energy_board_materials(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> list[Material]:
+    """Materials for one meeting from the energy-board backup (lazy import)."""
+    try:
+        from repower.policy import energy_board
+
+        return energy_board.materials_for(committee, meeting_num, db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("energy-board material backup failed for %s 第%d回: %s",
+                       committee.key, meeting_num, e)
+        return []
 
 
 # ── Material enumeration (what a meeting contains) ───────────────────────────
@@ -366,17 +497,18 @@ def _list_meti(committee: Committee, meeting_num: int, *, db_path: str | None) -
     # force=True: detection may have already cached (and 304'd) the index this run;
     # we need a real body to parse, so bypass the conditional cache here.
     status, content = _fetch(committee.url, db_path=db_path, force=True)
-    if status != "ok" or content is None:
-        return []
-    url_map = parse_meti_meeting_urls(content, committee.url)
-    page_url = url_map.get(meeting_num)
-    if not page_url:
-        return []
-    time.sleep(POLITE_DELAY)
-    s, body = _fetch(page_url, db_path=db_path, force=True)
-    if s != "ok" or body is None:
-        return []
-    return _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+    if status == "ok" and content is not None:
+        url_map = parse_meti_meeting_urls(content, committee.url)
+        page_url = url_map.get(meeting_num)
+        if page_url:
+            time.sleep(POLITE_DELAY)
+            s, body = _fetch(page_url, db_path=db_path, force=True)
+            if s == "ok" and body is not None:
+                mats = _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+                if mats:
+                    return mats
+    # METI meeting page unavailable/empty — energy-board backup (same meti.go.jp PDFs).
+    return _energy_board_materials(committee, meeting_num, db_path=db_path)
 
 
 def _list_occto(committee: Committee, meeting_num: int, *, db_path: str | None) -> list[Material]:
@@ -386,6 +518,43 @@ def _list_occto(committee: Committee, meeting_num: int, *, db_path: str | None) 
     if s != "ok" or body is None:
         return []
     return _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+
+
+# ── Meeting-date discovery (networked) ───────────────────────────────────────
+def fetch_committee_dates(committee: Committee, *, db_path: str | None = None) -> dict[int, datetime.date]:
+    """Map ``meeting_num → date`` for a committee from its index page(s).
+
+    METI reads one index; EGC merges the main index + historical log pages
+    (index first, so it wins on overlap). OCCTO indexes are JS-rendered and carry
+    no dates, so this returns ``{}`` for OCCTO — use :func:`fetch_occto_meeting_date`
+    per subpage instead.
+    """
+    if committee.is_occto:
+        return {}
+    if committee.is_egc:
+        out: dict[int, datetime.date] = {}
+        pages = [committee.url] + [urljoin(EGC_ACTIVITY_BASE, p) for p in committee.log_pages]
+        for page in pages:
+            status, content = _fetch(page, db_path=db_path, force=True)
+            if status == "ok" and content is not None:
+                for num, d in parse_egc_meeting_dates(content).items():
+                    out.setdefault(num, d)
+            time.sleep(POLITE_DELAY)
+        return out
+    # METI
+    status, content = _fetch(committee.url, db_path=db_path, force=True)
+    if status != "ok" or content is None:
+        return {}
+    return parse_meti_meeting_dates(content, committee.url)
+
+
+def fetch_occto_meeting_date(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> datetime.date | None:
+    """The meeting date for one OCCTO meeting, read from its ``{base}/{num}.html`` subpage."""
+    base = _occto_base(committee)
+    status, body = _fetch(f"{base}/{meeting_num}.html", db_path=db_path, force=True)
+    if status != "ok" or body is None:
+        return None
+    return parse_page_date(body)
 
 
 def _list_egc(committee: Committee, meeting_num: int, *, db_path: str | None) -> list[Material]:

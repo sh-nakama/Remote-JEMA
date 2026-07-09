@@ -253,6 +253,32 @@ def test_regenerate_running_doc(monkeypatch, tmp_path):
     assert store.get_committee(key, db_path=db).latest_meeting == 5
 
 
+def test_regenerate_running_doc_for_discovered_committee(monkeypatch, tmp_path):
+    """A discovered committee (in the DB, not the static config — e.g. one the
+    cross-check accumulated) must render its running doc. build_running_doc used to
+    call committee_by_key and KeyError on these, breaking backfill/summarise."""
+    db = str(tmp_path / "t.db")
+    policy_dir = tmp_path / "policy"
+    monkeypatch.setattr(store, "POLICY_DIR", policy_dir)
+
+    store.sync_committees(db_path=db)
+    store.upsert_discovered_committees(
+        [{"key": "gx_demand", "name_ja": "GX需要創出に向けた研究会", "source": "METI",
+          "url": "https://www.meti.go.jp/shingikai/energy_environment/gx_demand/"}],
+        db_path=db,
+    )
+    assert "gx_demand" not in {c.key for c in COMMITTEES}  # genuinely not in config
+    store.record_meeting("gx_demand", 3, None, db_path=db)
+    pend = store.pending_meetings("gx_demand", db_path=db)
+    store.update_meeting(pend[0]["id"], db_path=db, state="done",
+                         briefing_md="## 論点\nGX需要の創出策。")
+
+    path = store.regenerate_running_doc("gx_demand", db_path=db)
+    text = Path(path).read_text(encoding="utf-8")
+    assert "GX需要創出に向けた研究会" in text  # JA name used as the (missing) EN title
+    assert "第3回" in text
+
+
 def test_pending_retries_errors_under_cap(tmp_path):
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
