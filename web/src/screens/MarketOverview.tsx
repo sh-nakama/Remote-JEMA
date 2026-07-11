@@ -496,11 +496,14 @@ export function MarketOverviewScreen() {
   })
 
   // ---- freshness rows ----
+  // JEPX spot / Area prices freshness dates come from the same live snapshot that
+  // drives the KPI tiles + chart (system.json date_today), not a hardcoded literal.
+  const liveDate = liveSys.ready ? liveSys.dateToday : null
   const fresh = freshData.map((f) => ({
     key: f.en,
     label: L === 'ja' ? f.ja : f.en,
     sub: L === 'ja' ? f.subJa || f.subEn : f.subEn,
-    value: f.v,
+    value: liveDate && (f.en === 'JEPX spot' || f.en === 'Area prices') ? liveDate : f.v,
     ok: f.ok,
     delayed: !!f.delayed,
     dotStyle: {
@@ -513,10 +516,14 @@ export function MarketOverviewScreen() {
   }))
 
   // computed top-bar / pulse header values
-  const sysNow = today[NOW].toFixed(2)
-  const tokyoNowV = liveSys.areasNow[areas[0].key] ?? areas[0].series[NOW]
+  // System/Tokyo "now" are read from the same snapshot slot (liveSys.now) so the
+  // spread is a valid same-moment comparison; fall back to the fixed slot only
+  // before the live snapshot has loaded.
+  const sysNowV = liveSys.now.system ?? today[NOW]
+  const tokyoNowV = liveSys.now.tokyo ?? liveSys.areasNow[areas[0].key] ?? areas[0].series[NOW]
+  const sysNow = sysNowV.toFixed(2)
   const tokyoNow = tokyoNowV.toFixed(2)
-  const spread = (today[NOW] - tokyoNowV).toFixed(2)
+  const spread = (sysNowV - tokyoNowV).toFixed(2)
 
   return (
     <>
@@ -685,7 +692,7 @@ export function MarketOverviewScreen() {
                 <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>JEPX system price &amp; the latest policy-committee signals · JEPXシステム価格と政策委員会の最新動向</div>
                 <div style={s("display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);margin-top:8px;background:var(--bg1);border:1px solid var(--bd);border-radius:999px;padding:3px 11px;font-feature-settings:'tnum' 1")}>
                   <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`} />
-                  Updated 2026-07-02 10:31 JST · 更新
+                  Updated {liveSys.dateToday ?? '—'} · 更新
                 </div>
               </div>
               <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>

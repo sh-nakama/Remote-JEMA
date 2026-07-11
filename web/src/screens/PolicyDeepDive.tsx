@@ -708,8 +708,8 @@ export function PolicyDeepDiveScreen() {
                 <div style={s('display:flex;align-items:baseline;justify-content:space-between')}>
                   <span style={s('font-size:14px;font-weight:600')}>Meetings <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>会合フィード</span></span>
                   <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;flex-shrink:0')}>
-                    <span style={covTS} onClick={covTracked}>Tracked</span>
-                    <span style={covAS} onClick={covAll}>All METI</span>
+                    <span style={covTS} onClick={covTracked}>Tracked 追跡中</span>
+                    <span style={covAS} onClick={covAll}>All すべて</span>
                   </div>
                 </div>
                 <div style={s('font-size:11px;color:var(--mut);margin-top:5px')}>{feedNote}</div>

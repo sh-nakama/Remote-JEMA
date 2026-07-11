@@ -28,6 +28,8 @@ export interface SystemLive {
   avg7: number[]
   areasNow: Record<string, number>
   now: { system: number | null; tokyo: number | null; slot: string | null }
+  dateToday: string | null
+  dateYday: string | null
 }
 
 // Fill nulls / short arrays from a fixture baseline so the 48-slot chart geometry
@@ -58,6 +60,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
       avg7: fxAvg7,
       areasNow: {},
       now: { system: null, tokyo: null, slot: null },
+      dateToday: null,
+      dateYday: null,
     }
   }
   return {
@@ -67,6 +71,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
     avg7: fill(snap.system_avg7, fxAvg7),
     areasNow: snap.areas_now || {},
     now: snap.now || { system: null, tokyo: null, slot: null },
+    dateToday: snap.date_today,
+    dateYday: snap.date_yday,
   }
 }
 
