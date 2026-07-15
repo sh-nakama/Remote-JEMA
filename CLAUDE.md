@@ -13,6 +13,7 @@ Guidance for working in this repository (RePower — Japanese power-market scrap
 - `dashboard/app.py` — local dev Streamlit entry. `space/app.py` — Hugging Face Space entry (Docker SDK, port 7860).
 - Data: SQLite, synced to a private HF Dataset; refreshed by a daily GitHub Actions cron.
 - Markets covered: **wholesale** (JEPX day-ahead spot, per area) and **balancing** (EPRX 需給調整市場). Supply/demand (per-TSO 30-min generation mix) underlies the wholesale view.
+- **`docs/GOTCHAS.md` — running list of sharp edges** (JST-vs-UTC, HF-sync clobber semantics, fixture/live duality, CI blind spots, Actions semantics). Read it before touching pipelines, workflows, or the web frontend — and add new gotchas as you find them.
 
 ## Conventions
 
