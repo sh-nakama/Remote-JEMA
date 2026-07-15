@@ -470,6 +470,17 @@ def _energy_board_nums(committee: Committee, *, db_path: str | None = None) -> l
         return []
 
 
+def _energy_board_dates(committee: Committee, *, db_path: str | None = None) -> dict[int, datetime.date]:
+    """Meeting dates from the energy-board backup (lazy import). Never raises."""
+    try:
+        from repower.policy import energy_board
+
+        return energy_board.meeting_dates_for(committee, db_path=db_path)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("energy-board date backup failed for %s: %s", committee.key, e)
+        return {}
+
+
 def _energy_board_materials(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> list[Material]:
     """Materials for one meeting from the energy-board backup (lazy import)."""
     try:
@@ -543,9 +554,11 @@ def fetch_committee_dates(committee: Committee, *, db_path: str | None = None) -
         return out
     # METI
     status, content = _fetch(committee.url, db_path=db_path, force=True)
-    if status != "ok" or content is None:
-        return {}
-    return parse_meti_meeting_dates(content, committee.url)
+    if status == "ok" and content is not None:
+        return parse_meti_meeting_dates(content, committee.url)
+    # Index blocked/unavailable — energy-board backup (recent meetings only),
+    # symmetric with the discovery/materials fallbacks above.
+    return _energy_board_dates(committee, db_path=db_path)
 
 
 def fetch_occto_meeting_date(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> datetime.date | None:

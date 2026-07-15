@@ -321,6 +321,55 @@ def test_meetings_for_synthesis_uses_flag_not_watermark(tmp_path):
     assert store.meetings_for_synthesis(key, db_path=db) == []
 
 
+def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
+    """A synthesis run interrupted between add_source (synth_done already set)
+    and report generation must be recovered: the next pass regenerates the
+    report from the existing notebook instead of skipping the committee forever."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+
+    # One done meeting whose briefing was folded in (synth_done=1) before the
+    # interrupted run died — running_summary_md never written.
+    store.record_meeting(key, 4, None, db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
+    store.mark_synthesized(key, 4, db_path=db)
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-123")
+
+    assert store.synthesized_meeting_nums(key, db_path=db) == [4]
+    assert store.stalled_synthesis_committees(db_path=db) == [key]
+
+    reported: list[str] = []
+    monkeypatch.setattr(nb_mod, "create_notebook",
+                        lambda *a, **k: pytest.fail("must reuse the existing notebook"))
+    monkeypatch.setattr(nb_mod, "add_source",
+                        lambda *a, **k: pytest.fail("no new sources to add"))
+    monkeypatch.setattr(nb_mod, "generate_report",
+                        lambda nb_id, *a, **k: reported.append(nb_id) or "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+
+    def fake_download(nb_id, task_id, out):
+        Path(out).write_text("synthesis body", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(nb_mod, "download_report", fake_download)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN digest"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+
+    row = store.get_committee(key, db_path=db)
+    assert reported == ["nb-123"]
+    assert row.running_summary_md == "synthesis body"
+    assert row.running_digest_en_md == "EN digest"
+    assert row.last_synth_meeting == 4
+    assert row.source_count == 1
+    # Recovered → no longer stalled; a further pass with nothing new is a no-op.
+    assert store.stalled_synthesis_committees(db_path=db) == []
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
+
+
 # ── No-Aurora gate ───────────────────────────────────────────────────────────
 def test_no_aurora_anywhere_in_package():
     root = Path(__file__).resolve().parents[1] / "src" / "repower"

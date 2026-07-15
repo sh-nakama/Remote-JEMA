@@ -54,6 +54,9 @@ export interface Meeting {
   en: string
   ja: string
   date: string
+  /** False when `date` is a processing timestamp (updated/detected), not the
+   * real meeting date — the backfill hasn't found it yet (live rows). */
+  dateReal?: boolean
   status: string
   tori?: boolean
   prevEn?: string

@@ -263,6 +263,48 @@ def upsert_discovered_committees(items: list[dict], db_path: str | None = None) 
         session.close()
 
 
+def add_user_committee(item: dict, *, enabled: bool = True, db_path: str | None = None) -> dict:
+    """Insert one manually-added committee (the add-by-URL path).
+
+    *item* is a dict ``{key, name_ja, source, url[, prefix]}``. Unlike
+    :func:`upsert_discovered_committees`, the row is inserted ``user_added=1``
+    and (by default) already tracked. If the normalised URL is already in the
+    catalog the existing row is returned untouched — the caller can offer
+    "already in catalog — track it?" instead of silently duplicating.
+    Returns ``{"key", "existing"}``.
+    """
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        nu = _norm_url(item.get("url"))
+        if nu:
+            for r in session.query(PolicyCommittee).all():
+                if _norm_url(r.url) == nu:
+                    return {"key": r.committee_key, "existing": True}
+        keys = {r.committee_key for r in session.query(PolicyCommittee.committee_key)}
+        key = base = item["key"]
+        n = 2
+        while key in keys:
+            key = f"{base}_{n}"
+            n += 1
+        row = PolicyCommittee(
+            committee_key=key,
+            name_ja=item.get("name_ja") or "",
+            name_en=item.get("name_en") or "",
+            url=item.get("url") or "",
+            source=item.get("source") or "METI",
+            priority=100,
+            prefix=item.get("prefix"),
+        )
+        row.enabled = bool(enabled)
+        row.user_added = True
+        session.add(row)
+        session.commit()
+        return {"key": key, "existing": False}
+    finally:
+        session.close()
+
+
 def get_committee(key: str, db_path: str | None = None) -> PolicyCommittee | None:
     init_db(db_path)
     session = get_session(db_path)
@@ -461,6 +503,48 @@ def mark_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> 
         if m is not None:
             m.synth_done = True
             session.commit()
+    finally:
+        session.close()
+
+
+def synthesized_meeting_nums(key: str, db_path: str | None = None) -> list[int]:
+    """Meeting numbers whose briefings are already folded into the committee
+    synthesis notebook (``synth_done``), ascending."""
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        rows = (
+            session.query(PolicyMeeting.meeting_num)
+            .filter_by(committee_key=key)
+            .filter(PolicyMeeting.synth_done == True)  # noqa: E712
+            .order_by(PolicyMeeting.meeting_num.asc())
+            .all()
+        )
+        return [r[0] for r in rows]
+    finally:
+        session.close()
+
+
+def stalled_synthesis_committees(db_path: str | None = None,
+                                 only_enabled: bool = False) -> list[str]:
+    """Committee keys whose synthesis notebook has briefings folded in
+    (``synth_done`` meetings) but no stored synthesis (``running_summary_md``
+    is NULL) — an earlier run was interrupted (rate limit / crash) between
+    adding sources and generating the report. Nothing is "new" for these
+    committees, so without an explicit sweep they would never be retried."""
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        q = (
+            session.query(PolicyCommittee.committee_key)
+            .filter(PolicyCommittee.synthesis_notebook_id.isnot(None))
+            .filter(PolicyCommittee.running_summary_md.is_(None))
+            .join(PolicyMeeting, PolicyMeeting.committee_key == PolicyCommittee.committee_key)
+            .filter(PolicyMeeting.synth_done == True)  # noqa: E712
+        )
+        if only_enabled:
+            q = q.filter(PolicyCommittee.enabled == True)  # noqa: E712
+        return sorted({r[0] for r in q.all()})
     finally:
         session.close()
 

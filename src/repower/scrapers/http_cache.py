@@ -132,7 +132,10 @@ def _do_get(url: str, headers: dict, allow_curl_fallback: bool, timeout: float):
             if r is not None:
                 return r
         raise
-    if resp.status_code == 403 and allow_curl_fallback:
+    # 403 = plain bot block; 202 = AWS WAF JavaScript challenge (meti.go.jp sits
+    # behind CloudFront + WAF and answers plain HTTP stacks with either). Both
+    # yield to the browser-impersonating fallback.
+    if resp.status_code in (403, 202) and allow_curl_fallback:
         r = _curl_get(url, headers, timeout)
         if r is not None:
             return r

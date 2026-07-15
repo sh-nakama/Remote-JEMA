@@ -177,6 +177,16 @@ def recent_meeting_nums(committee, *, db_path: str | None = None) -> list[int]:
     return sorted({e.meeting_num for e in entries_for_committee(committee, db_path=db_path) if e.meeting_num})
 
 
+def meeting_dates_for(committee, *, db_path: str | None = None) -> dict[int, datetime.date]:
+    """``meeting_num → date`` energy-board knows for *committee* (backup for a
+    failed METI index fetch). Recent meetings only — the feed is not deep history."""
+    out: dict[int, datetime.date] = {}
+    for e in entries_for_committee(committee, db_path=db_path):
+        if e.meeting_num and e.date:
+            out.setdefault(e.meeting_num, e.date)
+    return out
+
+
 def materials_for(committee, meeting_num: int, *, db_path: str | None = None) -> list[Material]:
     """Documents for one meeting from energy-board (backup for a failed METI meeting
     page). The PDF URLs are the same meti.go.jp files; empty if not in the feed."""

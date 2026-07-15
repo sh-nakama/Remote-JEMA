@@ -516,6 +516,18 @@ def _doc_name(title: str) -> str:
     return re.sub(r"（PDF形式[:：][^）]*）", "", title or "").strip() or "資料"
 
 
+# Acronyms/initialisms that should stay upper-case when a committee key is
+# humanised into a display name (discovered committees have no curated name_en).
+_KEY_ACRONYMS = {"wg", "egc", "occto", "meti", "jepx", "eprx", "dr", "vpp", "lng"}
+
+
+def _humanize_key(key: str) -> str:
+    """Readable EN fallback from a snake_case committee key:
+    ``stable_power_supply_wg`` → ``Stable Power Supply WG``."""
+    words = [w for w in (key or "").split("_") if w]
+    return " ".join(w.upper() if w in _KEY_ACRONYMS else w.capitalize() for w in words) or key
+
+
 def _committee_tier(c: dict) -> str:
     p = c["priority"]
     if isinstance(p, int) and p <= 1:
@@ -523,7 +535,7 @@ def _committee_tier(c: dict) -> str:
     return "Tier 1" if (c["source_count"] or 0) >= 8 else "Tier 2"
 
 
-def build_committees_payload(committees, meetings) -> list[dict]:
+def build_committees_payload(committees, meetings, material_counts=None) -> list[dict]:
     """Build the ``committees.json`` payload from raw committee + meeting rows.
 
     Shared by the static export (:func:`export_policy`) and the live web API
@@ -535,6 +547,10 @@ def build_committees_payload(committees, meetings) -> list[dict]:
     config committee (so the UI can split the tracked set from the wider energy
     catalog). ``synthesisEn``/``synthesisJa`` are the committee-level cross-meeting
     synthesis (raw markdown, may be null) shown as the committee overview.
+    ``material_counts`` (``{committee_key: n}``) backfills ``source_count`` for
+    committees whose synthesis hasn't run yet (the column is only written by the
+    synthesis step, so a freshly-backfilled committee would otherwise report 0
+    sources while its meetings list real documents).
     """
     from repower.policy.committees import committee_keys
 
@@ -561,7 +577,7 @@ def build_committees_payload(committees, meetings) -> list[dict]:
         {
             "key": c["committee_key"],
             "org": c["source"] or "METI",
-            "en": c["name_en"] or c["committee_key"],
+            "en": c["name_en"] or _humanize_key(c["committee_key"]),
             "ja": c["name_ja"] or "",
             "tier": _committee_tier(c),
             "tracked": bool(c["enabled"]),
@@ -572,7 +588,7 @@ def build_committees_payload(committees, meetings) -> list[dict]:
             "last": ("第" + str(c["latest_meeting"]) + "回") if c["latest_meeting"] else "—",
             "url": c["url"] or "",
             "latest_meeting": c["latest_meeting"],
-            "source_count": c["source_count"] or 0,
+            "source_count": c["source_count"] or (material_counts or {}).get(c["committee_key"], 0),
             "meetings": n_meetings_by_com.get(c["committee_key"], 0),
             "last_date": last_date_by_com.get(c["committee_key"]),
             # Committee-level cross-meeting synthesis (the "where this committee is
@@ -603,7 +619,13 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
         meetings = con.execute(text(
             "SELECT committee_key, meeting_date, state FROM policy_meeting"
         )).mappings().all()
-    return build_committees_payload(committees, meetings)
+        mat_counts = {
+            r["committee_key"]: r["n"]
+            for r in con.execute(text(
+                "SELECT committee_key, COUNT(*) AS n FROM policy_material GROUP BY committee_key"
+            )).mappings()
+        }
+    return build_committees_payload(committees, meetings, mat_counts)
 
 
 def build_policy_snapshot(db_path: str | None = None) -> dict:
@@ -630,7 +652,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         meetings = con.execute(
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
-                "has_minutes, has_torimatome, state, updated_at, detected_at FROM policy_meeting"
+                "has_minutes, has_torimatome, state, quality_flag, updated_at, detected_at "
+                "FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(
@@ -652,16 +675,18 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             upcoming = []
 
     mats_by_mtg: dict[tuple, list] = {}
+    mat_counts: dict[str, int] = {}
     for x in materials:
         mats_by_mtg.setdefault((x["committee_key"], x["meeting_num"]), []).append(x)
+        mat_counts[x["committee_key"]] = mat_counts.get(x["committee_key"], 0) + 1
     com_by_key = {c["committee_key"]: c for c in committees}
 
-    committees_data = build_committees_payload(committees, meetings)
+    committees_data = build_committees_payload(committees, meetings, mat_counts)
 
     def build_meeting(m: dict) -> dict:
         c = com_by_key.get(m["committee_key"])
         org = (c["source"] if c else None) or "METI"
-        name_en = (c["name_en"] if c else None) or m["committee_key"]
+        name_en = (c["name_en"] if c else None) or _humanize_key(m["committee_key"])
         name_ja = (c["name_ja"] if c else None) or m["committee_key"]
         num = m["meeting_num"]
         # Prefer the real meeting date (backfilled from the committee page); fall
@@ -671,6 +696,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         mats = mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])
         docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": x["url"] or ""} for x in mats]
         has_digest = m["state"] == "done" and bool(m["digest_en_json"])
+        is_error = m["state"] == "error"
         out_m: dict = {
             "key": "m" + str(m["id"]),
             "com": m["committee_key"],
@@ -680,14 +706,15 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             "ja": name_ja + " · 第" + str(num) + "回",
             "date": upd,
             "dateReal": bool(mdate),
-            "status": "done" if has_digest else "pending",
+            "status": "done" if has_digest else "error" if is_error else "pending",
             "tori": bool(m["has_torimatome"]),
             "title": name_en + " — No. " + str(num),
             "titleJa": name_ja + " 第" + str(num) + "回",
             "sub": name_ja + " · 第" + str(num) + "回 · " + org
             + (" · とりまとめ" if m["has_torimatome"] else "")
             + (" · 議事録" if m["has_minutes"] else "")
-            + (" · " + upd if upd else ""),
+            # An un-backfilled date is the detection timestamp, not the meeting date.
+            + (" · " + (upd if mdate else "検出 " + upd) if upd else ""),
             "docs": docs,
         }
         if has_digest:
@@ -697,16 +724,34 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
                 digest = {}
             secs, lead_en = parse_digest_answer(digest.get("answer"))
             jp_secs, _title, lead_ja = parse_briefing(m["briefing_md"])
+            # Citation footnotes: NotebookLM cited_text snippets are raw source
+            # fragments (often cut mid-sentence, sometimes empty). Skip empty ones
+            # entirely — a bare "[9]" tells the reader nothing — and mark the
+            # truncation with an ellipsis instead of a hard cut.
             refs = []
             for r in (digest.get("references") or [])[:16]:
                 n = r.get("citation_number")
-                ct = (r.get("cited_text") or "").strip()
-                refs.append(f"[{n}] {ct[:22]}" if ct else f"[{n}]")
+                ct = " ".join((r.get("cited_text") or "").split())
+                if not ct:
+                    continue
+                refs.append(f"[{n}] {ct[:40]}…" if len(ct) > 40 else f"[{n}] {ct}")
             out_m["digest"] = secs
             out_m["jp"] = jp_secs
             out_m["refs"] = refs
             out_m["prevEn"] = lead_en[:180]
             out_m["prevJa"] = lead_ja[:110]
+        elif is_error:
+            flag = m["quality_flag"] if "quality_flag" in m.keys() else None
+            reason = {
+                "no_sources": "no source documents could be found for this meeting",
+                "download_failed": "the source documents could not be downloaded",
+            }.get(flag or "", "summarisation failed — will be retried")
+            reason_ja = {
+                "no_sources": "資料が見つかりませんでした",
+                "download_failed": "資料をダウンロードできませんでした",
+            }.get(flag or "", "要約に失敗しました（再試行されます）")
+            out_m["emptyTitle"] = "Not summarised — errored · 要約エラー"
+            out_m["emptySub"] = f"Last attempt: {reason} · {reason_ja}"
         else:
             out_m["emptyTitle"] = "Summary pending · 要約待ち"
             out_m["emptySub"] = (
@@ -714,12 +759,20 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             )
         return out_m
 
+    # Keep: summarised meetings, meetings with detected materials (pending), and
+    # errored meetings (even material-less ones) — otherwise a committee can claim
+    # "2 errored" in its rollup while its sessions list shows no trace of them.
     kept = [
         m
         for m in meetings
-        if (m["state"] == "done" and m["digest_en_json"]) or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
+        if (m["state"] == "done" and m["digest_en_json"])
+        or m["state"] == "error"
+        or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
     ]
-    kept.sort(key=lambda m: (0 if (m["state"] == "done" and m["digest_en_json"]) else 1, -(m["meeting_num"] or 0)))
+    kept.sort(key=lambda m: (
+        0 if (m["state"] == "done" and m["digest_en_json"]) else 2 if m["state"] == "error" else 1,
+        -(m["meeting_num"] or 0),
+    ))
     meetings_data = [build_meeting(m) for m in kept]
 
     # Scheduled (future) meetings for the "Recent & Scheduled" timeline. Matched

@@ -142,6 +142,93 @@ def test_upsert_discovered_dedup_by_url_and_key_collision(tmp_path):
     ) == 0
 
 
+# ── Manual add-by-URL ─────────────────────────────────────────────────────────
+def test_parse_meti_committee_url_validates_and_normalises():
+    ok = catalog.parse_meti_committee_url(
+        "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/jisedai_kiban/stable_power_supply_wg/index.html?x=1#top"
+    )
+    assert ok == {
+        "key": "stable_power_supply_wg",
+        "url": "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/jisedai_kiban/stable_power_supply_wg/",
+        "dir": "enecho/denryoku_gas/jisedai_kiban/stable_power_supply_wg",
+    }
+    # trailing-slash and bare forms normalise identically
+    assert catalog.parse_meti_committee_url(
+        "https://www.meti.go.jp/shingikai/enecho/santeii"
+    )["url"].endswith("/shingikai/enecho/santeii/")
+    # non-METI / non-shingikai / meeting-page URLs rejected
+    assert catalog.parse_meti_committee_url("https://www.occto.or.jp/iinkai/chousei_jukyu/index.html") is None
+    assert catalog.parse_meti_committee_url("https://www.meti.go.jp/press/2026/07/foo.html") is None
+    assert catalog.parse_meti_committee_url("https://www.meti.go.jp/shingikai/enecho/santeii/004.html") is None
+    assert catalog.parse_meti_committee_url("") is None
+
+
+def test_parse_meti_page_title_h1_then_title_boilerplate_stripped():
+    assert catalog.parse_meti_page_title("<html><body><h1>電力安定供給ワーキンググループ</h1></body></html>") \
+        == "電力安定供給ワーキンググループ"
+    assert catalog.parse_meti_page_title(
+        "<html><head><title>電力安定供給ワーキンググループ（METI/経済産業省）</title></head></html>"
+    ) == "電力安定供給ワーキンググループ"
+    assert catalog.parse_meti_page_title("<html><body><p>x</p></body></html>") is None
+
+
+def test_add_user_committee_tracked_and_dedup(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    res = store.add_user_committee(
+        {"key": "some_wg", "name_ja": "某WG", "source": "METI",
+         "url": "https://www.meti.go.jp/shingikai/enecho/foo/some_wg/"},
+        db_path=db,
+    )
+    assert res == {"key": "some_wg", "existing": False}
+    rows = {r["key"]: r for r in store.list_committees(db_path=db)}
+    assert rows["some_wg"]["enabled"] is True  # auto-tracked (unlike discovery)
+    # same URL again (index.html form) → existing row returned, no duplicate
+    res2 = store.add_user_committee(
+        {"key": "renamed", "name_ja": "x", "source": "METI",
+         "url": "https://www.meti.go.jp/shingikai/enecho/foo/some_wg/index.html"},
+        db_path=db,
+    )
+    assert res2 == {"key": "some_wg", "existing": True}
+    # config-committee URL → its existing key, untouched
+    config_url = store.committee_or_config("saisei_kano", db_path=db).url
+    res3 = store.add_user_committee(
+        {"key": "saisei_kano", "name_ja": "x", "source": "METI", "url": config_url},
+        db_path=db,
+    )
+    assert res3 == {"key": "saisei_kano", "existing": True}
+
+
+def test_add_committee_by_url_end_to_end(tmp_path, monkeypatch):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(
+        catalog, "_fetch",
+        lambda url, db_path=None: b"<html><head><title>\xe9\x9b\xbb\xe5\x8a\x9b\xe5\xae\x89\xe5\xae\x9a\xe4\xbe\x9b\xe7\xb5\xa6\xef\xbc\xb7\xef\xbc\xa7\xef\xbc\x88METI/\xe7\xb5\x8c\xe6\xb8\x88\xe7\x94\xa3\xe6\xa5\xad\xe7\x9c\x81\xef\xbc\x89</title></head></html>",
+    )
+    res = catalog.add_committee_by_url(
+        "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/jisedai_kiban/some_new_wg/index.html",
+        db_path=db,
+    )
+    assert res["ok"] is True and res["existing"] is False and res["key"] == "some_new_wg"
+    assert res["name_ja"]  # page title extracted
+    rows = {r["key"]: r for r in store.list_committees(db_path=db)}
+    assert rows["some_new_wg"]["enabled"] is True
+    # name fallback when METI is unreachable (WAF-challenged): slug-only row, still added
+    monkeypatch.setattr(catalog, "_fetch", lambda url, db_path=None: None)
+    res2 = catalog.add_committee_by_url(
+        "https://www.meti.go.jp/shingikai/enecho/other_wg/", db_path=db, track=False
+    )
+    assert res2["ok"] is True and res2["key"] == "other_wg" and res2["name_ja"] == ""
+    rows = {r["key"]: r for r in store.list_committees(db_path=db)}
+    assert rows["other_wg"]["enabled"] is False
+    # invalid URL raises
+    import pytest
+
+    with pytest.raises(ValueError):
+        catalog.add_committee_by_url("https://example.com/shingikai/x/", db_path=db)
+
+
 # ── Export payload flags + fresh-DB safety ────────────────────────────────────
 def test_build_committees_payload_flags():
     committees = [

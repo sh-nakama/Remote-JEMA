@@ -12,6 +12,7 @@ Endpoints (all JSON):
   GET  /api/policy/catalog  -> {schema, committees:[…]}   (live committees.json shape)
   POST /api/policy/track    -> {ok, key, enabled}         body: {key, enabled}
   POST /api/policy/priority -> {ok, key, priority}        body: {key, priority}
+  POST /api/policy/add      -> {ok, key, name_ja, existing} body: {url} (METI /shingikai/ page; auto-tracks)
   POST /api/policy/catchup  -> 202, starts the auth-free refresh job
   POST /api/policy/job      -> 202/400/409, runs one `repower policy <cmd>` (subprocess)
                                body: {cmd, committee?, since_meeting?, max_per_run?, since_days?}
@@ -233,7 +234,32 @@ class _Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight
         self._send(200, {})
 
+    def _guard(self, route) -> None:
+        """Run one routed handler; anything that escapes still gets a JSON answer.
+
+        http.server catches only ``TimeoutError`` around ``do_*``, so any other
+        exception escaping a handler (a cold-start lazy import failing mid-chain,
+        JSON encoding, a client hanging up mid-write) tears the connection down
+        with **no response at all** — which the Vite dev proxy surfaces to the SPA
+        as an opaque 500. Answer with structured JSON instead; if the socket is
+        already gone there is nobody left to answer, so give up quietly.
+        """
+        try:
+            route()
+        except Exception as e:  # noqa: BLE001 — last resort, see docstring
+            logger.exception("web-api: unhandled error on %s %s", self.command, self.path)
+            try:
+                self._send(500, {"error": str(e)})
+            except OSError:
+                pass  # client already disconnected
+
     def do_GET(self) -> None:  # noqa: N802
+        self._guard(self._route_get)
+
+    def do_POST(self) -> None:  # noqa: N802
+        self._guard(self._route_post)
+
+    def _route_get(self) -> None:
         path = urlparse(self.path).path
         if path == "/api/health":
             return self._send(200, {"ok": True, "mode": "local"})
@@ -244,23 +270,29 @@ class _Handler(BaseHTTPRequestHandler):
             # Live Policy Deep Dive payload straight from the DB, so the local master
             # reflects tracking/backfill without a re-export. Same shape the static
             # committees.json + meetings.json carry.
-            from repower.dashboard.export_web import build_policy_snapshot
             try:
+                # Import inside the guard: this is the once-per-process cold path
+                # (pandas/streamlit via repower.dashboard, seconds of imports on the
+                # first request) — a transient failure here must fall back like any
+                # other error instead of killing the connection.
+                from repower.dashboard.export_web import build_policy_snapshot
                 return self._send(200, {"schema": 1, **build_policy_snapshot(self.db_path)})
             except Exception as e:  # noqa: BLE001 — never 500 the UI; fall back to empty
+                logger.exception("deepdive snapshot failed; serving empty fallback")
                 return self._send(200, {"schema": 1, "committees": [], "meetings": [], "upcoming": [], "error": str(e)})
         if path in ("/api/policy/catchup", "/api/policy/job"):
             with _job_lock:
                 return self._send(200, dict(_job))
         if path == "/api/policy/crosscheck":
-            from repower.policy.energy_board import cross_check
             try:
+                from repower.policy.energy_board import cross_check
                 return self._send(200, cross_check(db_path=self.db_path))
             except Exception as e:  # noqa: BLE001 — third-party site; never 500 the UI
+                logger.exception("crosscheck failed; serving empty fallback")
                 return self._send(200, {"theirs": 0, "matched": 0, "missing": [], "error": str(e)})
         return self._send(404, {"error": "not found"})
 
-    def do_POST(self) -> None:  # noqa: N802
+    def _route_post(self) -> None:
         path = urlparse(self.path).path
         body = self._read_json()
         if path == "/api/policy/track":
@@ -284,6 +316,19 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "priority must be >= 1"})
             ok = set_committee_priority(key, pr, db_path=self.db_path)
             return self._send(200 if ok else 404, {"ok": ok, "key": key, "priority": pr})
+        if path == "/api/policy/add":
+            # Manual add-by-URL: the escape hatch for committees the org indexes
+            # never list (e.g. WGs nested under a 小委員会). Auto-tracks the row.
+            from repower.policy.catalog import add_committee_by_url
+            url = (body.get("url") or "").strip()
+            if not url:
+                return self._send(400, {"error": "url required"})
+            try:
+                return self._send(200, add_committee_by_url(url, db_path=self.db_path))
+            except ValueError as e:
+                return self._send(400, {"error": str(e)})
+            except Exception as e:  # noqa: BLE001 — network fetch; never 500 the UI
+                return self._send(400, {"error": f"could not add committee: {e}"})
         if path == "/api/policy/catchup":
             return self._send(202, start_catchup(self.db_path))
         if path == "/api/policy/job":

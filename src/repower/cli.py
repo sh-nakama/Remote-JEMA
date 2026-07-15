@@ -388,10 +388,11 @@ def policy_backfill(
     max_per_run: int = typer.Option(10, help="Max meetings to summarise this run"),
 ):
     """Throttled historical backfill for one committee (newest-first), requires auth."""
-    from repower.policy.detect import detect
+    from repower.policy.detect import backfill_dates, detect
     from repower.policy.pipeline import run
 
     detect([committee], backfill_to=since_meeting)  # auth-free; prime the worklist first
+    backfill_dates([committee], only_missing=True)  # auth-free; fill meeting dates too
     _require_auth_or_exit()
     summary = run([committee], max_per_run=max_per_run)
     typer.echo(

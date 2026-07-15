@@ -259,9 +259,11 @@ export function PolicyDeepDiveScreen() {
             : { fontSize: 9.5, fontWeight: 600, border: '1px solid var(--bd2)', color: 'var(--acT)', borderRadius: 999, padding: '0 8px', cursor: 'pointer' }) as CSS,
         }
       })
-    const count = committees.filter((c) => c.org === org).length
+    const total = committees.filter((c) => c.org === org).length
     return {
-      name: org + ' · ' + count,
+      // With an active search, show how many of the group's committees match
+      // ("METI · 1/12") instead of the unfiltered total.
+      name: org + ' · ' + (items.length < total ? items.length + '/' + total : total),
       dot: { width: 7, height: 7, borderRadius: 999, background: orgColors[org], display: 'inline-block' } as CSS,
       items,
     }
@@ -280,6 +282,7 @@ export function PolicyDeepDiveScreen() {
     if (st === 'scheduled') return { txt: 'Scheduled 開催予定', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
     if (st === 'running') return { txt: 'Summarising…', s: { ...base, background: 'var(--acTint)', color: 'var(--acT)' } }
     if (st === 'failed') return { txt: 'Failed — retry', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
+    if (st === 'error') return { txt: 'Errored 要約エラー', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
     if (st === 'untracked') return { txt: 'Untracked 未追跡', s: { ...base, border: '1px dashed var(--fnt2)', color: 'var(--mut)', background: 'transparent' } }
     return { txt: 'Pending · Queued', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
   }
@@ -320,7 +323,7 @@ export function PolicyDeepDiveScreen() {
     } else {
       if (!(selCom === 'all' || m.com === selCom)) return false
       if (fOnly && m.com && !followedSet[m.com]) return false
-      if (coverage === 'tracked' && !qNorm && m.status === 'pending') return false
+      if (coverage === 'tracked' && !qNorm && (m.status === 'pending' || m.status === 'error')) return false
     }
     if (!dateOkRecent(m.date)) return false
     if (qNorm) {
@@ -346,12 +349,18 @@ export function PolicyDeepDiveScreen() {
     const tori = (m as Meeting).tori
     const prevEn = (m as Meeting).prevEn ?? (m as Upcoming).prevEn
     const prevJa = (m as Meeting).prevJa ?? (m as Upcoming).prevJa
+    // A meeting whose real date isn't backfilled yet carries a processing
+    // timestamp — label it as the detection date rather than presenting it
+    // as the meeting date.
+    const dLabel = (m as Meeting).dateReal === false
+      ? (L === 'ja' ? '検出 ' : 'detected ') + m.date
+      : m.date
     return {
       key: m.key,
       title: L === 'ja' ? m.ja : m.en,
       meta: m.status === 'scheduled'
         ? m.date + ' · ' + (L === 'ja' ? 'あと' + dd + '日' : 'in ' + dd + 'd') + ' · ' + org
-        : m.date + (tori ? ' · とりまとめ' : '') + ' · ' + org,
+        : dLabel + (tori ? ' · とりまとめ' : '') + ' · ' + org,
       st: st.txt, stS: st.s,
       hasPrev: !!prevEn,
       preview: prevEn ? (L === 'ja' ? prevJa || '' : prevEn) : '',
@@ -557,6 +566,17 @@ export function PolicyDeepDiveScreen() {
               </div>
             </div>
 
+            {/* Live-fetch failure: interactive mode fell back to the static snapshot */}
+            {pol.stale && (
+              <div style={s('display:flex;align-items:center;gap:9px;background:var(--warnBg);border:1px solid var(--warnTx);border-radius:12px;padding:9px 14px')}>
+                <span style={s('font-size:12.5px;font-weight:600;color:var(--warnTx)')}>
+                  {L === 'ja'
+                    ? 'ライブデータを取得できませんでした — 前回書き出しのスナップショットを表示中（古い可能性があります）。再読み込みで再試行します。'
+                    : 'Live data unavailable — showing the last exported snapshot, which may be out of date. Reload the page to retry.'}
+                </span>
+              </div>
+            )}
+
             {/* Search & filter bar */}
             <div style={s('background:var(--bg1);border-radius:16px;padding:10px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap')}>
               <div style={s('flex:1;min-width:220px;display:flex;align-items:center;gap:9px;color:var(--mut)')}>
@@ -646,7 +666,11 @@ export function PolicyDeepDiveScreen() {
               <div style={s('background:var(--bg1);border-radius:20px;padding:16px;box-shadow:var(--sh1)')}>
                 <div style={s('display:flex;align-items:baseline;justify-content:space-between')}>
                   <span style={s('font-size:14px;font-weight:600')}>Committees <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>委員会</span></span>
-                  <span style={s('font-size:11px;color:var(--mut)')}>{committees.length} tracked</span>
+                  <span style={s('font-size:11px;color:var(--mut)')}>
+                    {explorerGroups.reduce((n, g) => n + g.items.length, 0) < committees.length
+                      ? explorerGroups.reduce((n, g) => n + g.items.length, 0) + '/' + committees.length + ' tracked'
+                      : committees.length + ' tracked'}
+                  </span>
                 </div>
                 {/* committee search */}
                 <div style={s('display:flex;align-items:center;gap:7px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;padding:6px 10px;margin-top:9px')}>
@@ -683,7 +707,9 @@ export function PolicyDeepDiveScreen() {
                           <div style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</div>
                           <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
                           <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
-                            <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following ? (L === 'ja' ? 'クリックでフォロー解除' : 'Click to unfollow') : (L === 'ja' ? 'クリックでフォロー' : 'Click to follow')}>{c.folTxt}</span>
+                            <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
+  ? (L === 'ja' ? 'クリックでフォロー解除（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to unfollow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')
+  : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
                             <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
                           </div>
                           {c.hasNext && (
@@ -763,6 +789,12 @@ export function PolicyDeepDiveScreen() {
                         <div style={s('display:flex;align-items:center;gap:9px;flex-wrap:wrap')}>
                           <span style={s('font-size:17px;font-weight:700')}>{L === 'ja' ? selCommittee?.ja : selCommittee?.en}</span>
                           <span style={s(`font-size:10.5px;font-weight:600;background:var(--acTint);color:${orgColors[selCommittee?.org || 'METI']};border-radius:6px;padding:1px 7px`)}>{selCommittee?.org}</span>
+                          {selCommittee?.tracked && (
+                            <span
+                              style={s('font-size:9.5px;font-weight:600;background:var(--upBg);color:var(--up);border-radius:6px;padding:1px 7px')}
+                              title={L === 'ja' ? 'この委員会はパイプラインで取得・要約されます' : 'This committee is scraped & summarised by the pipeline'}
+                            >{L === 'ja' ? '追跡中' : 'Tracked'}</span>
+                          )}
                           {selCommittee?.discovered && (
                             <span style={s('font-size:9.5px;font-weight:600;color:var(--mut);border:1px dashed var(--fnt2);border-radius:6px;padding:0 6px')}>{L === 'ja' ? '未追跡発見' : 'discovered'}</span>
                           )}
@@ -805,7 +837,7 @@ export function PolicyDeepDiveScreen() {
                     ) : (
                       <div style={s('margin-top:16px;border:1px dashed var(--fnt2);border-radius:14px;padding:22px;text-align:center')}>
                         <div style={s('font-size:13.5px;font-weight:600;color:var(--tx2)')}>{L === 'ja' ? '横断サマリーは未作成です' : 'No cross-meeting synthesis yet'}</div>
-                        <div style={s('font-size:12px;color:var(--mut);margin-top:3px')}>{L === 'ja' ? 'この委員会の会合を要約すると総括が作成されます（「管理」→▶ で実行）' : "Summarise this committee's meetings to build its synthesis (Manage → ▶)"}</div>
+                        <div style={s('font-size:12px;color:var(--mut);margin-top:3px')}>{L === 'ja' ? '次回のNotebookLM要約実行時に作成されます（「管理」→▶ で実行）' : 'Built on the next NotebookLM summarisation run (start one from Manage → ▶)'}</div>
                       </div>
                     )}
                     {/* Sessions */}
@@ -821,7 +853,10 @@ export function PolicyDeepDiveScreen() {
                             <Hoverable key={m.key} base="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:7px 10px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={() => selectMeeting(m.key)}>
                               <span style={s("font-size:12.5px;font-weight:600;color:var(--tx2);white-space:nowrap;font-feature-settings:'tnum' 1")}>{L === 'ja' ? '第' + m.num + '回' : 'No. ' + m.num}{m.tori ? ' 🏁' : ''}</span>
                               <span style={s('flex:1')}></span>
-                              <span style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{m.date}</span>
+                              <span
+                                style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}
+                                title={m.dateReal === false ? (L === 'ja' ? '開催日は未取得 — 検出日を表示' : 'Meeting date not yet known — showing detection date') : undefined}
+                              >{m.dateReal === false ? (L === 'ja' ? '検出 ' : 'detected ') + m.date : m.date}</span>
                               <span style={st.s}>{st.txt}</span>
                             </Hoverable>
                           )

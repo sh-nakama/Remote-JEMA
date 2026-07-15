@@ -38,6 +38,8 @@ from repower.policy.store import (
     pending_meetings,
     record_meeting,
     regenerate_running_doc,
+    stalled_synthesis_committees,
+    synthesized_meeting_nums,
     update_committee,
     update_meeting,
 )
@@ -228,7 +230,11 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
                 nb.delete_notebook(notebook_id)
             except nb.NotebookLMError:
                 pass
-        update_meeting(meeting_row, db_path=db_path, state="detected", notebook_id=None)
+        # Also clear any quality_flag from an earlier failed attempt (e.g. a stale
+        # 'no_sources' from before materials were enumerated) — this attempt got far
+        # enough to have sources, so the old flag no longer describes the meeting.
+        update_meeting(meeting_row, db_path=db_path, state="detected", notebook_id=None,
+                       quality_flag=None)
         raise
     except nb.NotebookLMError as e:
         logger.error("summarize_meeting %s 第%d回 failed: %s", committee.key, meeting_num, e)
@@ -261,7 +267,17 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
     """
     state = get_committee(committee.key, db_path=db_path)
     new_meetings = meetings_for_synthesis(committee.key, db_path=db_path)
-    if not new_meetings:
+    folded = synthesized_meeting_nums(committee.key, db_path=db_path)
+    # Recovery: an earlier run folded briefings into the synthesis notebook
+    # (synth_done set) but was interrupted (rate limit / crash) before the
+    # report was generated, leaving running_summary_md empty. Nothing is "new"
+    # then, but the report must still be generated from the existing notebook —
+    # otherwise the committee's synthesis stays empty until its NEXT meeting.
+    needs_recovery = bool(
+        folded and state is not None
+        and state.synthesis_notebook_id and not state.running_summary_md
+    )
+    if not new_meetings and not needs_recovery:
         regenerate_running_doc(committee.key, db_path=db_path)
         return False
 
@@ -270,7 +286,10 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         nb_id = nb.create_notebook(f"{committee.key} synthesis")
         update_committee(committee.key, db_path=db_path, synthesis_notebook_id=nb_id)
 
-    src_count = (state.source_count if state and state.source_count else 0)
+    # source_count can be NULL after an interrupted run even though sources
+    # landed; the synth_done meetings are the ground truth for what's in the
+    # notebook.
+    src_count = (state.source_count if state and state.source_count else len(folded))
     if src_count >= int(NOTEBOOKLM_SOURCE_CAP * 0.8):
         # Roll-up of the oldest summaries into one archive source is deferred; warn
         # so it can be handled before the cap is actually hit.
@@ -317,7 +336,7 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         # last_synth_meeting is now informational (the highest meeting in the synthesis);
         # selection is driven by the per-meeting synth_done flag, not this value.
         prior = state.last_synth_meeting if state and state.last_synth_meeting else 0
-        latest_num = max([prior, *added_nums]) if added_nums else prior
+        latest_num = max([prior, *added_nums, *folded]) if (added_nums or folded) else prior
         update_committee(
             committee.key, db_path=db_path,
             running_summary_md=synthesis_md, running_digest_en_md=digest_md,
@@ -371,7 +390,12 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     # Skip synthesis once rate-limited (it also generates a report and would just fail).
     synthesized = 0
     if not rate_limited:
-        for key in sorted(touched_committees):
+        # Beyond committees touched this run, sweep committees whose synthesis
+        # stalled mid-run earlier (sources folded in, report never generated) —
+        # they may have nothing pending, so they'd never be touched again.
+        stalled = stalled_synthesis_committees(db_path=db_path, only_enabled=(not keys))
+        synth_keys = touched_committees | {k for k in stalled if not keys or k in keys}
+        for key in sorted(synth_keys):
             committee = committee_or_config(key, db_path=db_path)
             if committee is None:
                 continue

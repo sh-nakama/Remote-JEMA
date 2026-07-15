@@ -507,6 +507,7 @@ function CommitteesManage() {
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
   const [busy, setBusy] = useState<Record<string, boolean>>({})
+  const [adding, setAdding] = useState(false)
 
   // Load the catalog: the live DB (interactive) or the static snapshot (read-only).
   // Reused after a job finishes, since detect/discover/crosscheck can add or change
@@ -553,6 +554,35 @@ function CommitteesManage() {
         app.toast(pick('Could not update tracking', '追跡を更新できませんでした'))
       })
       .finally(() => setBusy((b) => ({ ...b, [key]: false })))
+  }
+
+  // Manual add-by-URL: the escape hatch for committees the org indexes never list
+  // (e.g. WGs nested under a 小委員会). Shown when the search text is a METI
+  // /shingikai/ committee URL; the backend fetches the page name and auto-tracks.
+  const urlToAdd = /^https?:\/\/www\.meti\.go\.jp\/shingikai\/[a-z0-9_/]+\/?(?:index\.html)?$/i.test(q.trim())
+    ? q.trim()
+    : null
+  const addByUrl = () => {
+    if (!app.interactive || adding || !urlToAdd) return
+    setAdding(true)
+    fetch('/api/policy/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: urlToAdd }),
+    })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}))
+        if (!r.ok) throw new Error((j && j.error) || 'http')
+        app.toast(
+          j.existing
+            ? pick('Already in the catalog — see its row below', '既にカタログにあります — 下の行をご確認ください')
+            : pick('Added & tracking — included in the next catch-up', '追加して追跡開始 — 次回の差分取得に含まれます'),
+        )
+        setQ(j.key || '')
+        return loadCatalog()
+      })
+      .catch(() => app.toast(pick('Could not add committee', '委員会を追加できませんでした')))
+      .finally(() => setAdding(false))
   }
 
   // Edit the catch-up queue position (lower = summarised first). Persisted to the
@@ -687,6 +717,22 @@ function CommitteesManage() {
             <span onClick={() => setQ('')} style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}>✕</span>
           )}
         </div>
+
+        {app.interactive && urlToAdd && (
+          <div style={s('display:flex;align-items:center;gap:9px;margin:6px 20px 0;padding:7px 12px;background:var(--acTint);border:1px dashed var(--ac);border-radius:10px')}>
+            <span style={s('font-size:11.5px;color:var(--tx2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1')}>
+              {pick('METI committee page URL', 'METI委員会ページのURL')}
+            </span>
+            <Hoverable
+              as="span"
+              base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 12px;white-space:nowrap;flex-shrink:0;border:1px solid var(--bd2);background:var(--bg1);color:${adding ? 'var(--fnt3)' : 'var(--acT)'};cursor:${adding ? 'default' : 'pointer'}`}
+              hover={adding ? '' : 'border-color:var(--ac);background:var(--acTint)'}
+              onClick={addByUrl}
+            >
+              {adding ? pick('Adding…', '追加中…') : pick('+ Add & track', '＋ 追加して追跡')}
+            </Hoverable>
+          </div>
+        )}
 
         {app.interactive && (
           <div style={s('display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 20px 4px')}>

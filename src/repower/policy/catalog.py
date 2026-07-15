@@ -158,6 +158,80 @@ def fetch_catalog(*, db_path: str | None = None) -> list[dict]:
     return items
 
 
+# ── Manual add-by-URL ────────────────────────────────────────────────────────
+# Any /shingikai/<dir>/ page is scrapeable by the generic METI enumerator
+# (numbered NNN.html subpages), so a manual add needs no per-committee config —
+# the same claim the energy-board cross-check relies on. This is the escape
+# hatch for committees the three org indexes never list (e.g. WGs nested under
+# a 小委員会, which the top-level METI index stops short of).
+_METI_SHINGIKAI_RE = re.compile(
+    r"^https?://www\.meti\.go\.jp/shingikai/([a-z0-9_]+(?:/[a-z0-9_]+)*)/?(?:index\.html)?$"
+)
+
+
+def parse_meti_committee_url(url: str) -> dict | None:
+    """Validate + normalise a METI committee URL for a manual add.
+
+    Returns ``{key, url, dir}`` (key = last path segment, url in the config's
+    trailing-slash form) or ``None`` if the URL is not a meti.go.jp/shingikai
+    committee page.
+    """
+    m = _METI_SHINGIKAI_RE.match((url or "").split("#")[0].split("?")[0].strip())
+    if not m:
+        return None
+    d = m.group(1).rstrip("/")
+    return {"key": d.split("/")[-1], "url": f"https://www.meti.go.jp/shingikai/{d}/", "dir": d}
+
+
+def parse_meti_page_title(content: bytes | str) -> str | None:
+    """The committee name from a METI committee page: the ``<h1>`` if present,
+    else the ``<title>`` with the boilerplate "（METI/経済産業省）" suffix stripped."""
+    soup = _soup(content)
+    h1 = soup.find("h1")
+    if h1 is not None:
+        t = h1.get_text(" ", strip=True)
+        if t:
+            return t
+    if soup.title is not None:
+        t = re.sub(r"[（(]\s*METI[^）)]*[）)]\s*$", "", soup.title.get_text(" ", strip=True)).strip()
+        return t or None
+    return None
+
+
+def add_committee_by_url(url: str, *, db_path: str | None = None, track: bool = True) -> dict:
+    """Add one committee to the catalog from its METI page URL (user-initiated).
+
+    Validates the URL shape, fetches the page for its Japanese name (falling
+    back to the URL slug if METI is unreachable — e.g. WAF-challenged), and
+    inserts it ``user_added=1`` and tracked by default. If the URL is already
+    in the catalog, returns the existing key untouched.
+
+    Returns ``{"ok", "key", "name_ja", "existing"}``; raises ``ValueError``
+    on a URL that is not a METI /shingikai/ committee page.
+    """
+    from repower.policy.store import add_user_committee
+
+    parsed = parse_meti_committee_url(url)
+    if parsed is None:
+        raise ValueError("not a meti.go.jp/shingikai committee URL")
+    name_ja = ""
+    content = _fetch(parsed["url"], db_path=db_path)
+    if content is not None:
+        name_ja = parse_meti_page_title(content) or ""
+    res = add_user_committee(
+        {"key": parsed["key"], "name_ja": name_ja, "source": "METI", "url": parsed["url"]},
+        enabled=track, db_path=db_path,
+    )
+    if res["existing"]:
+        from repower.policy.store import get_committee
+
+        row = get_committee(res["key"], db_path=db_path)
+        name_ja = (row.name_ja if row else "") or name_ja
+    logger.info("policy catalog: add-by-url %s -> %s (existing=%s)",
+                parsed["url"], res["key"], res["existing"])
+    return {"ok": True, "key": res["key"], "name_ja": name_ja, "existing": res["existing"]}
+
+
 def discover_committees(*, db_path: str | None = None) -> dict:
     """Refresh the committee catalog: enumerate energy committees from the three
     org indexes and persist any not already known as untracked rows.

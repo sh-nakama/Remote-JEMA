@@ -42,6 +42,7 @@ interface MeetingSnap {
   en: string
   ja: string
   date: string
+  dateReal?: boolean
   status: string
   tori: boolean
   title: string
@@ -71,6 +72,9 @@ interface UpcomingSnap {
 
 export interface PolicyLive {
   ready: boolean
+  /** True when interactive mode had to fall back to the static snapshot because
+   * the live API failed (after retries) — the data shown may be stale. */
+  stale: boolean
   committees: Committee[]
   meetings: Meeting[]
   upcoming: Upcoming[]
@@ -82,7 +86,7 @@ interface Raw {
   upcoming?: UpcomingSnap[]
 }
 
-function reshape(raw: Raw): Omit<PolicyLive, 'ready'> {
+function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
   const committees: Committee[] = (raw.committees || []).map((x) => ({
     key: x.key,
     org: x.org,
@@ -115,6 +119,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready'> {
     en: x.en,
     ja: x.ja,
     date: x.date,
+    dateReal: x.dateReal ?? true,
     status: x.status,
     tori: x.tori,
     title: x.title,
@@ -150,24 +155,39 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready'> {
 }
 
 export function usePolicyLive(interactive: boolean): PolicyLive {
-  const [state, setState] = useState<PolicyLive>({ ready: false, committees: [], meetings: [], upcoming: [] })
+  const [state, setState] = useState<PolicyLive>({ ready: false, stale: false, committees: [], meetings: [], upcoming: [] })
   useEffect(() => {
     let alive = true
-    const load: Promise<Raw> = interactive
-      ? fetch('/api/policy/deepdive').then((r) => {
+    const loadStatic = (): Promise<Raw> =>
+      Promise.all([
+        getSnapshot<{ committees: CommitteeSnap[] }>('policy/committees.json'),
+        getSnapshot<{ meetings: MeetingSnap[]; upcoming?: UpcomingSnap[] }>('policy/meetings.json'),
+      ]).then(([c, m]) => ({ committees: c.committees, meetings: m.meetings, upcoming: m.upcoming }))
+    // The live endpoint can transiently fail right after the backend starts, so
+    // retry before giving up — and if it still fails, fall back to the static
+    // snapshot but say so (`stale`) instead of silently presenting old data as live.
+    const loadLive = (attempt = 0): Promise<Raw> =>
+      fetch('/api/policy/deepdive')
+        .then((r) => {
           if (!r.ok) throw new Error('deepdive ' + r.status)
           return r.json() as Promise<Raw>
         })
-      : Promise.all([
-          getSnapshot<{ committees: CommitteeSnap[] }>('policy/committees.json'),
-          getSnapshot<{ meetings: MeetingSnap[]; upcoming?: UpcomingSnap[] }>('policy/meetings.json'),
-        ]).then(([c, m]) => ({ committees: c.committees, meetings: m.meetings, upcoming: m.upcoming }))
-    load
-      .then((raw) => {
-        if (!alive) return
-        setState({ ready: true, ...reshape(raw) })
-      })
-      .catch(() => {})
+        .catch((e) => {
+          if (attempt >= 2) throw e
+          return new Promise<Raw>((res) => setTimeout(() => res(loadLive(attempt + 1)), 500 * (attempt + 1)))
+        })
+    const apply = (raw: Raw, stale: boolean) => {
+      if (alive) setState({ ready: true, stale, ...reshape(raw) })
+    }
+    if (interactive) {
+      loadLive()
+        .then((raw) => apply(raw, false))
+        .catch(() => loadStatic().then((raw) => apply(raw, true)).catch(() => {}))
+    } else {
+      loadStatic()
+        .then((raw) => apply(raw, false))
+        .catch(() => {})
+    }
     return () => {
       alive = false
     }
