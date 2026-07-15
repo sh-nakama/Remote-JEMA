@@ -33,6 +33,7 @@ import pandas as pd
 
 from repower.config import EPRX_BALANCING_PARQUET, EPRX_TIELINE_PARQUET
 from repower.scrapers.http_cache import conditional_get, invalidate
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ _FIRST_JFY = 2025  # earliest fiscal year with data
 
 def _current_jfy() -> int:
     """Return the current Japanese fiscal year (starts April)."""
-    today = _date.today()
+    today = today_jst()
     return today.year if today.month >= 4 else today.year - 1
 
 

@@ -147,18 +147,6 @@ class PolicyCommittee(Base):
     name_en = Column(Text)
     url = Column(Text)
     source = Column(String(8))  # METI | OCCTO | EGC
-    # Registry state (editable from the dashboard, so DB — not code config — wins).
-    # `enabled` gates detection/summarisation; `user_added` marks committees created
-    # from the UI (not seeded from the code config). Scrape params mirror the
-    # `Committee` dataclass so a user-added committee can be scraped without a code
-    # change: OCCTO uses max_meeting/prefix; EGC uses log_pages (JSON list)/min_meeting.
-    enabled = Column(Boolean, default=True, nullable=False)
-    user_added = Column(Boolean, default=False, nullable=False)
-    priority = Column(Integer)  # summarisation order (lower = first); NULL until seeded
-    max_meeting = Column(Integer)  # OCCTO probe cap
-    prefix = Column(String(64))   # OCCTO material-id prefix
-    log_pages = Column(Text)      # EGC historical log pages, JSON array of filenames
-    min_meeting = Column(Integer)  # EGC earliest meeting to consider
     latest_meeting = Column(Integer)  # highest meeting reaching state='done'
     synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
     last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis

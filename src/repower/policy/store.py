@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 
 from sqlalchemy import func, or_
@@ -47,6 +48,23 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@contextmanager
+def session_scope(db_path: str | None = None, *, commit: bool = True):
+    """Init the DB and yield a session: commit on success (``commit=False`` for
+    read-only call sites), roll back on exception, always close."""
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        yield session
+        if commit:
+            session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 # ── Committee bootstrap / registry ───────────────────────────────────────────
 def _log_pages_to_db(log_pages) -> str | None:
     """Serialize a committee's EGC ``log_pages`` tuple to the DB's JSON-array form."""
@@ -65,9 +83,7 @@ def sync_committees(db_path: str | None = None) -> int:
     the queue permanently". Committees not in the config (discovered / user-added)
     are left untouched.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         n = 0
         for c in COMMITTEES:
             row = session.get(PolicyCommittee, c.key)
@@ -88,10 +104,7 @@ def sync_committees(db_path: str | None = None) -> int:
             # preserve UI/CLI edits otherwise.
             if row.priority is None:
                 row.priority = c.priority
-        session.commit()
         return n
-    finally:
-        session.close()
 
 
 def _row_to_committee(row: PolicyCommittee) -> Committee:
@@ -119,14 +132,10 @@ def _row_to_committee(row: PolicyCommittee) -> Committee:
 def committee_or_config(key: str, db_path: str | None = None) -> Committee | None:
     """Resolve *key* to a ``Committee`` config object, DB row first (so runtime-added
     committees resolve), then the static config, else None."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         row = session.get(PolicyCommittee, key)
         if row is not None:
             return _row_to_committee(row)
-    finally:
-        session.close()
     try:
         return committee_by_key(key)
     except KeyError:
@@ -145,15 +154,11 @@ def resolve_committee(key: str, db_path: str | None = None) -> Committee:
 def enabled_committees(db_path: str | None = None) -> list[Committee]:
     """Tracked committees (``enabled=1``) as ``Committee`` config objects, in
     summarisation order (priority, then key)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = session.query(PolicyCommittee).filter(PolicyCommittee.enabled == True).all()  # noqa: E712
         coms = [_row_to_committee(r) for r in rows]
         coms.sort(key=lambda c: (c.priority, c.key))
         return coms
-    finally:
-        session.close()
 
 
 def tracked_committees(
@@ -168,9 +173,7 @@ def tracked_committees(
     """
     if sync:
         sync_committees(db_path)
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         q = session.query(PolicyCommittee)
         if not include_disabled:
             q = q.filter(PolicyCommittee.enabled.is_(True))
@@ -181,8 +184,6 @@ def tracked_committees(
         code_order = {c.key: i for i, c in enumerate(COMMITTEES)}
         rows.sort(key=lambda r: (code_order.get(r.committee_key, len(code_order)), r.committee_key))
         return [_row_to_committee(r) for r in rows]
-    finally:
-        session.close()
 
 
 def enabled_committee_keys(db_path: str | None = None) -> list[str]:
@@ -200,9 +201,7 @@ def add_committee(
     created. ``key`` must be unique; re-adding an existing key updates its config
     fields. (The URL-deduping variant for the web UI is :func:`add_user_committee`.)
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         is_new = row is None
         if row is None:
@@ -215,42 +214,29 @@ def add_committee(
         row.log_pages = _log_pages_to_db(log_pages)
         row.min_meeting = min_meeting
         row.enabled = enabled
-        session.commit()
         return is_new
-    finally:
-        session.close()
 
 
 def set_committee_enabled(key: str, enabled: bool, db_path: str | None = None) -> bool:
     """Set a committee's tracked flag. Returns True if the row existed."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is None:
             return False
         row.enabled = bool(enabled)
-        session.commit()
         return True
-    finally:
-        session.close()
 
 
 def set_committee_priority(key: str, priority: int, db_path: str | None = None) -> bool:
     """Set a committee's summarisation priority (the catch-up queue position; lower
     is summarised first). Persisted across ``sync_committees`` so a committee can
     "jump the queue permanently". Returns True if the row existed."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is None:
             return False
         row.priority = int(priority)
-        session.commit()
         return True
-    finally:
-        session.close()
 
 
 def delete_committee(key: str, db_path: str | None = None) -> bool:
@@ -259,28 +245,21 @@ def delete_committee(key: str, db_path: str | None = None) -> bool:
     Refuses to delete code-config committees (returns False) — disable those
     instead so the registry can't drift from the code config.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is None or not row.user_added:
             return False
         session.query(PolicyMaterial).filter_by(committee_key=key).delete()
         session.query(PolicyMeeting).filter_by(committee_key=key).delete()
         session.delete(row)
-        session.commit()
         return True
-    finally:
-        session.close()
 
 
 def list_committees(db_path: str | None = None) -> list[dict]:
     """All catalog committees (enabled + disabled) as plain dicts, sorted by
     source, priority, key. Rows carry both ``key`` (web API/CLI callers) and
     ``committee_key`` (dashboard/discovery callers) for the same value."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = session.query(PolicyCommittee).all()
         out = [
             {
@@ -299,8 +278,6 @@ def list_committees(db_path: str | None = None) -> list[dict]:
         ]
         out.sort(key=lambda x: (x["source"], x["priority"], x["key"]))
         return out
-    finally:
-        session.close()
 
 
 def _norm_url(u: str | None) -> str:
@@ -324,9 +301,7 @@ def upsert_discovered_committees(items: list[dict], db_path: str | None = None) 
     already discovered) is never duplicated or downgraded; a key that collides with
     a *different* URL is disambiguated with a numeric suffix. Returns rows inserted.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         existing = session.query(PolicyCommittee).all()
         keys = {r.committee_key for r in existing}
         urls = {_norm_url(r.url) for r in existing if r.url}
@@ -359,10 +334,7 @@ def upsert_discovered_committees(items: list[dict], db_path: str | None = None) 
             if nu:
                 urls.add(nu)
             inserted += 1
-        session.commit()
         return inserted
-    finally:
-        session.close()
 
 
 def add_user_committee(item: dict, *, enabled: bool = True, db_path: str | None = None) -> dict:
@@ -375,9 +347,7 @@ def add_user_committee(item: dict, *, enabled: bool = True, db_path: str | None 
     "already in catalog — track it?" instead of silently duplicating.
     Returns ``{"key", "existing"}``.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         nu = _norm_url(item.get("url"))
         if nu:
             for r in session.query(PolicyCommittee).all():
@@ -401,18 +371,13 @@ def add_user_committee(item: dict, *, enabled: bool = True, db_path: str | None 
         row.enabled = bool(enabled)
         row.user_added = True
         session.add(row)
-        session.commit()
         return {"key": key, "existing": False}
-    finally:
-        session.close()
 
 
 # ── Generation queue (dashboard "Generate summary" when auth is stale) ────────
 def request_generation(key: str, meeting_num: int, db_path: str | None = None) -> bool:
     """Flag one meeting for summarisation. Returns True if the row exists/was flagged."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         m = (
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, meeting_num=meeting_num)
@@ -421,17 +386,12 @@ def request_generation(key: str, meeting_num: int, db_path: str | None = None) -
         if m is None:
             return False
         m.gen_requested = True
-        session.commit()
         return True
-    finally:
-        session.close()
 
 
 def clear_generation_request(key: str, meeting_num: int, db_path: str | None = None) -> None:
     """Clear a meeting's generation-requested flag (once it's been summarised)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         m = (
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, meeting_num=meeting_num)
@@ -439,30 +399,21 @@ def clear_generation_request(key: str, meeting_num: int, db_path: str | None = N
         )
         if m is not None and m.gen_requested:
             m.gen_requested = False
-            session.commit()
-    finally:
-        session.close()
 
 
 def get_committee(key: str, db_path: str | None = None) -> PolicyCommittee | None:
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    # Read-only, and the detached row's attributes are read after close — a
+    # commit would expire them (expire_on_commit) and break callers.
+    with session_scope(db_path, commit=False) as session:
         return session.get(PolicyCommittee, key)
-    finally:
-        session.close()
 
 
 # ── Detection writes ─────────────────────────────────────────────────────────
 def known_meeting_nums(key: str, db_path: str | None = None) -> set[int]:
     """Meeting numbers already recorded for a committee (any state)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = session.query(PolicyMeeting.meeting_num).filter_by(committee_key=key).all()
         return {r[0] for r in rows}
-    finally:
-        session.close()
 
 
 def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
@@ -472,9 +423,7 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
     Existing meetings keep their lifecycle ``state``; new materials (e.g. a
     late-arriving 議事録) are added without disturbing already-ingested ones.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         meeting = (
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, meeting_num=meeting_num)
@@ -514,25 +463,17 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
             if "compilation" in kinds:
                 meeting.has_torimatome = True
         meeting.updated_at = _now()
-        session.commit()
         return is_new
-    finally:
-        session.close()
 
 
 def set_committee_checked(key: str, latest_online: int | None, db_path: str | None = None) -> None:
     """Record that a detection pass ran (used for the dashboard / freshness)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is None:
             row = PolicyCommittee(committee_key=key)
             session.add(row)
         row.last_checked = _now()
-        session.commit()
-    finally:
-        session.close()
 
 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────
@@ -551,9 +492,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
     — used by ``policy run --committee all`` so disabling a committee removes it
     from the daily worklist.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         q = session.query(PolicyMeeting).filter(
             PolicyMeeting.state != "done",
             or_(
@@ -593,15 +532,11 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
             }
             for m in rows
         ]
-    finally:
-        session.close()
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
     """All materials for a meeting, as plain dicts (id, pdf_id, kind, url, title)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyMaterial)
             .filter_by(committee_key=key, meeting_num=meeting_num)
@@ -611,8 +546,6 @@ def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) ->
             {"id": r.id, "pdf_id": r.pdf_id, "kind": r.kind, "url": r.url, "title": r.title}
             for r in rows
         ]
-    finally:
-        session.close()
 
 
 def meetings_for_synthesis(key: str, db_path: str | None = None) -> list[dict]:
@@ -623,9 +556,7 @@ def meetings_for_synthesis(key: str, db_path: str | None = None) -> list[dict]:
     high-water mark, so backfilled / out-of-order meetings (summarised after a
     newer one) are still added to the synthesis instead of being skipped.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         q = (
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, state="done")
@@ -634,15 +565,11 @@ def meetings_for_synthesis(key: str, db_path: str | None = None) -> list[dict]:
             .order_by(PolicyMeeting.meeting_num.asc())
         )
         return [{"meeting_num": m.meeting_num, "briefing_md": m.briefing_md} for m in q.all()]
-    finally:
-        session.close()
 
 
 def mark_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> None:
     """Flag a meeting's briefing as folded into the committee synthesis notebook."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         m = (
             session.query(PolicyMeeting)
             .filter_by(committee_key=key, meeting_num=meeting_num)
@@ -650,17 +577,12 @@ def mark_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> 
         )
         if m is not None:
             m.synth_done = True
-            session.commit()
-    finally:
-        session.close()
 
 
 def synthesized_meeting_nums(key: str, db_path: str | None = None) -> list[int]:
     """Meeting numbers whose briefings are already folded into the committee
     synthesis notebook (``synth_done``), ascending."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyMeeting.meeting_num)
             .filter_by(committee_key=key)
@@ -669,8 +591,6 @@ def synthesized_meeting_nums(key: str, db_path: str | None = None) -> list[int]:
             .all()
         )
         return [r[0] for r in rows]
-    finally:
-        session.close()
 
 
 def stalled_synthesis_committees(db_path: str | None = None,
@@ -680,9 +600,7 @@ def stalled_synthesis_committees(db_path: str | None = None,
     is NULL) — an earlier run was interrupted (rate limit / crash) between
     adding sources and generating the report. Nothing is "new" for these
     committees, so without an explicit sweep they would never be retried."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         q = (
             session.query(PolicyCommittee.committee_key)
             .filter(PolicyCommittee.synthesis_notebook_id.isnot(None))
@@ -693,17 +611,13 @@ def stalled_synthesis_committees(db_path: str | None = None,
         if only_enabled:
             q = q.filter(PolicyCommittee.enabled == True)  # noqa: E712
         return sorted({r[0] for r in q.all()})
-    finally:
-        session.close()
 
 
 def recent_done_meetings(since_days: int, db_path: str | None = None) -> list[dict]:
     """Meetings that reached ``done`` within the last ``since_days`` (newest first)."""
     from datetime import timedelta
 
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         cutoff = _now() - timedelta(days=since_days)
         rows = (
             session.query(PolicyMeeting)
@@ -721,47 +635,33 @@ def recent_done_meetings(since_days: int, db_path: str | None = None) -> list[di
             }
             for m in rows
         ]
-    finally:
-        session.close()
 
 
 def update_committee(key: str, db_path: str | None = None, **fields) -> None:
     """Patch a ``policy_committee`` row (synthesis_notebook_id, last_synth_meeting, ...)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is None:
             row = PolicyCommittee(committee_key=key)
             session.add(row)
         for k, v in fields.items():
             setattr(row, k, v)
-        session.commit()
-    finally:
-        session.close()
 
 
 def update_meeting(meeting_id: int, db_path: str | None = None, **fields) -> None:
     """Patch a ``policy_meeting`` row (state, notebook_id, briefing_md, ...)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         m = session.get(PolicyMeeting, meeting_id)
         if m is None:
             return
         for k, v in fields.items():
             setattr(m, k, v)
         m.updated_at = _now()
-        session.commit()
-    finally:
-        session.close()
 
 
 def meetings_missing_date(key: str, db_path: str | None = None) -> list[int]:
     """Meeting numbers for *key* that have no ``meeting_date`` yet (newest first)."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyMeeting.meeting_num)
             .filter_by(committee_key=key)
@@ -770,8 +670,6 @@ def meetings_missing_date(key: str, db_path: str | None = None) -> list[int]:
             .all()
         )
         return [r[0] for r in rows]
-    finally:
-        session.close()
 
 
 def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = None) -> int:
@@ -783,9 +681,7 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
     """
     if not dates:
         return 0
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         n = 0
         for num, d in dates.items():
             m = (
@@ -796,11 +692,7 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
             if m is not None and d is not None and m.meeting_date != d:
                 m.meeting_date = d
                 n += 1
-        if n:
-            session.commit()
         return n
-    finally:
-        session.close()
 
 
 # ── Upcoming (scheduled) meetings ────────────────────────────────────────────
@@ -811,9 +703,7 @@ def replace_upcoming(rows, db_path: str | None = None) -> int:
     Rows are deduped on ``(meeting_date, source_key)`` in case a source repeats an
     entry. Returns the number of rows written.
     """
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         session.query(PolicyUpcoming).delete()
         seen: set[tuple] = set()
         written = 0
@@ -835,17 +725,12 @@ def replace_upcoming(rows, db_path: str | None = None) -> int:
                 )
             )
             written += 1
-        session.commit()
         return written
-    finally:
-        session.close()
 
 
 def list_upcoming(db_path: str | None = None) -> list[dict]:
     """All rows from the ``policy_upcoming`` snapshot, soonest first, as plain dicts."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyUpcoming)
             .order_by(PolicyUpcoming.meeting_date.asc(), PolicyUpcoming.org.asc())
@@ -863,8 +748,6 @@ def list_upcoming(db_path: str | None = None) -> list[dict]:
             }
             for r in rows
         ]
-    finally:
-        session.close()
 
 
 # ── Running document ─────────────────────────────────────────────────────────
@@ -879,9 +762,7 @@ def _digest_en_answer(digest_en_json: str | None) -> str | None:
 
 def build_running_doc(key: str, db_path: str | None = None) -> str:
     """Render the committee's running document (Markdown) from the DB, newest first."""
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path, commit=False) as session:
         # Resolve via the DB first so discovered / runtime-added committees (not in
         # the static config, e.g. those the cross-check accumulates) also render —
         # committee_by_key alone would KeyError on them.
@@ -920,8 +801,6 @@ def build_running_doc(key: str, db_path: str | None = None) -> str:
                 lines += ["", f"_({m.state}; not yet summarised)_", ""]
             lines.append("")
         return "\n".join(lines).strip() + "\n"
-    finally:
-        session.close()
 
 
 def regenerate_running_doc(key: str, db_path: str | None = None):
@@ -934,9 +813,7 @@ def regenerate_running_doc(key: str, db_path: str | None = None):
     path = POLICY_DIR / f"{key}.md"
     path.write_text(doc, encoding="utf-8")
 
-    init_db(db_path)
-    session = get_session(db_path)
-    try:
+    with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)
         if row is not None:
             # latest_meeting = highest meeting that reached 'done'
@@ -947,7 +824,4 @@ def regenerate_running_doc(key: str, db_path: str | None = None):
                 .first()
             )
             row.latest_meeting = done_max[0] if done_max else row.latest_meeting
-            session.commit()
-    finally:
-        session.close()
     return path

@@ -169,6 +169,16 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             return "error"
 
         title = f"{committee.key} 第{meeting_num}回"
+        # A resumed/retried meeting may still own the notebook from its earlier
+        # interrupted attempt (the wait-timeout path deliberately keeps it). The
+        # rerun restages every source from scratch, so reusing that notebook would
+        # duplicate them — delete it first instead of orphaning it.
+        stale_notebook_id = _meeting_notebook_id(meeting_row, db_path)
+        if stale_notebook_id:
+            try:
+                nb.delete_notebook(stale_notebook_id)
+            except nb.NotebookLMError as e:
+                logger.warning("could not delete stale notebook %s: %s", stale_notebook_id, e)
         notebook_id = nb.create_notebook(title)
         # Persist the notebook id + state BEFORE generation, so a crash is recoverable.
         update_meeting(meeting_row, db_path=db_path, state="ingesting", notebook_id=notebook_id)
@@ -429,6 +439,18 @@ def _meeting_id(key: str, meeting_num: int, db_path: str | None) -> int | None:
     try:
         row = session.query(PolicyMeeting.id).filter_by(committee_key=key, meeting_num=meeting_num).one_or_none()
         return row[0] if row else None
+    finally:
+        session.close()
+
+
+def _meeting_notebook_id(meeting_id: int, db_path: str | None) -> str | None:
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        row = session.get(PolicyMeeting, meeting_id)
+        return row.notebook_id if row is not None else None
     finally:
         session.close()
 

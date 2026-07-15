@@ -28,14 +28,20 @@ auth in the CLI and surface a clean "needs login" line in the job output.
 The catch-up job runs the **auth-free** steps only (detect new meetings, backfill
 dates, refresh the schedule, refresh the catalog) and reports the resulting
 pending backlog. NotebookLM summarisation stays in the ``policy-catchup`` skill /
-``repower policy run`` (it needs interactive auth and a daily quota). CORS is open
-because this is a localhost dev helper — do not expose it publicly.
+``repower policy run`` (it needs interactive auth and a daily quota).
+
+This is a localhost dev helper — do not expose it publicly. Still, it is hardened
+a little: CORS is pinned to the Vite dev origins (override with a comma-separated
+``REPOWER_WEB_ORIGINS``), and setting ``REPOWER_API_TOKEN`` makes every request
+require a matching ``X-API-Token`` header (unset — the default — means no auth).
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -46,11 +52,22 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+# CORS allowlist: the Vite dev servers (the dev proxy makes requests same-origin,
+# so this only matters for direct cross-origin calls from the SPA).
+_ALLOWED_ORIGINS = frozenset(
+    o.strip()
+    for o in os.environ.get(
+        "REPOWER_WEB_ORIGINS", "http://localhost:5173,http://localhost:5199"
+    ).split(",")
+    if o.strip()
+)
+
 # ── Background job (single-flight) ───────────────────────────────────────────
 # One job runs at a time (they share the SQLite DB and, for `run`/`backfill`, the
 # single NotebookLM account). A job is either the in-process auth-free 'catchup'
 # refresh or a 'command' subprocess wrapping one `repower policy <cmd>`.
 _OUTPUT_MAX = 300
+_JOB_TIMEOUT_S = 600  # hard cap per command subprocess; a wedged CLI must not pin the single-flight slot forever
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'
@@ -166,20 +183,40 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
 
 def _run_command_job(argv: list[str]) -> None:
     tail: deque[str] = deque(maxlen=_OUTPUT_MAX)
+    timed_out = threading.Event()
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "repower.cli", *argv],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, encoding="utf-8", errors="replace",
         )
-        for line in proc.stdout or []:
-            tail.append(line.rstrip("\n"))
+
+        # The stdout iteration below blocks for as long as the CLI runs, so the
+        # timeout has to come from the side: kill the process and flag it.
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(_JOB_TIMEOUT_S, _kill_on_timeout)
+        timer.daemon = True
+        timer.start()
+        try:
+            for line in proc.stdout or []:
+                tail.append(line.rstrip("\n"))
+                with _job_lock:
+                    _job["output"] = list(tail)
+            code = proc.wait(timeout=_JOB_TIMEOUT_S)
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
             with _job_lock:
-                _job["output"] = list(tail)
-        code = proc.wait()
-        with _job_lock:
-            _job.update(state="done" if code == 0 else "error",
-                        finished_at=_now(), exit_code=code, output=list(tail))
+                _job.update(state="error", finished_at=_now(), exit_code=code,
+                            error=f"job killed after {_JOB_TIMEOUT_S}s timeout",
+                            output=list(tail))
+        else:
+            with _job_lock:
+                _job.update(state="done" if code == 0 else "error",
+                            finished_at=_now(), exit_code=code, output=list(tail))
     except Exception as e:  # noqa: BLE001
         logger.exception("command job failed")
         with _job_lock:
@@ -214,9 +251,12 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin in _ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -231,8 +271,19 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             return {}
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight
+    def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight (no auth: preflights can't carry custom headers)
         self._send(200, {})
+
+    def _check_auth(self) -> bool:
+        """Optional shared secret: with REPOWER_API_TOKEN set, every GET/POST must
+        carry a matching X-API-Token header. Unset (the default) means no auth."""
+        token = os.environ.get("REPOWER_API_TOKEN")
+        if not token:
+            return True
+        if hmac.compare_digest(self.headers.get("X-API-Token") or "", token):
+            return True
+        self._send(401, {"error": "missing or invalid X-API-Token"})
+        return False
 
     def _guard(self, route) -> None:
         """Run one routed handler; anything that escapes still gets a JSON answer.
@@ -254,10 +305,12 @@ class _Handler(BaseHTTPRequestHandler):
                 pass  # client already disconnected
 
     def do_GET(self) -> None:  # noqa: N802
-        self._guard(self._route_get)
+        if self._check_auth():
+            self._guard(self._route_get)
 
     def do_POST(self) -> None:  # noqa: N802
-        self._guard(self._route_post)
+        if self._check_auth():
+            self._guard(self._route_post)
 
     def _route_get(self) -> None:
         path = urlparse(self.path).path

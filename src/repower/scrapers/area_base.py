@@ -23,7 +23,6 @@ import io
 import logging
 import re
 import zipfile
-from datetime import date
 from typing import ClassVar
 
 import pandas as pd
@@ -31,6 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.db import DemandSupply30m, get_session, init_db
 from repower.scrapers.http_cache import conditional_get, invalidate
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class BaseAreaScraper:
         return n
 
     def scrape(self, months_back: int = 1, db_path: str | None = None) -> int:
-        today = date.today()
+        today = today_jst()
         targets: list[tuple[int, int]] = []
         for off in range(months_back + 1):
             m = today.month - off

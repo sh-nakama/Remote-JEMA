@@ -26,6 +26,7 @@ from bs4 import BeautifulSoup
 from repower.policy.committees import COMMITTEES
 from repower.policy.scraper import parse_jp_date
 from repower.scrapers.http_cache import conditional_get
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def _fetch(url: str, *, db_path: str | None = None) -> bytes | None:
 def fetch_upcoming(*, db_path: str | None = None, today: datetime.date | None = None) -> list[Upcoming]:
     """Fetch the METI committee calendar, filter to energy + future, dedupe, and
     match committees. Returns upcoming meetings sorted by date (soonest first)."""
-    today = today or datetime.date.today()
+    today = today or today_jst()
     items: list[Upcoming] = []
     meti = _fetch(METI_CALENDAR_URL, db_path=db_path)
     if meti is not None:

@@ -22,6 +22,7 @@ from sqlalchemy import func, select
 from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
 from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
 from repower.scrapers.areas import AREA_NAMES
+from repower.timeutil import today_jst
 
 import repower.dashboard.theme as theme
 from repower.dashboard.i18n import (
@@ -294,7 +295,7 @@ def _render_sidebar(show_refresh: bool) -> dict:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=365)
     default_start = max(data_min, data_max - timedelta(days=60))
 
@@ -340,7 +341,7 @@ def _render_wholesale_comparison(cfg: dict) -> None:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=30)
     (a_def, b_def) = _default_periods(data_min, data_max)
 
@@ -489,7 +490,7 @@ def _render_balancing_comparison(cfg: dict, product: str) -> None:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=30)
     (a_def, b_def) = _default_periods(data_min, data_max)
 

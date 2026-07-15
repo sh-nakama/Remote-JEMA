@@ -1,18 +1,27 @@
 services:
   dashboard:
-    build: .
+    build:
+      context: .
+      # The final "space" stage COPYs an app.py that only exists in the HF
+      # Space build context (see Dockerfile header) — local builds stop at base.
+      target: base
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
     ports:
       - "8501:8501"
     volumes:
       - ./data:/app/data
       - ./src:/app/src
+      # dashboard/ is not baked into the image (absent from the Space build
+      # context), so the local entry point comes from this bind mount.
       - ./dashboard:/app/dashboard
     env_file:
       - .env
 
   # One-shot job runner (use: docker compose run --rm job repower run-all)
   job:
-    build: .
+    build:
+      context: .
+      target: base
     entrypoint: ["python", "-m", "repower.cli"]
     volumes:
       - ./data:/app/data

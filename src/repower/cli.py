@@ -8,7 +8,7 @@ from typing import Optional
 
 import typer
 
-from repower.timeutil import yesterday_jst
+from repower.timeutil import today_jst, yesterday_jst
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -90,7 +90,6 @@ def backfill(
     Also backfills JEPX per-area spot prices from --jepx-since through the
     current year (skip with --jepx-since 0).
     """
-    from datetime import date as _date
     from repower.scrapers.areas import ALL_SCRAPERS, AREA_NAMES
 
     try:
@@ -98,7 +97,8 @@ def backfill(
     except Exception as e:
         raise typer.BadParameter(f"--since must be YYYY-MM, got {since!r}") from e
 
-    today = _date.today()
+    # JST, not date.today(): the CI cron fires ~20:30 UTC, already the next day in JST.
+    today = today_jst()
     months = (today.year - sy) * 12 + (today.month - sm)
     if months < 0:
         raise typer.BadParameter(f"--since {since} is in the future")

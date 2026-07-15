@@ -42,6 +42,7 @@ from repower.db import (  # noqa: E402
     get_session,
     init_db,
 )
+from repower.timeutil import today_jst  # noqa: E402
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
 AREAS: list[str] = [
@@ -140,7 +141,7 @@ def source_max_dates(db_path: str | None = None) -> dict[str, str | None]:
 
 def _anchor_date(maxes: dict[str, str | None]) -> date:
     vals = [date.fromisoformat(v) for v in maxes.values() if v]
-    return max(vals) if vals else date.today()
+    return max(vals) if vals else today_jst()
 
 
 def export_wholesale(out: Path, anchor: date) -> dict:
