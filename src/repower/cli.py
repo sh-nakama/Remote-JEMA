@@ -138,13 +138,14 @@ def backfill(
 @app.command()
 def analyze(
     target: Optional[str] = typer.Option(None, help="Date to analyze (YYYY-MM-DD, default: yesterday)"),
+    area: str = typer.Option("tepco", help="TSO area slug for the demand/supply features"),
 ):
     """Compute analysis features for a given date."""
     from repower.analysis.features import run_analysis
 
     target_date = date.fromisoformat(target) if target else yesterday_jst()
-    features = run_analysis(target_date)
-    typer.echo(f"Analysis for {target_date}: {len(features)} feature keys computed")
+    features = run_analysis(target_date, area=area)
+    typer.echo(f"Analysis for {target_date} ({area}): {len(features)} feature keys computed")
 
 
 @app.command()
@@ -190,7 +191,10 @@ def run_all(
 
     typer.echo("═══ ANALYZE ═══")
     yesterday = yesterday_jst()
-    run_analysis(yesterday)
+    try:
+        run_analysis(yesterday)
+    except Exception as e:  # noqa: BLE001 — analysis must not block the HF push of scraped data
+        typer.echo(f"   analyze skipped: {e}", err=True)
 
     typer.echo("═══ POLICY DETECT ═══")
     try:
@@ -222,7 +226,10 @@ def run_all(
         typer.echo(f"   policy catalog skipped: {e}", err=True)
 
     typer.echo("═══ NOTIFY ═══")
-    do_notify(yesterday, dry_run=dry_run)
+    try:
+        do_notify(yesterday, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 — a failed webhook post must not block the HF push
+        typer.echo(f"   notify skipped: {e}", err=True)
 
     typer.echo("═══ DONE ═══")
 

@@ -12,6 +12,13 @@ on:
     - cron: "30 19 * * 0"
   workflow_dispatch:
 
+# Queue behind the other HF-dataset-mutating workflows (see daily.yml). On Sundays
+# this job's 90-min window used to overlap the 20:30 daily run — now they queue.
+concurrency:
+  group: hf-dataset
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   backfill:
     runs-on: ubuntu-latest
@@ -19,6 +26,7 @@ jobs:
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     steps:
       - uses: actions/checkout@v5
@@ -32,7 +40,9 @@ jobs:
 
       - name: Pull latest DB from Hugging Face
         run: python -m repower.cli pull-hf
-        continue-on-error: true
+        # A scheduled run must not backfill into a fresh DB and push it over the
+        # dataset's history; manual dispatch may (bootstrap).
+        continue-on-error: ${{ github.event_name != 'schedule' }}
 
       - name: Compute backfill window
         id: window
@@ -52,3 +62,13 @@ jobs:
 
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Weekly deep re-validation failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Weekly deep re-validation failed — $url\"}" || true
+          fi

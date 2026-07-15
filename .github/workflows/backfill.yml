@@ -12,6 +12,12 @@ on:
         required: true
         default: "all"
 
+# Queue behind the other HF-dataset-mutating workflows (see daily.yml).
+concurrency:
+  group: hf-dataset
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   backfill:
     runs-on: ubuntu-latest
@@ -19,6 +25,7 @@ jobs:
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     steps:
       - uses: actions/checkout@v5
@@ -42,3 +49,13 @@ jobs:
 
       - name: Push refreshed DB to Hugging Face
         run: python -m repower.cli push-hf
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Historical backfill failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Historical backfill failed — $url\"}" || true
+          fi

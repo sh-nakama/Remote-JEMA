@@ -17,10 +17,13 @@ type AnyMeeting = Meeting | Upcoming
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-// dUntil: days between a date string and 2026-07-02 (the export's "today")
-function dUntil(ds: string): number {
-  return Math.round((new Date(ds).getTime() - new Date(2026, 6, 2).getTime()) / 864e5)
+// dUntil: days between a date string and the given "today" anchor. Live data
+// counts down from the real today; the fixtures are a frozen snapshot authored
+// around 2026-07-02, so fixture mode keeps that anchor to match its baked-in dates.
+function dUntil(ds: string, anchor: Date): number {
+  return Math.round((new Date(ds).getTime() - anchor.getTime()) / 864e5)
 }
+const FX_TODAY = new Date(2026, 6, 2)
 
 // Minimal markdown → React for the committee-level synthesis (raw markdown from
 // NotebookLM). Handles `#`/`##`/`###` headings, `-`/`•`/`*` bullets, and blank-line
@@ -111,6 +114,10 @@ export function PolicyDeepDiveScreen() {
   const meetings = pol.ready ? pol.meetings : fxMeetings
   const untracked: Meeting[] = pol.ready ? [] : fxUntracked
   const upcoming: Upcoming[] = pol.ready ? pol.upcoming : fxUpcoming
+  // Countdown anchor: real today (midnight) for live data, the fixtures' frozen
+  // "today" while they are still the fallback — flips together with the arrays above.
+  const now = new Date()
+  const dayAnchor = pol.ready ? new Date(now.getFullYear(), now.getMonth(), now.getDate()) : FX_TODAY
 
   // ---- handlers ----
   const selAll = () => {
@@ -234,7 +241,7 @@ export function PolicyDeepDiveScreen() {
         const following = isFol(c)
         let nx = ''
         if (c.nextDate) {
-          const dd = dUntil(c.nextDate)
+          const dd = dUntil(c.nextDate, dayAnchor)
           const mo = parseInt(c.nextDate.slice(5, 7), 10)
           const dy = parseInt(c.nextDate.slice(8, 10), 10)
           nx = L === 'ja'
@@ -344,7 +351,7 @@ export function PolicyDeepDiveScreen() {
     const on = selMtg === m.key
     const isQueued = !!queued[m.key]
     const st = stChip(isQueued ? 'pending' : m.status)
-    const dd = m.status === 'scheduled' ? dUntil(m.date) : 0
+    const dd = m.status === 'scheduled' ? dUntil(m.date, dayAnchor) : 0
     const org = m.com ? comOrg[m.com] : (m as Meeting).org || ''
     const tori = (m as Meeting).tori
     const prevEn = (m as Meeting).prevEn ?? (m as Upcoming).prevEn
@@ -416,7 +423,7 @@ export function PolicyDeepDiveScreen() {
   const dNoDigest = !hasDigest && !hasAgenda
   const dFailed = dEffSt === 'failed'
   const dAgenda = hasAgenda ? (L === 'ja' ? dU.agendaJa : dU.agendaEn) : []
-  const dCountdown = hasAgenda ? (L === 'ja' ? 'あと' + dUntil(d.date) + '日' : 'in ' + dUntil(d.date) + ' days') : ''
+  const dCountdown = hasAgenda ? (L === 'ja' ? 'あと' + dUntil(d.date, dayAnchor) + '日' : 'in ' + dUntil(d.date, dayAnchor) + ' days') : ''
   const dPrevLabel = dPrev ? (L === 'ja' ? dPrev.ja : dPrev.en) : ''
   const dPrevClick = () => { if (dPrev) selectMeeting(dPrev.key) }
   const dEmptyTitle = dIsUn

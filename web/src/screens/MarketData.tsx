@@ -22,6 +22,7 @@ import {
   useBalancingLive,
   BAL_CODES,
   useTielineLive,
+  fmtDate,
 } from './MarketData.live'
 
 type View = 'wholesale' | 'balancing' | 'interco' | 'drivers'
@@ -92,6 +93,8 @@ function slotLabel(i: number): string {
   return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00')
 }
 
+// Fixture-only: the synthetic series have no real dates, so "days ago" is counted
+// back from the fixtures' frozen "today". Live data labels use its actual datetimes.
 function dateLabel(daysAgo: number): string {
   const d = new Date(2026, 6, 2)
   d.setDate(d.getDate() - daysAgo)
@@ -245,7 +248,7 @@ export function MarketDataScreen() {
     let kAvgP: number
     let pkPrev: number
     let demV: number
-    let pk: { v: number; area: (typeof areas)[number] | null; d: number } = { v: -1, area: null, d: 0 }
+    let pk: { v: number; area: (typeof areas)[number] | null; d: number; dt: string } = { v: -1, area: null, d: 0, dt: '' }
     if (useLive) {
       const curAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(0, N))))
       const prevAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(N, N * 2))))
@@ -254,7 +257,7 @@ export function MarketDataScreen() {
       act.forEach((a) => {
         const dm = live.areas[a.key].dMax
         for (let d = 0; d < Math.min(N, dm.length); d++)
-          if (Number.isFinite(dm[d]) && dm[d] > pk.v) pk = { v: dm[d], area: a, d }
+          if (Number.isFinite(dm[d]) && dm[d] > pk.v) pk = { v: dm[d], area: a, d, dt: live.areas[a.key].dDt[d] ?? '' }
       })
       pkPrev = Math.max(
         0,
@@ -270,7 +273,7 @@ export function MarketDataScreen() {
       kAvgV = mean(curAvgs)
       kAvgP = mean(prevAvgs)
       act.forEach((a) => {
-        for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d }
+        for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d, dt: '' }
       })
       pkPrev = Math.max(...act.map((a) => Math.max(...a.dailyMax.slice(N, N * 2))))
       demV = act.reduce((sum, a) => sum + a.peak, 0)
@@ -695,7 +698,7 @@ export function MarketDataScreen() {
       kAvgSub: (selAreas.length || 9) + ' areas · ' + range + ' · vs prior ' + range,
       kAvgD: kAvgC.txt,
       kPeak: pk.v.toFixed(2),
-      kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + dateLabel(pk.d) + ' · vs prior period',
+      kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + (pk.dt ? fmtDate(pk.dt) : dateLabel(pk.d)) + ' · vs prior period',
       kPeakD: kPeakC.txt,
       kPeakDS: kPeakC.style,
       kDem: demV.toLocaleString('en-US'),

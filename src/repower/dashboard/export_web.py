@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -94,10 +95,23 @@ def _norm_pair(pair: str) -> str:
     return pair.replace(" ", "").replace("→", "->")
 
 
+def _jsonable(obj: object) -> object:
+    """Replace NaN/Inf floats with None, recursively. Python's json module would
+    otherwise emit literal ``NaN`` — invalid strict JSON that makes the browser's
+    ``res.json()`` throw, silently dropping that area/dataset to fixture fallback."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
 def _write_json(path: Path, obj: object) -> int:
     """Write *obj* as compact UTF-8 JSON; return byte length written."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(_jsonable(obj), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     path.write_text(text, encoding="utf-8")
     return len(text.encode("utf-8"))
 

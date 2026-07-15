@@ -58,3 +58,15 @@ jobs:
           )
           print("Space synced successfully")
           EOF
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::HF Space sync failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 HF Space sync failed — $url\"}" || true
+          fi

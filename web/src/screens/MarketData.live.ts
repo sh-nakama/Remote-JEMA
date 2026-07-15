@@ -21,6 +21,7 @@ export interface LiveArea {
   dt: string[] // datetimes aligned to avg/max/min
   dAvg: number[] // Daily price_avg (gran-independent) — stable KPIs
   dMax: number[] // Daily price_max
+  dDt: string[] // datetimes aligned to dAvg/dMax (for KPI date labels)
   peakMW: number | null // stats.peak_demand_mw
   avgPrice: number | null // stats.avg_price
   latest: number | null // latest period price_avg
@@ -83,6 +84,7 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
           dt: rev(price.map((p) => p.datetime)),
           dAvg: rev(dsrc.map((p) => nn(p.price_avg))),
           dMax: rev(dsrc.map((p) => nn(p.price_max ?? p.price_avg))),
+          dDt: rev(dsrc.map((p) => p.datetime)),
           peakMW: stats?.peak_demand_mw ?? null,
           avgPrice: stats?.avg_price ?? null,
           latest: price.length ? nn(price[price.length - 1].price_avg) : null,
@@ -324,7 +326,7 @@ const PERIODS: Record<Gran, Record<Range, number>> = {
 const MAX_POINTS = 720
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-function fmtDate(iso: string): string {
+export function fmtDate(iso: string): string {
   const p = iso.slice(0, 10).split('-')
   if (p.length < 3) return iso
   return MONTHS[Number(p[1]) - 1] + ' ' + Number(p[2])
