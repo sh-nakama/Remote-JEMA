@@ -159,7 +159,6 @@ export function useBalancingLive(): BalancingLive {
         if (!alive) return
         const rows: Record<string, BalRow> = {}
         let procTot = 0
-        const prices: number[] = []
         for (const code of BAL_CODES) {
           let proc = 0
           let off = 0
@@ -173,9 +172,20 @@ export function useBalancingLive(): BalancingLive {
           const price = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : null
           rows[code] = { price, proc, off, ach: off > 0 ? (proc / off) * 100 : null }
           procTot += proc
-          if (price != null) prices.push(price)
         }
-        const avgPrice = prices.length ? prices.reduce((a, b) => a + b, 0) / prices.length : null
+        // Volume-weighted by procured (contracted) MW across products — matches the
+        // "Weighted avg ΔkW price / 加重平均" label (a plain mean over products would
+        // over-weight thinly-procured products).
+        let wNum = 0
+        let wDen = 0
+        for (const code of BAL_CODES) {
+          const r = rows[code]
+          if (r.price != null && r.proc > 0) {
+            wNum += r.price * r.proc
+            wDen += r.proc
+          }
+        }
+        const avgPrice = wDen > 0 ? wNum / wDen : null
         setState({ ready: true, rows, procTot, avgPrice })
       })
       .catch(() => {})

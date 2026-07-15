@@ -149,14 +149,24 @@ export function MarketDataScreen() {
       return
     }
     const rows: Record<string, unknown>[] = []
+    // Window the export to the active Range (matches the on-screen chart), instead
+    // of dumping the full history. dt is newest-first (index 0 = latest period).
+    const days = { '7D': 7, '30D': 30, '60D': 60, '1Y': 365 }[range]
+    const cutoffFrom = (latest: string): string => {
+      const d = new Date(latest.slice(0, 10) + 'T00:00:00Z')
+      d.setUTCDate(d.getUTCDate() - (days - 1))
+      return d.toISOString().slice(0, 10)
+    }
     for (const key of selectedKeys) {
       const a = live.areas[key]
       if (!a) continue
       const label = areas.find((x) => x.key === key)?.en || key
       const num = (x: number) => (Number.isFinite(x) ? x : '')
+      const cutoff = a.dt.length ? cutoffFrom(a.dt[0]) : ''
       // avg/max/min are aligned to dt at the current granularity (dAvg/dMax are
       // the gran-independent Daily series used only for KPIs — not for export).
       for (let i = 0; i < a.dt.length; i++) {
+        if (cutoff && a.dt[i].slice(0, 10) < cutoff) continue // outside the Range window
         rows.push({
           datetime: a.dt[i],
           area: label,
@@ -170,7 +180,7 @@ export function MarketDataScreen() {
       toast('Nothing to export for the current selection · 対象データがありません')
       return
     }
-    downloadCsv(`jema-wholesale-${gran}.csv`, rows)
+    downloadCsv(`jema-wholesale-${gran}-${range}.csv`, rows)
     toast(`Downloaded ${rows.length.toLocaleString('en-US')} rows (CSV) · CSVで保存しました`)
   }
   const tCompare = () => toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外')
@@ -467,6 +477,11 @@ export function MarketDataScreen() {
     let icCapSum = 0
     let icCongN = 0
     let icMaxUv = 0
+    let icMaxIdx = -1
+    const icAreaName = (k: string) => {
+      const a = areaDefs.find((x) => x.key === k)
+      return a ? (L === 'ja' ? a.ja : a.en) : k
+    }
     const uColor = (val: number) =>
       val >= 0.97 ? '#E24B4A' : val >= 0.85 ? '#EF9F27' : val >= 0.55 ? '#FAC775' : val >= 0.35 ? '#5DCAA5' : '#9FE1CB'
     const icRows = icDefs.map((l, li) => {
@@ -479,7 +494,10 @@ export function MarketDataScreen() {
       icFlowSum += flow
       icCapSum += capN
       if (uNow >= 0.97) icCongN++
-      if (uNow > icMaxUv) icMaxUv = uNow
+      if (uNow > icMaxUv) {
+        icMaxUv = uNow
+        icMaxIdx = li
+      }
       const cong = u.filter((x) => x >= 0.97).length
       const A = (k: string) => areaDefs.find((a) => a.key === k)!
       const nm = (k: string) => (L === 'ja' ? A(k).ja : A(k).en)
@@ -515,6 +533,10 @@ export function MarketDataScreen() {
         })),
       }
     })
+    const icMaxDef = icMaxIdx >= 0 ? icDefs[icMaxIdx] : null
+    const icMaxLabel = icMaxDef
+      ? `${L === 'ja' ? icMaxDef.ja : icMaxDef.en} · ${icAreaName(icMaxDef.from)} → ${icAreaName(icMaxDef.to)}`
+      : ''
     const chipNeutral2: CSS = {
       display: 'inline-flex',
       alignItems: 'center',
@@ -608,6 +630,7 @@ export function MarketDataScreen() {
     return {
       icCong: icCongN,
       icMaxU: Math.round(icMaxUv * 100),
+      icMaxLabel,
       icSpread: (pxN.tepco - pxN.kyushu).toFixed(2),
       icFlowTot: fmtMW(icFlowSum),
       icCapTot: fmtMW(icCapSum),
@@ -1062,7 +1085,7 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest utilization<br />最高利用率</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icMaxU}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>FC 周波数変換 · Chubu → Tokyo</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icMaxLabel}</div>
                     <span style={v.icWarnChip}>binding since 11:00 · 混雑継続中</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>

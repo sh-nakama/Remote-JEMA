@@ -109,6 +109,63 @@ def test_doc_size_and_name():
     assert _doc_name("資料1　議事次第（PDF形式：58KB）") == "資料1　議事次第"
 
 
+def test_build_policy_snapshot_synthesis_rollup_and_discovered(tmp_path: Path):
+    """The Policy Deep Dive payload carries committee-level synthesis + a done/pending/
+    error rollup, exports done meetings with a digest, and includes a discovered
+    committee that flips to tracked once enabled."""
+    from repower.dashboard.export_web import build_policy_snapshot
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)  # config committees, tracked by default
+
+    # A config committee with one summarised meeting + a committee-level synthesis.
+    store.record_meeting(
+        "emissions_trading", 5,
+        [Material(5, "005_min", "https://x/5_gijiroku.pdf", "議事録", "minutes")],
+        db_path=db,
+    )
+    pend = store.pending_meetings("emissions_trading", db_path=db)
+    store.update_meeting(
+        pend[0]["id"], db_path=db, state="done", briefing_md="## 論点\n概要。",
+        digest_en_json='{"answer": "Lead paragraph [1].\\n\\n### Key\\n* a decision [2]."}',
+    )
+    store.update_committee(
+        "emissions_trading", db_path=db,
+        running_digest_en_md="# Overview\n\n- point one", running_summary_md="## 総括\n・要点",
+        last_synth_meeting=5,
+    )
+
+    # A discovered committee (not in config), left untracked.
+    store.upsert_discovered_committees(
+        [{"key": "gx_demand", "name_ja": "GX需要創出に向けた研究会", "source": "METI",
+          "url": "https://www.meti.go.jp/shingikai/energy_environment/gx_demand/"}],
+        db_path=db,
+    )
+
+    snap = build_policy_snapshot(db)
+    assert set(snap) == {"committees", "meetings", "upcoming"}
+    by = {c["key"]: c for c in snap["committees"]}
+
+    et = by["emissions_trading"]
+    assert et["tracked"] is True and et["done"] == 1 and et["pending"] == 0
+    assert et["synthesisEn"].startswith("# Overview")
+    assert et["synthesisJa"] and et["lastSynth"] == 5
+
+    gx = by["gx_demand"]
+    assert gx["discovered"] is True and gx["tracked"] is False
+    assert gx["synthesisEn"] is None and gx["done"] == 0
+
+    # the summarised meeting is exported with a parsed digest
+    et_meetings = [m for m in snap["meetings"] if m["com"] == "emissions_trading"]
+    assert any(m["status"] == "done" and m.get("digest") for m in et_meetings)
+
+    # tracking the discovered committee flips its exported flag
+    store.set_committee_enabled("gx_demand", True, db_path=db)
+    assert {c["key"]: c for c in build_policy_snapshot(db)["committees"]}["gx_demand"]["tracked"] is True
+
+
 def test_slot_col_fills_missing_slots_with_none():
     # pivot with a couple of the 48 slots present; the rest must come back None
     piv = pd.DataFrame({"2026-07-04": [10.0, 12.5]}, index=["00:00", "14:30"])

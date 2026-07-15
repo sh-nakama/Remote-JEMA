@@ -168,6 +168,20 @@ class PolicyCommittee(Base):
     running_digest_en_md = Column(Text)  # compact English running digest
     last_checked = Column(DateTime)  # last detection run
     last_refreshed_at = Column(DateTime)  # last summarisation run
+    # Tracked-set state (see repower.policy.store):
+    #   enabled     — the daily detect/summarise pipeline processes this committee.
+    #   user_added  — added at runtime (discovery / UI) vs seeded from committees.py.
+    #   priority    — summarisation priority (mirrors the config value; lower first).
+    enabled = Column(Boolean, default=True, nullable=False)
+    user_added = Column(Boolean, default=False, nullable=False)
+    priority = Column(Integer, default=100)
+    # Per-source scraper config (mirrors committees.Committee) so a committee added
+    # at runtime is scrapeable without a code change. OCCTO: max_meeting/prefix;
+    # EGC: log_pages (JSON array of log-page filenames) / min_meeting.
+    max_meeting = Column(Integer)
+    prefix = Column(String(64))
+    log_pages = Column(Text)
+    min_meeting = Column(Integer)
 
 
 class PolicyMeeting(Base):
@@ -201,6 +215,35 @@ class PolicyMeeting(Base):
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
+    )
+
+
+class PolicyUpcoming(Base):
+    """A scheduled (future) committee meeting from an external schedule source.
+
+    Committee pages only list a meeting once its materials exist, so upcoming
+    meetings come from forward-looking calendars (METI committee calendar +
+    電気新聞 weekly schedule). This table is a rolling snapshot — it is fully
+    replaced on each ``policy schedule`` refresh — so it needs no lifecycle state.
+
+    ``committee_key`` is set when the entry matches a tracked committee (nullable
+    otherwise). Deduped on ``(meeting_date, source_key)`` where ``source_key`` is a
+    normalised name, so the same meeting listed by two sources collapses to one row.
+    """
+
+    __tablename__ = "policy_upcoming"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    meeting_date = Column(Date, nullable=False)
+    name_ja = Column(Text, nullable=False)
+    source_key = Column(String(160), nullable=False)  # normalised name for dedup
+    org = Column(String(16))  # METI | OCCTO | EGC | other
+    committee_key = Column(String(64))  # matched tracked committee, else NULL
+    meeting_num = Column(Integer)  # from 第N回, if present
+    source = Column(String(16))  # meti (the METI committee calendar)
+    source_url = Column(Text)
+    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (
+        UniqueConstraint("meeting_date", "source_key", name="uq_policy_upcoming"),
     )
 
 

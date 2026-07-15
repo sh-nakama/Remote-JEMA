@@ -28,6 +28,8 @@ export interface SystemLive {
   avg7: number[]
   areasNow: Record<string, number>
   now: { system: number | null; tokyo: number | null; slot: string | null }
+  dateToday: string | null
+  dateYday: string | null
 }
 
 // Fill nulls / short arrays from a fixture baseline so the 48-slot chart geometry
@@ -58,6 +60,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
       avg7: fxAvg7,
       areasNow: {},
       now: { system: null, tokyo: null, slot: null },
+      dateToday: null,
+      dateYday: null,
     }
   }
   return {
@@ -67,6 +71,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
     avg7: fill(snap.system_avg7, fxAvg7),
     areasNow: snap.areas_now || {},
     now: snap.now || { system: null, tokyo: null, slot: null },
+    dateToday: snap.date_today,
+    dateYday: snap.date_yday,
   }
 }
 
@@ -77,69 +83,105 @@ interface PComSnap {
   org: 'METI' | 'OCCTO' | 'EGC'
   en: string
   ja: string
-  followed: boolean
 }
 interface PMtgSnap {
   com: string
   num: number
   org: string
   date: string
+  dateReal?: boolean
   status: string
   tori: boolean
   prevEn?: string
   prevJa?: string
 }
+interface PUpcomingSnap {
+  date: string
+  org: string
+  committee_key: string | null
+  en: string
+  ja: string
+  num: number | null
+  url: string
+  matched: boolean
+}
 
 export interface PolicyMeetingsLive {
   ready: boolean
   meetings: Meeting[]
+  upcoming: Meeting[]
 }
 
-/** The most recently summarised committee meetings, mapped to the Overview radar's
- * Meeting shape. No relevance score exists upstream, so the radar is ranked by
- * recency (newest = top / longest bar); the date shown is the summary date. */
+const TIER = (org: string): 'METI' | 'OCCTO' | 'EGC' =>
+  org === 'OCCTO' || org === 'EGC' ? org : 'METI'
+
+/** The most recently summarised committee meetings (one per committee) for the
+ * radar, plus the scheduled (future) meetings for the "Recent & Scheduled"
+ * timeline. Both carry the real meeting date + committee key; the radar is ranked
+ * by recency (no upstream relevance score). */
 export function usePolicyMeetings(): PolicyMeetingsLive {
-  const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, meetings: [] })
+  const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, meetings: [], upcoming: [] })
   useEffect(() => {
     let alive = true
     Promise.all([
       getSnapshot<{ committees: PComSnap[] }>('policy/committees.json'),
-      getSnapshot<{ meetings: PMtgSnap[] }>('policy/meetings.json'),
+      getSnapshot<{ meetings: PMtgSnap[]; upcoming?: PUpcomingSnap[] }>('policy/meetings.json'),
     ])
       .then(([c, m]) => {
         if (!alive) return
         const com: Record<string, PComSnap> = {}
         for (const x of c.committees || []) com[x.key] = x
-        const done = (m.meetings || []).filter((x) => x.status === 'done')
+        // latest meeting per committee (summarised or pending) — the committee radar.
+        const all = (m.meetings || []).slice()
         // newest first (date desc, then meeting number desc)
-        done.sort((a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : (b.num || 0) - (a.num || 0)))
-        // one row per committee (its latest summarised meeting) — a committee radar
+        all.sort((a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : (b.num || 0) - (a.num || 0)))
         const seen = new Set<string>()
         const reps: PMtgSnap[] = []
-        for (const x of done) {
+        for (const x of all) {
           if (seen.has(x.com)) continue
           seen.add(x.com)
           reps.push(x)
         }
-        const meetings: Meeting[] = reps.slice(0, 8).map((x, i) => {
+        const meetings: Meeting[] = reps.slice(0, 12).map((x, i) => {
           const cc = com[x.com]
           const d = x.date || ''
+          const isDone = x.status === 'done'
           return {
             en: cc ? cc.en : x.com,
             ja: cc ? cc.ja : x.com,
-            tier: (x.org as 'METI' | 'OCCTO' | 'EGC') || 'METI',
+            tier: TIER(x.org),
             no: x.num,
             m: d ? parseInt(d.slice(5, 7), 10) : 0,
             day: d ? parseInt(d.slice(8, 10), 10) : 0,
-            score: Math.max(45, 92 - i * 6),
+            score: Math.max(45, 92 - i * 5),
             tori: x.tori,
-            followed: cc ? cc.followed : false,
-            done: true,
-            sEn: x.prevEn || '',
-            sJa: x.prevJa || '',
+            done: isDone,
+            sEn: isDone ? x.prevEn || '' : '',
+            sJa: isDone ? x.prevJa || '' : '',
+            date: d || undefined,
+            dateReal: !!x.dateReal,
+            key: x.com,
           }
         })
-        setState({ ready: true, meetings })
+        const upcoming: Meeting[] = (m.upcoming || []).map((u) => {
+          const d = u.date || ''
+          const cc = u.committee_key ? com[u.committee_key] : undefined
+          return {
+            en: cc ? cc.en : u.en,
+            ja: cc ? cc.ja : u.ja,
+            tier: TIER(u.org),
+            no: u.num || 0,
+            m: d ? parseInt(d.slice(5, 7), 10) : 0,
+            day: d ? parseInt(d.slice(8, 10), 10) : 0,
+            score: 70,
+            sched: true,
+            done: false,
+            date: d || undefined,
+            dateReal: true,
+            key: u.committee_key || undefined,
+          }
+        })
+        setState({ ready: true, meetings, upcoming })
       })
       .catch(() => {})
     return () => {

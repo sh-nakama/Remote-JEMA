@@ -42,6 +42,30 @@ export function sx(...parts: Array<string | CSS | false | null | undefined>): CS
   return acc as CSS
 }
 
+/**
+ * Expand a `border: "<width> <style> <color>"` shorthand into longhand
+ * borderWidth/borderStyle/borderColor. `Hoverable` often toggles only the border
+ * *color* on hover (base `border:1px solid X`, hover `border-color:Y`); having the
+ * `border` shorthand in one render and a `borderColor` longhand in the next trips
+ * React's shorthand/longhand conflict warning. Normalising to longhand in every
+ * render keeps the property set consistent and silences it (visual result is
+ * identical). Only the common 3-token form is expanded; anything else is left as-is.
+ */
+function expandBorderShorthand(st: Record<string, unknown>): CSS {
+  const b = st.border
+  if (typeof b === 'string') {
+    const i1 = b.indexOf(' ')
+    const i2 = i1 >= 0 ? b.indexOf(' ', i1 + 1) : -1
+    if (i2 > 0) {
+      if (st.borderWidth == null) st.borderWidth = b.slice(0, i1)
+      if (st.borderStyle == null) st.borderStyle = b.slice(i1 + 1, i2)
+      if (st.borderColor == null) st.borderColor = b.slice(i2 + 1)
+      delete st.border
+    }
+  }
+  return st as CSS
+}
+
 type HoverableProps = {
   as?: React.ElementType
   /** base inline-style string (the export's `style="…"`) */
@@ -77,7 +101,7 @@ export function Hoverable({
         setH(false)
         onMouseLeave?.(e)
       }}
-      style={{ ...s(base), ...(h && hover ? s(hover) : {}), ...style }}
+      style={expandBorderShorthand({ ...s(base), ...(h && hover ? s(hover) : {}), ...style })}
     >
       {children}
     </El>

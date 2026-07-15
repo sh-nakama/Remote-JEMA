@@ -254,6 +254,32 @@ def test_regenerate_running_doc(monkeypatch, tmp_path):
     assert store.get_committee(key, db_path=db).latest_meeting == 5
 
 
+def test_regenerate_running_doc_for_discovered_committee(monkeypatch, tmp_path):
+    """A discovered committee (in the DB, not the static config — e.g. one the
+    cross-check accumulated) must render its running doc. build_running_doc used to
+    call committee_by_key and KeyError on these, breaking backfill/summarise."""
+    db = str(tmp_path / "t.db")
+    policy_dir = tmp_path / "policy"
+    monkeypatch.setattr(store, "POLICY_DIR", policy_dir)
+
+    store.sync_committees(db_path=db)
+    store.upsert_discovered_committees(
+        [{"key": "gx_demand", "name_ja": "GX需要創出に向けた研究会", "source": "METI",
+          "url": "https://www.meti.go.jp/shingikai/energy_environment/gx_demand/"}],
+        db_path=db,
+    )
+    assert "gx_demand" not in {c.key for c in COMMITTEES}  # genuinely not in config
+    store.record_meeting("gx_demand", 3, None, db_path=db)
+    pend = store.pending_meetings("gx_demand", db_path=db)
+    store.update_meeting(pend[0]["id"], db_path=db, state="done",
+                         briefing_md="## 論点\nGX需要の創出策。")
+
+    path = store.regenerate_running_doc("gx_demand", db_path=db)
+    text = Path(path).read_text(encoding="utf-8")
+    assert "GX需要創出に向けた研究会" in text  # JA name used as the (missing) EN title
+    assert "第3回" in text
+
+
 def test_pending_retries_errors_under_cap(tmp_path):
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
@@ -294,6 +320,55 @@ def test_meetings_for_synthesis_uses_flag_not_watermark(tmp_path):
 
     store.mark_synthesized(key, 3, db_path=db)
     assert store.meetings_for_synthesis(key, db_path=db) == []
+
+
+def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
+    """A synthesis run interrupted between add_source (synth_done already set)
+    and report generation must be recovered: the next pass regenerates the
+    report from the existing notebook instead of skipping the committee forever."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+
+    # One done meeting whose briefing was folded in (synth_done=1) before the
+    # interrupted run died — running_summary_md never written.
+    store.record_meeting(key, 4, None, db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
+    store.mark_synthesized(key, 4, db_path=db)
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-123")
+
+    assert store.synthesized_meeting_nums(key, db_path=db) == [4]
+    assert store.stalled_synthesis_committees(db_path=db) == [key]
+
+    reported: list[str] = []
+    monkeypatch.setattr(nb_mod, "create_notebook",
+                        lambda *a, **k: pytest.fail("must reuse the existing notebook"))
+    monkeypatch.setattr(nb_mod, "add_source",
+                        lambda *a, **k: pytest.fail("no new sources to add"))
+    monkeypatch.setattr(nb_mod, "generate_report",
+                        lambda nb_id, *a, **k: reported.append(nb_id) or "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+
+    def fake_download(nb_id, task_id, out):
+        Path(out).write_text("synthesis body", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(nb_mod, "download_report", fake_download)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN digest"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+
+    row = store.get_committee(key, db_path=db)
+    assert reported == ["nb-123"]
+    assert row.running_summary_md == "synthesis body"
+    assert row.running_digest_en_md == "EN digest"
+    assert row.last_synth_meeting == 4
+    assert row.source_count == 1
+    # Recovered → no longer stalled; a further pass with nothing new is a no-op.
+    assert store.stalled_synthesis_committees(db_path=db) == []
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
 
 
 # ── Web committee discovery (network injected) ───────────────────────────────

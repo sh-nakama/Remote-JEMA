@@ -20,3 +20,6 @@ Reference/
 
 # Local Claude Code dev-server config (machine-specific absolute paths)
 .claude/launch.json
+
+# /test-jema bug-hunt drafts (working artifacts; real output is filed GH issues)
+test-runs/

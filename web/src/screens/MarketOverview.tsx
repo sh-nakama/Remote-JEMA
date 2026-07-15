@@ -14,9 +14,6 @@ import {
   upcomingMeetings,
   freshData,
   MO,
-  enShort,
-  jaShort,
-  calRows,
   type Meeting,
 } from './MarketOverview.data'
 import { useSystemLive, buildPaths, usePolicyMeetings } from './MarketOverview.live'
@@ -91,11 +88,22 @@ const filterChipBase = (on: boolean): React.CSSProperties => ({
 })
 
 const avg = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length
-const dUntil = (m: Meeting) =>
-  Math.round((+new Date(2026, m.m - 1, m.day) - +new Date(2026, 6, 2)) / 864e5)
+
+/** A meeting's date as a Date. Live rows carry a real ISO date; fixtures fall
+ * back to m/day (year 2026). */
+const meetingDate = (m: Meeting): Date =>
+  m.date ? new Date(m.date + 'T00:00:00') : new Date(2026, m.m - 1, m.day)
+
+/** Short committee label for the compact timeline chips (full name is in the
+ * hover title). Adds 第N回 / #N when a meeting number is known. */
+const shortLabel = (m: Meeting, ja: boolean): string => {
+  const base = ja ? m.ja : m.en
+  const short = base.length > 20 ? base.slice(0, 19) + '…' : base
+  return m.no ? short + (ja ? ` 第${m.no}回` : ` #${m.no}`) : short
+}
 
 export function MarketOverviewScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow } = useApp()
   const dark = theme === 'dark'
   const L = lang
 
@@ -105,7 +113,7 @@ export function MarketOverviewScreen() {
   const [hover, setHover] = useState<number | null>(null)
   const [showWhy, setShowWhy] = useState(false)
   const [showNotif, setShowNotif] = useState(false)
-  const [filter, setFilter] = useState<'all' | 'followed' | 'watch' | 'upcoming'>('all')
+  const [filter, setFilter] = useState<'all' | 'followed' | 'upcoming'>('all')
   const chartRef = useRef<HTMLDivElement>(null)
 
   const showBrief = false // props.showAiBrief default
@@ -121,6 +129,15 @@ export function MarketOverviewScreen() {
   )
   const polMtg = usePolicyMeetings()
   const meetings = polMtg.ready ? polMtg.meetings : fxMeetings
+  const upcoming = polMtg.ready ? polMtg.upcoming : upcomingMeetings
+
+  // Days from today (local midnight): negative = past, positive = scheduled.
+  const todayMid = useMemo(() => {
+    const d = new Date()
+    d.setHours(0, 0, 0, 0)
+    return d
+  }, [])
+  const daysFrom = (m: Meeting) => Math.round((+meetingDate(m) - +todayMid) / 864e5)
 
   // ---- handlers ----
   const tMarket = () => setScreen('market')
@@ -128,12 +145,16 @@ export function MarketOverviewScreen() {
   const tCapacity = () => setScreen('capacity')
   const tRefresh = () => toast('Data refreshed · データを更新しました')
   const tIcs = () => {
+    if (upcoming.length === 0) {
+      toast(L === 'ja' ? '開催予定の会合はありません' : 'No scheduled meetings to export')
+      return
+    }
     const n = downloadIcs(
       'jema-upcoming-meetings.ics',
-      upcomingMeetings.map((m) => ({
-        uid: `${m.tier}-${m.no}-${m.m}-${m.day}`,
-        date: new Date(2026, m.m - 1, m.day),
-        summary: `${L === 'ja' ? m.ja : m.en} · No.${m.no}`,
+      upcoming.map((m) => ({
+        uid: `${m.tier}-${m.no}-${m.date || `${m.m}-${m.day}`}`,
+        date: meetingDate(m),
+        summary: `${L === 'ja' ? m.ja : m.en}${m.no ? ` · No.${m.no}` : ''}`,
         description: (L === 'ja' ? m.sJa : m.sEn) || '',
       })),
     )
@@ -289,25 +310,37 @@ export function MarketOverviewScreen() {
   }
   const radarList =
     filter === 'upcoming'
-      ? upcomingMeetings
-      : meetings.filter((m) =>
-          filter === 'all' ? true : filter === 'watch' ? m.followed || m.watch : m.followed,
-        )
-  const radar = radarList.map((m, i) => ({
-    key: m.tier + '-' + m.no,
+      ? // only still-future meetings — a stale static snapshot can hold a meeting
+        // whose date has since passed; don't present it as forthcoming.
+        upcoming.filter((m) => daysFrom(m) >= 0)
+      : meetings.filter((m) => (filter === 'followed' ? !!m.key && isFollowing(m.key) : true))
+  const radar = radarList.map((m, i) => {
+    const d = meetingDate(m)
+    // Show a date only when it's the real published meeting date; a pending
+    // meeting with no parsed date shows just its number (no misleading fallback).
+    const dateStr = m.dateReal
+      ? L === 'ja'
+        ? `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+        : `${d.getDate()} ${MO[d.getMonth() + 1]} ${d.getFullYear()}`
+      : ''
+    const numStr = m.no ? (L === 'ja' ? `第${m.no}回` : `No. ${m.no}`) : ''
+    const dd = daysFrom(m)
+    const rel = m.sched && m.dateReal && dd >= 0 ? (L === 'ja' ? `あと${dd}日` : `in ${dd}d`) : ''
+    const meta = [numStr, dateStr, rel].filter(Boolean).join(' · ')
+    const following = !!m.key && isFollowing(m.key)
+    return {
+    key: (m.key || m.tier) + '-' + m.no + '-' + (m.date || i),
     rank: i + 1,
+    comKey: m.key ?? null,
+    following,
     n1: L === 'ja' ? m.ja : m.en,
     n2: L === 'ja' ? m.en : m.ja,
-    meta:
-      (L === 'ja'
-        ? '第' + m.no + '回 · 2026年' + m.m + '月' + m.day + '日'
-        : 'No. ' + m.no + ' · ' + m.day + ' ' + MO[m.m] + ' 2026') +
-      (m.sched ? (L === 'ja' ? ' · あと' + dUntil(m) + '日' : ' · in ' + dUntil(m) + 'd') : ''),
+    meta,
     tier: m.tier,
     tori: !!m.tori,
     sched: !!m.sched,
     done: !!m.done,
-    pending: !m.done,
+    pending: !m.done && !m.sched,
     score: m.score,
     summary: m.done ? (L === 'ja' ? m.sJa : m.sEn) : '',
     cta: m.sched
@@ -349,30 +382,51 @@ export function MarketOverviewScreen() {
       background: tierColors[m.tier],
       display: 'inline-block',
     } as React.CSSProperties,
-    folStyle: {
-      width: 7,
-      height: 7,
-      borderRadius: 999,
-      background: m.followed ? 'var(--ac)' : 'transparent',
-      border: m.followed ? 'none' : '1px solid transparent',
-      flexShrink: 0,
-    } as React.CSSProperties,
-  }))
+    }
+  })
 
-  // ---- upcoming calendar strip ----
-  const calItems = upcomingMeetings.map((m, i) => {
-    const dd = dUntil(m)
-    const pct = Math.max(4, Math.min(96, (dd / 34) * 100))
-    const top = calRows[i] !== 'bottom'
-    const col = tierColors[m.tier]
-    const shift = pct < 10 ? '0' : pct > 85 ? '-100%' : '-50%'
-    const metaTxt =
-      L === 'ja'
-        ? m.m + '月' + m.day + '日 · あと' + dd + '日'
-        : m.day + ' ' + MO[m.m] + ' · in ' + dd + 'd'
+  // ---- Recent & Scheduled timeline ----
+  // Real-dated held meetings from the last ~13 weeks + all scheduled meetings,
+  // positioned on a timeline centred on today (held to the left, scheduled to
+  // the right). Only real dates are placed, so positions are temporally honest.
+  const timelineItems = useMemo(() => {
+    const recent = meetings
+      .filter((m) => m.dateReal)
+      .map((m) => ({ m, d: daysFrom(m) }))
+      .filter((x) => x.d <= 0 && x.d >= -95)
+    const sched = upcoming
+      .filter((m) => m.dateReal)
+      .map((m) => ({ m, d: daysFrom(m) }))
+      .filter((x) => x.d >= 0)
+    return [...recent, ...sched].sort((a, b) => a.d - b.d)
+  }, [meetings, upcoming, todayMid])
+
+  // Window includes today (0) with padding at both extremes.
+  const tlDs = timelineItems.map((x) => x.d)
+  const tlLo = Math.min(-5, ...tlDs) - 4
+  const tlHi = Math.max(5, ...tlDs) + 4
+  const tlSpan = tlHi - tlLo || 1
+  const pctOf = (d: number) => 4 + ((d - tlLo) / tlSpan) * 92
+  const todayPct = pctOf(0)
+
+  const calItems = timelineItems.map((x, i) => {
+    const m = x.m
+    const pct = pctOf(x.d)
+    const top = i % 2 === 0
+    const future = x.d > 0
+    const col = future ? 'var(--up)' : tierColors[m.tier]
+    const shift = pct < 12 ? '0' : pct > 88 ? '-100%' : '-50%'
+    const dt = meetingDate(m)
+    const dateTxt = L === 'ja' ? `${dt.getMonth() + 1}月${dt.getDate()}日` : `${dt.getDate()} ${MO[dt.getMonth() + 1]}`
+    const rel = future
+      ? L === 'ja' ? `あと${x.d}日` : `in ${x.d}d`
+      : x.d === 0
+        ? L === 'ja' ? '本日' : 'today'
+        : L === 'ja' ? `${-x.d}日前` : `${-x.d}d ago`
+    const metaTxt = dateTxt + ' · ' + rel
     return {
-      key: 'cal-' + m.no,
-      name: (L === 'ja' ? jaShort[m.no] : enShort[m.no]) + ' 第' + m.no + '回',
+      key: 'cal-' + (m.key || m.tier) + '-' + (m.date || i),
+      name: shortLabel(m, L === 'ja'),
       meta: metaTxt,
       tip: (L === 'ja' ? m.ja : m.en) + ' · ' + metaTxt,
       dotS: {
@@ -402,21 +456,24 @@ export function MarketOverviewScreen() {
         top: top ? 6 : 90,
         transform: 'translateX(' + shift + ')',
         background: 'var(--bg3)',
-        border: '1px solid var(--bd)',
+        border: future ? '1px solid var(--up)' : '1px solid var(--bd)',
         borderRadius: 10,
         padding: '4px 11px',
         cursor: 'pointer',
         zIndex: 3,
         boxShadow: 'var(--sh1)',
+        maxWidth: 168,
       } as React.CSSProperties,
     }
   })
-  const calWeeks = [4, 11, 18, 25, 32].map((dd) => {
-    const dt = new Date(2026, 6, 2)
-    dt.setDate(dt.getDate() + dd)
-    const pct = (dd / 34) * 100
+  // Evenly spaced date ticks across the window.
+  const calWeeks = Array.from({ length: 5 }, (_, k) => {
+    const d = Math.round(tlLo + (tlSpan * k) / 4)
+    const dt = new Date(todayMid)
+    dt.setDate(dt.getDate() + d)
+    const pct = pctOf(d)
     return {
-      key: 'wk-' + dd,
+      key: 'wk-' + k,
       label: MO[dt.getMonth() + 1] + ' ' + dt.getDate(),
       tickS: {
         position: 'absolute',
@@ -439,11 +496,14 @@ export function MarketOverviewScreen() {
   })
 
   // ---- freshness rows ----
+  // JEPX spot / Area prices freshness dates come from the same live snapshot that
+  // drives the KPI tiles + chart (system.json date_today), not a hardcoded literal.
+  const liveDate = liveSys.ready ? liveSys.dateToday : null
   const fresh = freshData.map((f) => ({
     key: f.en,
     label: L === 'ja' ? f.ja : f.en,
     sub: L === 'ja' ? f.subJa || f.subEn : f.subEn,
-    value: f.v,
+    value: liveDate && (f.en === 'JEPX spot' || f.en === 'Area prices') ? liveDate : f.v,
     ok: f.ok,
     delayed: !!f.delayed,
     dotStyle: {
@@ -456,10 +516,14 @@ export function MarketOverviewScreen() {
   }))
 
   // computed top-bar / pulse header values
-  const sysNow = today[NOW].toFixed(2)
-  const tokyoNowV = liveSys.areasNow[areas[0].key] ?? areas[0].series[NOW]
+  // System/Tokyo "now" are read from the same snapshot slot (liveSys.now) so the
+  // spread is a valid same-moment comparison; fall back to the fixed slot only
+  // before the live snapshot has loaded.
+  const sysNowV = liveSys.now.system ?? today[NOW]
+  const tokyoNowV = liveSys.now.tokyo ?? liveSys.areasNow[areas[0].key] ?? areas[0].series[NOW]
+  const sysNow = sysNowV.toFixed(2)
   const tokyoNow = tokyoNowV.toFixed(2)
-  const spread = (today[NOW] - tokyoNowV).toFixed(2)
+  const spread = (sysNowV - tokyoNowV).toFixed(2)
 
   return (
     <>
@@ -628,7 +692,7 @@ export function MarketOverviewScreen() {
                 <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>JEPX system price &amp; the latest policy-committee signals · JEPXシステム価格と政策委員会の最新動向</div>
                 <div style={s("display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--mut);margin-top:8px;background:var(--bg1);border:1px solid var(--bd);border-radius:999px;padding:3px 11px;font-feature-settings:'tnum' 1")}>
                   <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`} />
-                  Updated 2026-07-02 10:31 JST · 更新
+                  Updated {liveSys.dateToday ?? '—'} · 更新
                 </div>
               </div>
               <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>
@@ -781,38 +845,44 @@ export function MarketOverviewScreen() {
               </div>
             </div>
 
-            {/* Upcoming meetings calendar strip */}
+            {/* Recent & Scheduled meetings timeline */}
             <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px 10px;box-shadow:var(--sh1)')}>
               <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                 <div>
-                  <div style={s('font-size:16px;font-weight:600')}>Upcoming Meetings <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>開催予定</span></div>
-                  <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Next 5 weeks · published agendas · click → Policy Deep Dive · 今後5週間・議題公表済み</div>
+                  <div style={s('font-size:16px;font-weight:600')}>Recent &amp; Scheduled <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>直近・開催予定</span></div>
+                  <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Held meetings &amp; scheduled sessions · click → Policy Deep Dive · 開催済みと開催予定の会合</div>
                 </div>
                 <Hoverable base="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd2);color:var(--tx2);border-radius:999px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0" hover="border-color:var(--ac);color:var(--acT)" onClick={tIcs}>
                   <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`} />Add to calendar · ICS
                 </Hoverable>
               </div>
-              <div style={s('position:relative;height:128px;margin-top:6px')}>
-                <div style={s('position:absolute;left:0;right:0;top:63px;height:2px;background:var(--dv);border-radius:1px')}></div>
-                {calWeeks.map((w) => (
-                  <React.Fragment key={w.key}>
-                    <div style={w.tickS}></div>
-                    <div style={w.labS}>{w.label}</div>
-                  </React.Fragment>
-                ))}
-                <div style={s('position:absolute;left:0;top:48px;width:2px;height:32px;background:var(--ac);border-radius:1px')}></div>
-                <div style={s('position:absolute;left:0;top:84px;font-size:10px;font-weight:600;color:var(--acT);white-space:nowrap')}>Today 本日</div>
-                {calItems.map((cm) => (
-                  <React.Fragment key={cm.key}>
-                    <div style={cm.lineS}></div>
-                    <div style={cm.dotS}></div>
-                    <div style={cm.cardS} onClick={tPolicy} title={cm.tip}>
-                      <div style={s('font-size:11.5px;font-weight:600;white-space:nowrap')}>{cm.name}</div>
-                      <div style={s("font-size:10px;color:var(--mut);white-space:nowrap;font-feature-settings:'tnum' 1")}>{cm.meta}</div>
-                    </div>
-                  </React.Fragment>
-                ))}
-              </div>
+              {calItems.length === 0 ? (
+                <div style={s('height:96px;display:flex;align-items:center;justify-content:center;font-size:12.5px;color:var(--mut);text-align:center')}>
+                  {L === 'ja' ? '直近・開催予定の会合はありません' : 'No recent or scheduled meetings with dates yet'}
+                </div>
+              ) : (
+                <div style={s('position:relative;height:128px;margin-top:6px')}>
+                  <div style={s('position:absolute;left:0;right:0;top:63px;height:2px;background:var(--dv);border-radius:1px')}></div>
+                  {calWeeks.map((w) => (
+                    <React.Fragment key={w.key}>
+                      <div style={w.tickS}></div>
+                      <div style={w.labS}>{w.label}</div>
+                    </React.Fragment>
+                  ))}
+                  <div style={{ position: 'absolute', left: todayPct + '%', top: 48, width: 2, height: 32, background: 'var(--ac)', borderRadius: 1, transform: 'translateX(-50%)' }}></div>
+                  <div style={{ position: 'absolute', left: todayPct + '%', top: 84, fontSize: 10, fontWeight: 600, color: 'var(--acT)', whiteSpace: 'nowrap', transform: 'translateX(-50%)' }}>Today 本日</div>
+                  {calItems.map((cm) => (
+                    <React.Fragment key={cm.key}>
+                      <div style={cm.lineS}></div>
+                      <div style={cm.dotS}></div>
+                      <div style={cm.cardS} onClick={tPolicy} title={cm.tip}>
+                        <div style={s('font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{cm.name}</div>
+                        <div style={s("font-size:10px;color:var(--mut);white-space:nowrap;font-feature-settings:'tnum' 1")}>{cm.meta}</div>
+                      </div>
+                    </React.Fragment>
+                  ))}
+                </div>
+              )}
             </div>
 
             {/* AI Daily Brief (PROPOSED, tweakable) */}
@@ -851,19 +921,37 @@ export function MarketOverviewScreen() {
 
                 <div style={s('display:flex;gap:6px;margin:12px 0 4px')}>
                   <span style={filterChipBase(filter === 'followed')} onClick={() => setFilter('followed')}>Followed フォロー中</span>
-                  <span style={filterChipBase(filter === 'watch')} onClick={() => setFilter('watch')}>+ Watchlist</span>
                   <span style={filterChipBase(filter === 'all')} onClick={() => setFilter('all')}>All tracked 全追跡</span>
                   <span style={filterChipBase(filter === 'upcoming')} onClick={() => setFilter('upcoming')}>Upcoming 開催予定</span>
                 </div>
 
                 <div style={s('display:flex;flex-direction:column')}>
+                  {radar.length === 0 && (
+                    <div style={s('padding:22px 4px;font-size:12.5px;color:var(--mut);text-align:center;border-top:1px solid var(--dv)')}>
+                      {filter === 'followed'
+                        ? L === 'ja'
+                          ? 'フォロー中の委員会はありません — 星をクリックしてフォロー'
+                          : 'No followed committees yet — tap the star on a committee to follow it'
+                        : L === 'ja'
+                          ? '開催予定の会合はありません'
+                          : 'No scheduled meetings right now'}
+                    </div>
+                  )}
                   {radar.map((m) => (
                     <div key={m.key} style={s('display:flex;gap:12px;align-items:flex-start;padding:12px 4px;border-top:1px solid var(--dv)')}>
                       <span style={m.badgeStyle}>{m.rank}</span>
                       <div style={s('flex:1;min-width:0')}>
                         <div style={s('display:flex;align-items:center;gap:7px;min-width:0')}>
                           <span style={s('font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{m.n1}</span>
-                          <span style={m.folStyle} title="Followed · フォロー中"></span>
+                          {m.comKey && (
+                            <span
+                              onClick={(e) => { e.stopPropagation(); if (m.comKey) toggleFollow(m.comKey) }}
+                              title={m.following ? 'Following · フォロー中（クリックで解除）' : 'Follow · フォローする'}
+                              style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer', flexShrink: 0, color: m.following ? 'var(--ac)' : 'var(--fnt3)' }}
+                            >
+                              <RawSvg html={`<svg viewBox="0 0 24 24" fill="${m.following ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} />
+                            </span>
+                          )}
                         </div>
                         <div style={s('font-size:11.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{m.n2}</div>
                         <div style={s("display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--mut);margin-top:3px;font-feature-settings:'tnum' 1")}>

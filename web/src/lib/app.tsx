@@ -26,7 +26,7 @@ import type { AreaKey, Level } from './types'
 export type Lang = 'en' | 'ja'
 export type Theme = 'light' | 'dark'
 export type Screen = 'overview' | 'market' | 'policy' | 'capacity'
-export type Overlay = 'search' | 'settings' | 'watchlist'
+export type Overlay = 'search' | 'settings' | 'watchlist' | 'committees'
 
 /** A single starred entity. `id` is the stable key (e.g. `area:tepco`). */
 export interface WatchEntry {
@@ -67,6 +67,13 @@ export interface AppState {
   toggleWatch: (e: WatchEntry) => void
   clearWatch: () => void
 
+  /** Followed committees, by committee key (client-side preference, persisted).
+   * Seeded with the priority committees on first visit. Drives the Committee
+   * Radar's "Followed" filter and the Policy screen's follow toggles. */
+  followed: string[]
+  isFollowing: (key: string) => boolean
+  toggleFollow: (key: string) => void
+
   /** User settings (persisted). */
   homeScreen: Screen
   setHomeScreen: (s: Screen) => void
@@ -77,6 +84,11 @@ export interface AppState {
   focusArea: AreaKey | null
   requestArea: (a: AreaKey) => void
   clearFocusArea: () => void
+
+  /** True when a local backend API (`repower web-api`) is reachable — enables the
+   * write controls (track committees) and the Run catch-up button. False on the
+   * static GitHub Pages deployment, which is read-only. */
+  interactive: boolean
 }
 
 const Ctx = createContext<AppState | null>(null)
@@ -108,6 +120,10 @@ function readJson<T>(key: string, fallback: T): T {
 const SCREENS: Screen[] = ['overview', 'market', 'policy', 'capacity']
 const LEVELS: Level[] = ['Native', 'Daily', 'Weekly', 'Monthly']
 
+// Committees a new user follows by default (the priority committees). Only used
+// when the key has never been written, so an intentional empty set is preserved.
+const DEFAULT_FOLLOW = ['system_review', 'emissions_trading', 'chousei_jukyu']
+
 export function AppProvider({
   children,
   initialScreen,
@@ -128,12 +144,49 @@ export function AppProvider({
   const [overlay, setOverlay] = useState<Overlay | null>(null)
   const [collapsed, setCollapsed] = useState<boolean>(read('jema-collapse') === '1')
   const [watch, setWatch] = useState<WatchEntry[]>(() => readJson<WatchEntry[]>('jema-watch', []))
+  const [followed, setFollowed] = useState<string[]>(() => {
+    const raw = read('jema-follow-committees')
+    if (raw == null) return DEFAULT_FOLLOW // first visit → seed with priority committees
+    try {
+      const v = JSON.parse(raw)
+      return Array.isArray(v) ? (v as string[]) : DEFAULT_FOLLOW
+    } catch {
+      return DEFAULT_FOLLOW
+    }
+  })
   const [homeScreen, setHomeScreenS] = useState<Screen>(homeInit)
   const [defaultGran, setDefaultGranS] = useState<Level>(() => {
     const g = read('jema-gran') as Level | null
     return g && LEVELS.includes(g) ? g : 'Daily'
   })
   const [focusArea, setFocusArea] = useState<AreaKey | null>(null)
+  const [interactive, setInteractive] = useState(false)
+
+  // Interactive mode = a local backend (`repower web-api`) is reachable, which
+  // enables the write controls (track / priority / run catch-up). Probe
+  // `/api/health` regardless of dev-vs-built so a locally-served build works too
+  // as long as the API is up; GitHub Pages has no `/api`, so the probe fails and
+  // the app stays read-only. Require `mode: "local"` so a stray SPA 200 (e.g. an
+  // index.html fallback) can't switch it on. Re-probe on window focus so starting
+  // the API and clicking back into the tab flips it on without a manual reload.
+  useEffect(() => {
+    let alive = true
+    const probe = () =>
+      fetch('/api/health')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((j) => {
+          if (alive) setInteractive(!!(j && j.ok && j.mode === 'local'))
+        })
+        .catch(() => {
+          if (alive) setInteractive(false)
+        })
+    probe()
+    window.addEventListener('focus', probe)
+    return () => {
+      alive = false
+      window.removeEventListener('focus', probe)
+    }
+  }, [])
 
   const setLang = useCallback((l: Lang) => {
     write('jema-lang', l)
@@ -180,6 +233,15 @@ export function AppProvider({
   const clearWatch = useCallback(() => {
     write('jema-watch', '[]')
     setWatch([])
+  }, [])
+
+  const isFollowing = useCallback((key: string) => followed.includes(key), [followed])
+  const toggleFollow = useCallback((key: string) => {
+    setFollowed((prev) => {
+      const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+      write('jema-follow-committees', JSON.stringify(next))
+      return next
+    })
   }, [])
 
   const setHomeScreen = useCallback((s: Screen) => {
@@ -229,6 +291,9 @@ export function AppProvider({
       isWatched,
       toggleWatch,
       clearWatch,
+      followed,
+      isFollowing,
+      toggleFollow,
       homeScreen,
       setHomeScreen,
       defaultGran,
@@ -236,6 +301,7 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      interactive,
     }),
     [
       lang,
@@ -256,6 +322,9 @@ export function AppProvider({
       isWatched,
       toggleWatch,
       clearWatch,
+      followed,
+      isFollowing,
+      toggleFollow,
       homeScreen,
       setHomeScreen,
       defaultGran,
@@ -263,6 +332,7 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      interactive,
     ],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

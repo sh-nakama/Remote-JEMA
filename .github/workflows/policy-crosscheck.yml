@@ -1,0 +1,45 @@
+name: Monthly Committee Cross-check
+
+# Cross-checks the committees the energy-board.xvps.jp aggregator surfaces against
+# our own catalog and *accumulates* any energy committees we don't yet track into
+# the catalog as discovered / untracked rows. Monthly (only the aggregator's recent
+# feed is visible, so snapshots accumulate coverage over time). No auth. It pulls the
+# catalog, diffs + persists newcomers, posts the report to the webhook, then pushes
+# the updated DB back so the newly-discovered committees stick (and reach the web
+# export). Locally, run `repower policy crosscheck`.
+
+on:
+  schedule:
+    # 22:00 UTC on the 1st = 07:00 JST on the 2nd, monthly.
+    - cron: "0 22 1 * *"
+  workflow_dispatch:
+
+jobs:
+  crosscheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e .
+
+      - name: Pull latest DB from Hugging Face (for the current catalog)
+        run: python -m repower.cli pull-hf
+        continue-on-error: true
+
+      - name: Cross-check energy-board vs our catalog (accumulates discovered rows)
+        run: python -m repower.cli policy crosscheck --notify
+
+      - name: Push updated DB back to Hugging Face
+        run: python -m repower.cli push-hf
+        continue-on-error: true
