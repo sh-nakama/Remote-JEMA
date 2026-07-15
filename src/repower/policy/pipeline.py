@@ -30,6 +30,7 @@ from repower.policy import notebook as nb
 from repower.policy.committees import Committee
 from repower.policy.scraper import _UA, list_materials
 from repower.policy.store import (
+    clear_generation_request,
     committee_or_config,
     get_committee,
     mark_synthesized,
@@ -382,6 +383,9 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             rate_limited = True
             break
         touched_committees.add(item["committee_key"])
+        # Clear any queued dashboard request once the meeting has been processed.
+        if state in ("done", "error"):
+            clear_generation_request(item["committee_key"], item["meeting_num"], db_path=db_path)
         if state == "done":
             done += 1
         elif state == "error":

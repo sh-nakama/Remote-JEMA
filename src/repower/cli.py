@@ -418,19 +418,62 @@ def policy_resume():
 
 @policy_app.command("status")
 def policy_status():
-    """Show per-committee state: latest summarised meeting and pending counts."""
+    """Show per-committee state: enabled flag, priority, latest meeting, pending counts."""
     from collections import Counter
 
-    from repower.policy.committees import COMMITTEES
-    from repower.policy.store import get_committee, pending_meetings, sync_committees
+    from repower.policy.store import list_committees, pending_meetings, sync_committees
 
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'LATEST':>7}{'PENDING':>9}")
-    for c in COMMITTEES:
-        row = get_committee(c.key)
-        latest = row.latest_meeting if row and row.latest_meeting else "-"
-        typer.echo(f"{c.key:<28}{c.source:<6}{str(latest):>7}{pend.get(c.key, 0):>9}")
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}")
+    for c in list_committees():
+        latest = c["latest_meeting"] if c["latest_meeting"] else "-"
+        on = "y" if c["enabled"] else "-"
+        tag = "*" if c["user_added"] else ""
+        typer.echo(
+            f"{c['committee_key'] + tag:<28}{c['source']:<6}{on:>3}{c['priority']:>5}"
+            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}"
+        )
+
+
+@policy_app.command("add")
+def policy_add(
+    key: str = typer.Option(..., help="Unique committee key (ascii id, e.g. ccs_jigyo)"),
+    name_ja: str = typer.Option(..., help="Japanese committee name"),
+    url: str = typer.Option(..., help="Committee homepage URL"),
+    source: str = typer.Option("METI", help="METI | OCCTO | EGC"),
+    name_en: str = typer.Option("", help="English name (optional)"),
+    priority: int = typer.Option(100, help="Summarisation priority (lower = first)"),
+):
+    """Add (or update) a tracked committee from the terminal."""
+    from repower.policy.store import add_committee
+
+    src = source.upper()
+    if src not in {"METI", "OCCTO", "EGC"}:
+        typer.echo("source must be one of METI / OCCTO / EGC", err=True)
+        raise typer.Exit(code=2)
+    created = add_committee(key=key, name_ja=name_ja, name_en=name_en or key,
+                            url=url, source=src, priority=priority)
+    # ASCII-only echo (cp932 consoles choke on Japanese names).
+    typer.echo(f"{'added' if created else 'updated'} committee '{key}' ({src}, priority={priority})")
+
+
+@policy_app.command("enable")
+def policy_enable(key: str = typer.Argument(..., help="Committee key to start tracking")):
+    """Enable tracking of a committee (detection + summarisation)."""
+    from repower.policy.store import set_committee_enabled
+
+    set_committee_enabled(key, True)
+    typer.echo(f"enabled '{key}'")
+
+
+@policy_app.command("disable")
+def policy_disable(key: str = typer.Argument(..., help="Committee key to stop tracking")):
+    """Disable tracking of a committee (kept in the DB, skipped by detect/run)."""
+    from repower.policy.store import set_committee_enabled
+
+    set_committee_enabled(key, False)
+    typer.echo(f"disabled '{key}'")
 
 
 @policy_app.command("track")

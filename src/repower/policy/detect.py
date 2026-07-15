@@ -23,22 +23,23 @@ from repower.policy.scraper import (
 )
 from repower.policy.store import (
     committee_or_config,
-    enabled_committees,
     known_meeting_nums,
     meetings_missing_date,
     record_meeting,
     set_committee_checked,
     set_meeting_dates,
     sync_committees,
+    tracked_committees,
 )
 
 
 def _select_committees(keys: list[str] | None, db_path: str | None):
     """Committees to process: the given *keys* (resolved DB-first so runtime-added
-    ones work), or all tracked (``enabled=1``) committees when *keys* is None."""
+    ones work), or all tracked (``enabled=1``, incl. user-added) committees when
+    *keys* is None. Callers sync beforehand, so no second sync here."""
     if keys:
         return [c for c in (committee_or_config(k, db_path=db_path) for k in keys) if c is not None]
-    return enabled_committees(db_path)
+    return tracked_committees(db_path=db_path, sync=False)
 
 logger = logging.getLogger(__name__)
 
