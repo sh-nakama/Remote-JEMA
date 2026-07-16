@@ -15,7 +15,7 @@ data/policy/
 .ruff_cache/
 .pytest_cache/
 
-# Local-only reference scaffolding (Aurora-branded; never commit — see CLAUDE.md)
+# Local-only reference scaffolding (carries the banned brand; never commit — see CLAUDE.md)
 Reference/
 
 # Local Claude Code dev-server config (machine-specific absolute paths)

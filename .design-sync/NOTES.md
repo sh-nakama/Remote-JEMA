@@ -8,10 +8,11 @@
   project via `finalize_plan` → `write_files`. No `_ds_sync.json` anchor exists,
   so every re-sync re-uploads the full set (cheap — 5 files).
 
-- **No-Aurora hard rule applies to the uploaded files too.** 2026-07-03 sync
-  caught the literal word "Aurora" in `README.md`'s closing note ("No \"Aurora\"
-  anywhere") and neutralised it to "No legacy vendor branding." Re-check
-  `grep -ril aurora docs/design/claude-design/` before every push.
+- **The banned-brand hard rule (CLAUDE.md) applies to the uploaded files too.**
+  2026-07-03 sync caught the literal banned word in `README.md`'s closing note
+  (which restated the rule by name) and neutralised it to "No legacy vendor
+  branding." Re-run the CI brand grep (see ci.yml) over
+  `docs/design/claude-design/` before every push.
 
 - **Two spec copies diverge.** `docs/design/claude-design/JEMA-product-design-spec.md`
   (uploaded, source of truth per README) is newer/larger than the top-level
