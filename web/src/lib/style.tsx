@@ -32,16 +32,6 @@ export function s(css?: string): CSS {
   return out as CSS
 }
 
-/** Merge several inline-style strings / objects left-to-right. */
-export function sx(...parts: Array<string | CSS | false | null | undefined>): CSS {
-  let acc: Record<string, unknown> = {}
-  for (const p of parts) {
-    if (!p) continue
-    acc = { ...acc, ...(typeof p === 'string' ? s(p) : p) }
-  }
-  return acc as CSS
-}
-
 /**
  * Expand a `border: "<width> <style> <color>"` shorthand into longhand
  * borderWidth/borderStyle/borderColor. `Hoverable` often toggles only the border
@@ -76,8 +66,16 @@ type HoverableProps = {
   style?: CSS
   children?: React.ReactNode
 } & Omit<React.HTMLAttributes<HTMLElement>, 'style'>
+// `aria-label` (and every other ARIA/HTML attribute) passes through via the
+// HTMLAttributes rest props.
 
-/** Reproduces `style="BASE" style-hover="HOVER"`. */
+/** Reproduces `style="BASE" style-hover="HOVER"`.
+ *
+ * Accessibility: the exports render clickable *divs/spans*, and swapping them
+ * for real `<button>`s would risk layout drift across dozens of call sites.
+ * Instead, when an `onClick` is present the element gets `role="button"`,
+ * `tabIndex=0`, a pointer cursor (unless the style already sets one) and
+ * Enter/Space keyboard activation — visually identical, keyboard-operable. */
 export function Hoverable({
   as,
   base,
@@ -86,13 +84,19 @@ export function Hoverable({
   children,
   onMouseEnter,
   onMouseLeave,
+  onClick,
+  onKeyDown,
   ...rest
 }: HoverableProps) {
   const [h, setH] = useState(false)
   const El: React.ElementType = as ?? 'div'
+  const merged = expandBorderShorthand({ ...s(base), ...(h && hover ? s(hover) : {}), ...style })
+  if (onClick && merged.cursor == null) merged.cursor = 'pointer'
   return (
     <El
+      {...(onClick ? { role: 'button', tabIndex: 0 } : {})}
       {...rest}
+      onClick={onClick}
       onMouseEnter={(e: React.MouseEvent<HTMLElement>) => {
         setH(true)
         onMouseEnter?.(e)
@@ -101,7 +105,23 @@ export function Hoverable({
         setH(false)
         onMouseLeave?.(e)
       }}
-      style={expandBorderShorthand({ ...s(base), ...(h && hover ? s(hover) : {}), ...style })}
+      onKeyDown={(e: React.KeyboardEvent<HTMLElement>) => {
+        onKeyDown?.(e)
+        // Enter/Space activates the click handler, but only when the key event
+        // originated on this element itself — a keydown bubbling up from a
+        // nested control (input, inner Hoverable) must not also activate the
+        // ancestor, mirroring native <button> default-action semantics.
+        if (
+          onClick &&
+          !e.defaultPrevented &&
+          e.target === e.currentTarget &&
+          (e.key === 'Enter' || e.key === ' ')
+        ) {
+          e.preventDefault() // Space would otherwise scroll the page
+          e.currentTarget.click()
+        }
+      }}
+      style={merged}
     >
       {children}
     </El>

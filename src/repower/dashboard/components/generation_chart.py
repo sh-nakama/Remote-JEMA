@@ -9,15 +9,18 @@ active series value plus a total.
 """
 from __future__ import annotations
 
-import json
+from html import escape
+
 import streamlit.components.v1 as components
+
+from repower.dashboard.components._util import js_json
 
 # Neutral chart accent colour (chart title, tooltip bg, expand button, demand line).
 _ACCENT = "#1B2A4A"
 _ACCENT_RGB = "27,42,74"
 
 
-def render_generation_chart(
+def build_generation_chart_html(
     data: list[dict],
     stack_keys: list[str],
     color_map: dict,
@@ -26,9 +29,9 @@ def render_generation_chart(
     title: str = "Supply",
     height: int = 280,
     y_label: str = "MW",
-):
+) -> str:
     """
-    Render an interactive D3.js stacked-area generation-mix chart.
+    Build the standalone HTML document for the D3.js stacked-area chart.
 
     Parameters
     ----------
@@ -50,10 +53,11 @@ def render_generation_chart(
     y_label : str
         Left Y-axis label.
     """
-    data_json = json.dumps(data, default=str)
-    color_json = json.dumps(color_map)
-    label_json = json.dumps(label_map)
-    stack_json = json.dumps(stack_keys)
+    data_json = js_json(data, default=str)
+    color_json = js_json(color_map)
+    label_json = js_json(label_map)
+    stack_json = js_json(stack_keys)
+    title = escape(str(title))
 
     svg_height = height - 60
 
@@ -123,20 +127,24 @@ def render_generation_chart(
         const colorMap = {color_json};
         const labelMap = {label_json};
         const stackKeys = {stack_json};
-        const demandKey = {json.dumps(demand_key)};
-        const yLabel = {json.dumps(y_label)};
-        const accent = {json.dumps(_ACCENT)};
+        const demandKey = {js_json(demand_key)};
+        const yLabel = {js_json(y_label)};
+        const accent = {js_json(_ACCENT)};
         const svgH = {svg_height};
 
         // Fallback ordinal palette for stack keys missing from colorMap.
         const fallback = d3.scaleOrdinal(d3.schemeTableau10).domain(stackKeys);
         function colorFor(k) {{ return colorMap[k] || fallback(k); }}
 
-        // Parse dates + coerce numerics.
+        // Parse dates + coerce numerics. Missing values stay null (gaps),
+        // instead of collapsing to 0.
         rawData.forEach(d => {{
             d._dt = new Date(d.datetime);
-            stackKeys.forEach(k => {{ d[k] = +(d[k] || 0); }});
-            d[demandKey] = (d[demandKey] != null) ? +d[demandKey] : null;
+            stackKeys.forEach(k => {{
+                d[k] = (d[k] != null && Number.isFinite(+d[k])) ? +d[k] : null;
+            }});
+            d[demandKey] = (d[demandKey] != null && Number.isFinite(+d[demandKey]))
+                ? +d[demandKey] : null;
         }});
         const sorted = rawData.slice().sort((a, b) => a._dt - b._dt);
 
@@ -167,7 +175,10 @@ def render_generation_chart(
             const activeKeys = stackKeys.filter(k => activeStack.has(k));
 
             // Build the stack series for active layers only (re-stack on toggle).
-            const stackGen = d3.stack().keys(activeKeys);
+            // A single missing layer counts as 0 within an otherwise-present row;
+            // rows where every layer is missing are gapped via .defined below.
+            const stackGen = d3.stack().keys(activeKeys)
+                .value((d, k) => (d[k] != null ? d[k] : 0));
             const series = activeKeys.length ? stackGen(sorted) : [];
 
             // Y max = larger of top of stack and (active) demand peak.
@@ -179,7 +190,7 @@ def render_generation_chart(
                 const dMax = d3.max(sorted, d => (d[demandKey] != null ? d[demandKey] : 0)) || 0;
                 maxY = Math.max(maxY, dMax);
             }}
-            if (maxY <= 0) maxY = 100;
+            if (!Number.isFinite(maxY) || maxY <= 0) maxY = 100;
             const y = d3.scaleLinear().domain([0, maxY * 1.08]).nice().range([innerH, 0]);
 
             const svg = d3.select("#chart").append("svg")
@@ -209,6 +220,7 @@ def render_generation_chart(
 
             // ── Stacked areas ───────────────────────────────────────────
             const areaGen = d3.area()
+                .defined(d => activeKeys.some(k => d.data[k] != null))
                 .x(d => x(d.data._dt))
                 .y0(d => y(d[0]))
                 .y1(d => y(d[1]))
@@ -265,9 +277,10 @@ def render_generation_chart(
                 let total = 0;
                 activeKeys.forEach(k => {{
                     const c = colorFor(k);
-                    const val = +(d[k] || 0);
-                    total += val;
-                    html += `<div class="tt-row"><span><span class="tt-swatch" style="background:${{c}}"></span>${{labelMap[k] || k}}</span><span>${{val.toFixed(1)}}</span></div>`;
+                    const val = d[k];
+                    if (val != null) total += val;
+                    const shown = (val != null) ? val.toFixed(1) : '—';
+                    html += `<div class="tt-row"><span><span class="tt-swatch" style="background:${{c}}"></span>${{labelMap[k] || k}}</span><span>${{shown}}</span></div>`;
                 }});
                 if (activeKeys.length > 1) {{
                     html += `<div class="tt-total"><span>Generation total</span><span>${{total.toFixed(1)}}</span></div>`;
@@ -352,5 +365,22 @@ def render_generation_chart(
     </body>
     </html>
     """
+    return html
 
+
+def render_generation_chart(
+    data: list[dict],
+    stack_keys: list[str],
+    color_map: dict,
+    label_map: dict,
+    demand_key: str = "area_demand_mw",
+    title: str = "Supply",
+    height: int = 280,
+    y_label: str = "MW",
+):
+    """Render the generation-mix chart into the Streamlit app (see build_generation_chart_html)."""
+    html = build_generation_chart_html(
+        data, stack_keys, color_map, label_map,
+        demand_key=demand_key, title=title, height=height, y_label=y_label,
+    )
     components.html(html, height=height, scrolling=False)

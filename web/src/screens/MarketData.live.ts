@@ -6,8 +6,13 @@
 // so the render code in MarketData.tsx is unchanged.
 
 import { useEffect, useState } from 'react'
+import { fmtDate } from '../lib/chartkit'
 import { getSnapshot } from '../lib/data'
 import type { SupplyRecord, WholesaleSnapshot, WholesaleStats } from '../lib/types'
+
+// fmtDate used to live here; it moved to the shared chartkit module. Re-exported
+// so existing importers keep working.
+export { fmtDate }
 
 export type Gran = 'Native' | 'Daily' | 'Weekly' | 'Monthly'
 export type Range = '7D' | '30D' | '60D' | '1Y'
@@ -140,6 +145,8 @@ export interface BalancingLive {
   rows: Record<string, BalRow>
   procTot: number
   avgPrice: number | null
+  /** Latest stats-window end date (ISO) across products/areas — caption "as of". */
+  end: string | null
 }
 
 // Frontend balProducts order ↔ exporter product codes.
@@ -149,7 +156,7 @@ const BAL_AREAS = ['hokkaido', 'tohoku', 'tepco', 'chubu', 'hokuriku', 'kansai',
 /** National balancing KPIs per product: summed procured/required across the 9 areas,
  * mean clearing price. (需給調整市場 is procured nationwide.) */
 export function useBalancingLive(): BalancingLive {
-  const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, procTot: 0, avgPrice: null })
+  const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, procTot: 0, avgPrice: null, end: null })
   useEffect(() => {
     let alive = true
     const jobs: Promise<BalancingStats | null>[] = []
@@ -161,6 +168,8 @@ export function useBalancingLive(): BalancingLive {
         if (!alive) return
         const rows: Record<string, BalRow> = {}
         let procTot = 0
+        let end: string | null = null
+        for (const s of all) if (s?.end && (!end || s.end > end)) end = s.end
         for (const code of BAL_CODES) {
           let proc = 0
           let off = 0
@@ -188,7 +197,7 @@ export function useBalancingLive(): BalancingLive {
           }
         }
         const avgPrice = wDen > 0 ? wNum / wDen : null
-        setState({ ready: true, rows, procTot, avgPrice })
+        setState({ ready: true, rows, procTot, avgPrice, end })
       })
       .catch(() => {})
     return () => {
@@ -217,19 +226,23 @@ export interface TielineSnapshot {
 export interface TielineLive {
   ready: boolean
   byKey: Record<string, { util: number[]; ttc: number | null; utilNow: number | null }>
+  /** Snapshot day (ISO, latest across lines) — caption "as of". */
+  date: string | null
 }
 
 /** Latest-day 48-slot reserved/TTC utilisation + TTC per mapped interconnector line.
  * Lines with no clean mapping (combined-zone pairs) are absent → caller falls back
  * to the fixture. Utilisation is reserved/TTC (real), typically low (uncongested). */
 export function useTielineLive(market = 'DAM'): TielineLive {
-  const [state, setState] = useState<TielineLive>({ ready: false, byKey: {} })
+  const [state, setState] = useState<TielineLive>({ ready: false, byKey: {}, date: null })
   useEffect(() => {
     let alive = true
     getSnapshot<TielineSnapshot>(`tieline/${market}.json`)
       .then((snap) => {
         if (!alive) return
         const byKey: TielineLive['byKey'] = {}
+        let date: string | null = null
+        for (const ln of snap.lines) if (ln.date && (!date || ln.date > date)) date = ln.date
         for (const ln of snap.lines) {
           // Skip unmapped pairs and lines with no forward TTC (capacity is on the
           // reverse leg) — those fall back to the fixture.
@@ -240,10 +253,10 @@ export function useTielineLive(market = 'DAM'): TielineLive {
             utilNow: ln.util_now,
           }
         }
-        setState({ ready: true, byKey })
+        setState({ ready: true, byKey, date })
       })
       .catch(() => {
-        if (alive) setState({ ready: false, byKey: {} })
+        if (alive) setState({ ready: false, byKey: {}, date: null })
       })
     return () => {
       alive = false
@@ -275,6 +288,8 @@ export interface DriversLive {
   ncl: number[]
   fx: number[]
   corr: { jkm: number | null; ncl: number | null; fx: number | null }
+  /** Last close date of the series window (ISO) — caption "as of". */
+  end: string | null
 }
 
 // chronological (oldest→newest, possibly with null gaps) → gap-free newest-first
@@ -301,7 +316,7 @@ export function useDriversLive(): DriversLive {
     }
   }, [])
   if (!snap || !snap.dates || snap.dates.length === 0) {
-    return { ready: false, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null } }
+    return { ready: false, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null }, end: null }
   }
   return {
     ready: true,
@@ -310,6 +325,7 @@ export function useDriversLive(): DriversLive {
     ncl: toNewestFirst(snap.ncl),
     fx: toNewestFirst(snap.fx),
     corr: snap.corr || { jkm: null, ncl: null, fx: null },
+    end: snap.end ?? snap.dates[snap.dates.length - 1] ?? null,
   }
 }
 
@@ -324,13 +340,6 @@ const PERIODS: Record<Gran, Record<Range, number>> = {
 // denser, oscillating line than the aggregated levels instead of aliasing into a
 // coarse daily-looking shape when a wide range is downsampled to a single line.
 const MAX_POINTS = 720
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-export function fmtDate(iso: string): string {
-  const p = iso.slice(0, 10).split('-')
-  if (p.length < 3) return iso
-  return MONTHS[Number(p[1]) - 1] + ' ' + Number(p[2])
-}
 
 export interface Windowed {
   avg: number[] // oldest -> newest (plot order)

@@ -466,7 +466,7 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
         return is_new
 
 
-def set_committee_checked(key: str, latest_online: int | None, db_path: str | None = None) -> None:
+def set_committee_checked(key: str, db_path: str | None = None) -> None:
     """Record that a detection pass ran (used for the dashboard / freshness)."""
     with session_scope(db_path) as session:
         row = session.get(PolicyCommittee, key)

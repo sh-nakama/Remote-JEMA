@@ -6,15 +6,18 @@ interactive toggle via legend clicks.
 """
 from __future__ import annotations
 
-import json
+from html import escape
+
 import streamlit.components.v1 as components
+
+from repower.dashboard.components._util import js_json
 
 # Neutral chart accent colour (chart title, tooltip bg, expand button, price band).
 _ACCENT = "#1B2A4A"
 _ACCENT_RGB = "27,42,74"
 
 
-def render_price_chart(
+def build_price_chart_html(
     data: list[dict],
     active_metrics: list[str],
     color_map: dict[str, str],
@@ -23,9 +26,9 @@ def render_price_chart(
     height: int = 280,
     subtitle: str = "¥/kW per 30min",
     y_label: str = "¥/kW·30min",
-):
+) -> str:
     """
-    Render an interactive D3.js line chart for price metrics.
+    Build the standalone HTML document for the D3.js price line chart.
 
     Parameters
     ----------
@@ -46,10 +49,13 @@ def render_price_chart(
     y_label : str
         Y-axis unit label.
     """
-    data_json = json.dumps(data, default=str)
-    color_json = json.dumps(color_map)
-    label_json = json.dumps(label_map)
-    active_json = json.dumps(active_metrics)
+    data_json = js_json(data, default=str)
+    color_json = js_json(color_map)
+    label_json = js_json(label_map)
+    active_json = js_json(active_metrics)
+    y_label_json = js_json(y_label)
+    title = escape(str(title))
+    subtitle = escape(str(subtitle))
 
     svg_height = height - 60
 
@@ -121,10 +127,14 @@ def render_price_chart(
         const allMetrics = {active_json};
         const svgH = {svg_height};
         const accent = "{_ACCENT}";
+        const yLabel = {y_label_json};
 
         rawData.forEach(d => {{
             d._dt = new Date(d.datetime);
-            allMetrics.forEach(m => {{ d[m] = +(d[m] || 0); }});
+            // Missing values stay null (gaps), instead of collapsing to 0.
+            allMetrics.forEach(m => {{
+                d[m] = (d[m] != null && Number.isFinite(+d[m])) ? +d[m] : null;
+            }});
         }});
         rawData.sort((a,b) => a._dt - b._dt);
 
@@ -150,9 +160,10 @@ def render_price_chart(
                 .range([0, width]);
 
             const active = allMetrics.filter(m => activeMetrics.has(m));
-            const yMax = active.length > 0
+            let yMax = active.length > 0
                 ? d3.max(rawData, d => d3.max(active, m => d[m])) * 1.1
                 : 10;
+            if (!Number.isFinite(yMax) || yMax <= 0) yMax = 10;
             const y = d3.scaleLinear().domain([0, yMax]).nice().range([innerH, 0]);
 
             const svg = d3.select("#chart").append("svg")
@@ -178,11 +189,12 @@ def render_price_chart(
             svg.append("text").attr("class", "y-label")
                 .attr("transform", "rotate(-90)")
                 .attr("y", -margin.left + 12).attr("x", -innerH / 2)
-                .attr("text-anchor", "middle").text("{y_label}");
+                .attr("text-anchor", "middle").text(yLabel);
 
             // ── Shaded band between max and min ─────────────────────
             if (activeMetrics.has("price_max") && activeMetrics.has("price_min")) {{
                 const band = d3.area()
+                    .defined(d => d.price_min != null && d.price_max != null)
                     .x(d => x(d._dt))
                     .y0(d => y(d.price_min))
                     .y1(d => y(d.price_max))
@@ -297,5 +309,22 @@ def render_price_chart(
     </body>
     </html>
     """
+    return html
 
+
+def render_price_chart(
+    data: list[dict],
+    active_metrics: list[str],
+    color_map: dict[str, str],
+    label_map: dict[str, str],
+    title: str = "Price",
+    height: int = 280,
+    subtitle: str = "¥/kW per 30min",
+    y_label: str = "¥/kW·30min",
+):
+    """Render the price chart into the Streamlit app (see build_price_chart_html)."""
+    html = build_price_chart_html(
+        data, active_metrics, color_map, label_map,
+        title=title, height=height, subtitle=subtitle, y_label=y_label,
+    )
     components.html(html, height=height, scrolling=False)

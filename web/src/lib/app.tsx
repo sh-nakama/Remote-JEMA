@@ -188,6 +188,12 @@ export function AppProvider({
     }
   }, [])
 
+  // Keep <html lang> in sync with the UI language so screen readers pick the
+  // right voice and the browser applies the right typography/line-breaking.
+  useEffect(() => {
+    document.documentElement.lang = lang
+  }, [lang])
+
   const setLang = useCallback((l: Lang) => {
     write('jema-lang', l)
     setLangS(l)

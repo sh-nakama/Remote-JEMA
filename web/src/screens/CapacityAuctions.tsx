@@ -2,6 +2,8 @@
 import { useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
+import { FreshnessChip } from '../lib/freshness'
+import { segBase } from '../lib/chartkit'
 import { maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
 import { downloadCsv } from '../lib/download'
@@ -39,20 +41,6 @@ export function CapacityAuctionsScreen() {
   }
   const tRow = () => toast('Full OCCTO publication (per-project detail) — not in this prototype · 公表資料の詳細は対象外')
 
-  // Segmented-control button style
-  const segBase = (on: boolean) =>
-    ({
-      padding: '4px 13px',
-      borderRadius: 999,
-      fontSize: 12,
-      fontWeight: 600,
-      cursor: 'pointer',
-      background: on ? 'var(--ac)' : 'transparent',
-      color: on ? '#FFFFFF' : 'var(--mut)',
-      transition: 'all .15s',
-      whiteSpace: 'nowrap',
-    }) as React.CSSProperties
-
   // Live curated capacity data (fixtures as loading fallback).
   const cap = useCapacityLive()
   const maSrc = cap.ready ? cap.ma : maData
@@ -83,10 +71,25 @@ export function CapacityAuctionsScreen() {
   }
   const CH_Y0 = 270
   const CH_TOP = 14
-  // Axis tops out at 16,000 so the FY2029 cap-clearing zones (¥15,112) sit below
-  // the top gridline rather than overflowing it. Gridlines/labels below are
-  // positioned to match (15,000 -> y30, 10,000 -> y110, 5,000 -> y190).
-  const CH_VMAX = 16000
+  // Y-axis ceiling derived from the plotted prices instead of a hardcoded 16,000.
+  // The hi-fi geometry keeps gridlines at fixed y (190/110/30) worth 1·/2·/3·step,
+  // with the axis topping out at 3.2·step — so step 5,000 reproduces the export's
+  // vmax 16,000 exactly (FY2029's ¥15,112 zonal clears sit just under the top).
+  // Recomputing the step keeps future higher-priced rounds on-axis; the ladder
+  // fallback (and the empty-data default) still lands on the original 5,000/16,000.
+  const CH_STEP_LADDER = [500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000]
+  const chDataMax = Math.max(
+    0,
+    ...maSrc
+      .slice(0, 6)
+      .flatMap((m) => [numOf(m.natl), numOf(m.hok), numOf(m.kyu)])
+      .filter((n) => Number.isFinite(n)),
+  )
+  const chStep =
+    chDataMax > 0
+      ? CH_STEP_LADDER.find((st) => st * 3.2 >= chDataMax) ?? Math.ceil(chDataMax / 3.2 / 5000) * 5000
+      : 5000
+  const CH_VMAX = chStep * 3.2
   const yOf = (v: number) => CH_TOP + ((CH_VMAX - v) / CH_VMAX) * (CH_Y0 - CH_TOP)
   // Fixed x-slots per delivery-year column. Zonal bars are drawn wherever the row
   // carries distinct Hokkaido/Kyushu prices (FY2025+); FY2024 priced uniformly
@@ -262,6 +265,7 @@ export function CapacityAuctionsScreen() {
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>`} />Data freshness · データ鮮度
           </div>
           <div style={s("font-size:12px;color:rgba(255,255,255,.78);margin-top:6px")}>Last publication <span style={s("font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1")}>2026-06-27</span></div>
+          <FreshnessChip inverse style={{ marginTop: 2 }} />
           <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>OCCTO auction results · event-driven, not daily</div>
           <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Refresh · 更新
@@ -281,7 +285,7 @@ export function CapacityAuctionsScreen() {
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
           </div>
           <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
             {dark && (
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />
             )}
@@ -289,7 +293,7 @@ export function CapacityAuctionsScreen() {
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />
             )}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif}>
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
           </Hoverable>
@@ -383,9 +387,9 @@ export function CapacityAuctionsScreen() {
                       <line x1="46" y1="270" x2="944" y2="270" stroke="currentColor" strokeWidth="1"></line>
                     </g>
                     <g style={s('color:var(--mut)')}>
-                      <text x="38" y="34" textAnchor="end" fontSize="11" fill="currentColor">15,000</text>
-                      <text x="38" y="114" textAnchor="end" fontSize="11" fill="currentColor">10,000</text>
-                      <text x="38" y="194" textAnchor="end" fontSize="11" fill="currentColor">5,000</text>
+                      <text x="38" y="34" textAnchor="end" fontSize="11" fill="currentColor">{(chStep * 3).toLocaleString('en-US')}</text>
+                      <text x="38" y="114" textAnchor="end" fontSize="11" fill="currentColor">{(chStep * 2).toLocaleString('en-US')}</text>
+                      <text x="38" y="194" textAnchor="end" fontSize="11" fill="currentColor">{chStep.toLocaleString('en-US')}</text>
                       <text x="120.8" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2024</text>
                       <text x="270.5" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2025</text>
                       <text x="420.2" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2026</text>

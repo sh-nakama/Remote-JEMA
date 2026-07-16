@@ -977,7 +977,7 @@ def _render_committee_discovery(lang: str, db: str) -> None:
     if st.button(T("policy_search_btn", lang), key="policy_discover_btn"):
         try:
             with st.spinner(T("policy_searching", lang)):
-                cands = discover.discover_committees(q, db_path=db)
+                cands = discover.search_committees(q, db_path=db)
             st.session_state["policy_discover_results"] = [c.__dict__ for c in cands]
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
@@ -995,9 +995,15 @@ def _render_committee_discovery(lang: str, db: str) -> None:
                 if c["already_tracked"]:
                     st.caption(T("policy_already_tracked", lang))
                 elif st.button(T("policy_track_btn", lang), key=f"policy_track_{i}"):
-                    store.add_committee(
-                        key=c["key"], name_ja=c["name_ja"], name_en=c["name_en"] or c["key"],
-                        url=c["url"], source=c["source"], db_path=db,
+                    # add_user_committee (not add_committee): it dedups by URL and
+                    # suffixes colliding keys, so tracking a second committee whose
+                    # guessed key collides (e.g. two EGC pages) can't silently
+                    # overwrite the first row.
+                    store.add_user_committee(
+                        {"key": c["key"], "name_ja": c["name_ja"],
+                         "name_en": c["name_en"] or c["key"],
+                         "url": c["url"], "source": c["source"]},
+                        db_path=db,
                     )
                     st.success(T("policy_added", lang, name=c["name_ja"]))
                     st.session_state.pop("policy_discover_results", None)

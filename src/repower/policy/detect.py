@@ -83,7 +83,7 @@ def detect(
 
         if disc.status != "ok":
             if disc.status == "unchanged" and not dry_run:
-                set_committee_checked(c.key, known_latest, db_path=db_path)
+                set_committee_checked(c.key, db_path=db_path)
             results.append(res)
             logger.info("policy detect %-26s %s", c.key, disc.status)
             continue
@@ -107,7 +107,7 @@ def detect(
                 res["new"] += 1
 
         if not dry_run:
-            set_committee_checked(c.key, res["latest_online"], db_path=db_path)
+            set_committee_checked(c.key, db_path=db_path)
 
         results.append(res)
         logger.info(

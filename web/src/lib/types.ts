@@ -73,3 +73,36 @@ export interface Manifest {
   sources: Record<string, string | null>
   datasets: Record<string, { files: number; bytes: number }>
 }
+
+/** Structured result of the auth-free catch-up refresh job. */
+export interface PolicyJobResult {
+  new_meetings: number
+  dated: number
+  upcoming: number | null
+  discovered: number
+  pending: number
+  note: string
+}
+
+/** Status of the single-flight background policy job served by the local
+ * backend (`repower web-api`) at GET/POST `/api/policy/job` — mirrors the
+ * `_job` dict in `src/repower/web_api.py`. */
+export interface PolicyJob {
+  /** 'catchup' = in-process auth-free refresh; 'command' = `repower policy` subprocess. */
+  kind: 'catchup' | 'command' | null
+  /** Human label (e.g. 'run', 'backfill', 'catchup'). */
+  cmd: string | null
+  /** Policy CLI argv (command jobs only). */
+  argv: string[] | null
+  state: 'idle' | 'running' | 'done' | 'error'
+  /** UTC ISO timestamps. */
+  started_at: string | null
+  finished_at: string | null
+  /** Subprocess exit code (command jobs only). */
+  exit_code: number | null
+  /** Structured result (catchup jobs only). */
+  result: PolicyJobResult | null
+  /** Stdout tail (command jobs only). */
+  output: string[]
+  error: string | null
+}

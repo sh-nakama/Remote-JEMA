@@ -390,7 +390,8 @@ def _occto_base(committee: Committee) -> str:
     return re.sub(r"index\.html$", "", committee.url).rstrip("/")
 
 
-def probe_occto_latest(committee: Committee, *, start_from: int | None = None) -> int | None:
+def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
+                       max_probes: int | None = None) -> int | None:
     """Find the latest OCCTO meeting by a linear upward-window probe.
 
     Replaces the reference's binary search, which mis-fires when meeting pages are
@@ -398,39 +399,52 @@ def probe_occto_latest(committee: Committee, *, start_from: int | None = None) -
     Scans upward from ``start_from + 1`` (the last known meeting) and stops after
     ``PROBE_GAP_TOLERANCE`` consecutive misses — tolerating small gaps while
     staying cheap on re-runs (only a few probes past the known frontier).
+
+    ``max_probes`` optionally bounds the number of page probes (each costs a
+    request + a polite ~1s sleep) — used by interactive previews; detection
+    passes None and keeps the full scan.
     """
     base = _occto_base(committee)
     cap = (committee.max_meeting or 200) + PROBE_GAP_TOLERANCE
     cap = min(cap, PROBE_HARD_CAP)
     latest = start_from
     misses = 0
+    probes = 0
     n = max(1, (start_from or 0) + 1)
     while n <= cap and misses < PROBE_GAP_TOLERANCE:
+        if max_probes is not None and probes >= max_probes:
+            break
         if _exists(f"{base}/{n}.html"):
             latest = n
             misses = 0
         else:
             misses += 1
         n += 1
+        probes += 1
         time.sleep(POLITE_DELAY)
     return latest
 
 
 # ── Discovery (which meetings exist) ─────────────────────────────────────────
 def discover_meetings(committee: Committee, *, db_path: str | None = None,
-                      known_latest: int | None = None) -> Discovery:
+                      known_latest: int | None = None, force: bool = False,
+                      max_probes: int | None = None) -> Discovery:
     """Return the meeting numbers currently available online for *committee*.
 
     METI/EGC read a single (cached) index; OCCTO probes by number from
-    ``known_latest``. A 304 on the METI/EGC index short-circuits to ``unchanged``.
+    ``known_latest``. A 304 on the METI/EGC index short-circuits to ``unchanged``
+    — pass ``force=True`` when a body is always needed (e.g. probe previews of a
+    URL that is already in the cache). ``max_probes`` bounds the OCCTO scan for
+    interactive callers; detection passes neither and keeps the cheap behaviour.
     """
     if committee.is_occto:
-        latest = probe_occto_latest(committee, start_from=known_latest)
+        latest = probe_occto_latest(committee, start_from=known_latest,
+                                    max_probes=max_probes)
         if latest is None:
             return Discovery("error", [])
         return Discovery("ok", list(range(latest, 0, -1)))
 
-    status, content = _fetch(committee.url, db_path=db_path)
+    status, content = _fetch(committee.url, db_path=db_path, force=force)
     if status == "not_modified":
         return Discovery("unchanged", [])
 

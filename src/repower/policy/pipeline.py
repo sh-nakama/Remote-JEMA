@@ -308,6 +308,17 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
             "policy synthesis for %s near source cap (%d/%d) — archive roll-up needed",
             committee.key, src_count, NOTEBOOKLM_SOURCE_CAP,
         )
+    if src_count >= NOTEBOOKLM_SOURCE_CAP and new_meetings:
+        # Hard gate: at the cap, adding would only fail/duplicate on the NotebookLM
+        # side. Leave these meetings unsynthesized (synth_done stays unset, so a
+        # future archive roll-up can fold them in) but still regenerate the report
+        # below so the synthesis keeps refreshing from the existing sources.
+        logger.error(
+            "policy synthesis for %s AT source cap (%d/%d) — %d new briefing(s) NOT "
+            "added; archive roll-up required",
+            committee.key, src_count, NOTEBOOKLM_SOURCE_CAP, len(new_meetings),
+        )
+        new_meetings = []
 
     work = _scratch() / committee.key / "synthesis"
     work.mkdir(parents=True, exist_ok=True)

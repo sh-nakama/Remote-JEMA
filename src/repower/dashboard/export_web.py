@@ -21,7 +21,7 @@ import json
 import logging
 import math
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 # Silence Streamlit's "No runtime found" cache warnings when the cached loaders
@@ -884,7 +884,7 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
 
     manifest: dict = {
         "schema": SCHEMA_VERSION,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "anchor": anchor.isoformat(),
         "areas": AREAS,
         "levels": LEVELS,
