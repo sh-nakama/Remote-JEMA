@@ -43,12 +43,23 @@ export function FreshnessChip({ inverse, style }: { inverse?: boolean; style?: C
   const { data, loading, error } = useManifest()
   // Fixture-mode guard: no manifest → no chip (never a broken/frozen date).
   if (loading || error || !data || !data.generated_at) return null
-  const t = Date.parse(data.generated_at)
+  const sources = data.sources || {}
+  // The charts show market *prices*, so the honest "through" date is the latest
+  // price date — NOT `generated_at`, which only says when the export ran. (An
+  // export can run today yet still only reach prices published a few days ago.)
+  const dataDate = sources.area_price || sources.system_price || data.generated_at.slice(0, 10)
+  const t = Date.parse(dataDate.length === 10 ? dataDate + 'T00:00:00Z' : dataDate)
   if (!Number.isFinite(t)) return null
   const stale = Date.now() - t > STALE_MS
-  const label = lang === 'ja' ? 'データ基準' : 'Data as of'
-  const value = fmtStamp(data.generated_at)
-  const title = `${label} ${data.generated_at}`
+  const label = lang === 'ja' ? 'データ最終' : 'Data through'
+  const value = dataDate
+  const title = [
+    sources.area_price ? `Prices through ${sources.area_price}` : null,
+    sources.supply ? `supply through ${sources.supply}` : null,
+    `exported ${fmtStamp(data.generated_at)}`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   if (inverse) {
     // On the navy sidebar cards: same typography as the line it replaces.

@@ -11,7 +11,7 @@ import { downloadCsv } from '../lib/download'
 type View = 'main' | 'ltda'
 
 export function CapacityAuctionsScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, refreshData, refreshing } = useApp()
   const [view, setView] = useState<View>('main')
 
   const L = lang
@@ -23,7 +23,10 @@ export function CapacityAuctionsScreen() {
   const goPolicy = () => setScreen('policy')
 
   // Placeholder / toast handlers
-  const tRefresh = () => toast('Checked for new publications — none since 2026-06-27 · 新規公表なし')
+  const tRefresh = () => {
+    refreshData()
+    toast('Reloaded latest data · 最新データを再取得しました')
+  }
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
   const tExport = () => {
     const rows = maSrc.map((m) => ({
@@ -268,7 +271,7 @@ export function CapacityAuctionsScreen() {
           <FreshnessChip inverse style={{ marginTop: 2 }} />
           <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>OCCTO auction results · event-driven, not daily</div>
           <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Refresh · 更新
+            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>Refresh · 更新
           </Hoverable>
         </div>
       </div>

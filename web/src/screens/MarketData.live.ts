@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react'
 import { fmtDate } from '../lib/chartkit'
-import { getSnapshot } from '../lib/data'
+import { getSnapshot, useDataNonce } from '../lib/data'
 import type { SupplyRecord, WholesaleSnapshot, WholesaleStats } from '../lib/types'
 
 // fmtDate used to live here; it moved to the shared chartkit module. Re-exported
@@ -35,6 +35,7 @@ export interface LiveArea {
   supTherm: number[] // coal + lng + oil + thermal_other
   supSolar: number[] // solar + wind
   supDemand: number[] // area demand
+  supDt: string[] // datetimes aligned to the supply arrays
 }
 
 export interface LiveState {
@@ -55,6 +56,7 @@ const nn = (x: number | null | undefined): number => (x == null ? NaN : x)
  */
 export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState {
   const keysCsv = [...selectedKeys].sort().join(',')
+  const nonce = useDataNonce()
   const [state, setState] = useState<LiveState>({ areas: {}, loading: false, ready: false })
 
   useEffect(() => {
@@ -66,51 +68,61 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
     let alive = true
     setState((s) => ({ ...s, loading: true }))
     Promise.all(
-      keys.map(async (key) => {
-        const [snap, daily, stats] = await Promise.all([
-          getSnapshot<WholesaleSnapshot>(`wholesale/${key}/${gran}.json`),
-          gran === 'Daily'
-            ? null
-            : getSnapshot<WholesaleSnapshot>(`wholesale/${key}/Daily.json`).catch(() => null),
-          getSnapshot<WholesaleStats>(`wholesale_stats/${key}.json`).catch(() => null),
-        ])
-        const price = snap.price
-        const dsrc = (daily ?? snap).price
-        const sup = snap.supply
-        const g = (r: SupplyRecord, k: keyof SupplyRecord): number => {
-          const v = r[k]
-          return typeof v === 'number' && Number.isFinite(v) ? v : 0
+      keys.map(async (key): Promise<readonly [string, LiveArea] | null> => {
+        try {
+          const [snap, daily, stats] = await Promise.all([
+            getSnapshot<WholesaleSnapshot>(`wholesale/${key}/${gran}.json`),
+            gran === 'Daily'
+              ? null
+              : getSnapshot<WholesaleSnapshot>(`wholesale/${key}/Daily.json`).catch(() => null),
+            getSnapshot<WholesaleStats>(`wholesale_stats/${key}.json`).catch(() => null),
+          ])
+          const price = snap.price
+          const dsrc = (daily ?? snap).price
+          const sup = snap.supply
+          const g = (r: SupplyRecord, k: keyof SupplyRecord): number => {
+            const v = r[k]
+            return typeof v === 'number' && Number.isFinite(v) ? v : 0
+          }
+          const la: LiveArea = {
+            key,
+            avg: rev(price.map((p) => nn(p.price_avg))),
+            max: rev(price.map((p) => nn(p.price_max ?? p.price_avg))),
+            min: rev(price.map((p) => nn(p.price_min ?? p.price_avg))),
+            dt: rev(price.map((p) => p.datetime)),
+            dAvg: rev(dsrc.map((p) => nn(p.price_avg))),
+            dMax: rev(dsrc.map((p) => nn(p.price_max ?? p.price_avg))),
+            dDt: rev(dsrc.map((p) => p.datetime)),
+            peakMW: stats?.peak_demand_mw ?? null,
+            avgPrice: stats?.avg_price ?? null,
+            latest: price.length ? nn(price[price.length - 1].price_avg) : null,
+            supBase: rev(sup.map((r) => g(r, 'nuclear') + g(r, 'hydro') + g(r, 'geothermal') + g(r, 'biomass'))),
+            supTherm: rev(sup.map((r) => g(r, 'coal') + g(r, 'lng') + g(r, 'oil') + g(r, 'thermal_other'))),
+            supSolar: rev(sup.map((r) => g(r, 'solar_actual') + g(r, 'wind_actual'))),
+            supDemand: rev(sup.map((r) => g(r, 'area_demand_mw'))),
+            supDt: rev(sup.map((r) => r.datetime)),
+          }
+          return [key, la] as const
+        } catch {
+          // One area's snapshot failing (missing file or invalid JSON — e.g. a
+          // stale export with bare `NaN` tokens) must NOT reject the whole batch
+          // and blank every area to fixtures. Skip it; that area alone falls back.
+          return null
         }
-        const la: LiveArea = {
-          key,
-          avg: rev(price.map((p) => nn(p.price_avg))),
-          max: rev(price.map((p) => nn(p.price_max ?? p.price_avg))),
-          min: rev(price.map((p) => nn(p.price_min ?? p.price_avg))),
-          dt: rev(price.map((p) => p.datetime)),
-          dAvg: rev(dsrc.map((p) => nn(p.price_avg))),
-          dMax: rev(dsrc.map((p) => nn(p.price_max ?? p.price_avg))),
-          dDt: rev(dsrc.map((p) => p.datetime)),
-          peakMW: stats?.peak_demand_mw ?? null,
-          avgPrice: stats?.avg_price ?? null,
-          latest: price.length ? nn(price[price.length - 1].price_avg) : null,
-          supBase: rev(sup.map((r) => g(r, 'nuclear') + g(r, 'hydro') + g(r, 'geothermal') + g(r, 'biomass'))),
-          supTherm: rev(sup.map((r) => g(r, 'coal') + g(r, 'lng') + g(r, 'oil') + g(r, 'thermal_other'))),
-          supSolar: rev(sup.map((r) => g(r, 'solar_actual') + g(r, 'wind_actual'))),
-          supDemand: rev(sup.map((r) => g(r, 'area_demand_mw'))),
-        }
-        return [key, la] as const
       }),
     )
       .then((entries) => {
-        if (alive) setState({ areas: Object.fromEntries(entries), loading: false, ready: true })
+        if (!alive) return
+        const ok = entries.filter((e): e is readonly [string, LiveArea] => e !== null)
+        setState({ areas: Object.fromEntries(ok), loading: false, ready: true })
       })
       .catch(() => {
-        if (alive) setState((s) => ({ ...s, loading: false }))
+        if (alive) setState((s) => ({ ...s, loading: false, ready: true }))
       })
     return () => {
       alive = false
     }
-  }, [keysCsv, gran])
+  }, [keysCsv, gran, nonce])
 
   return state
 }
@@ -156,6 +168,7 @@ const BAL_AREAS = ['hokkaido', 'tohoku', 'tepco', 'chubu', 'hokuriku', 'kansai',
 /** National balancing KPIs per product: summed procured/required across the 9 areas,
  * mean clearing price. (需給調整市場 is procured nationwide.) */
 export function useBalancingLive(): BalancingLive {
+  const nonce = useDataNonce()
   const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, procTot: 0, avgPrice: null, end: null })
   useEffect(() => {
     let alive = true
@@ -203,7 +216,7 @@ export function useBalancingLive(): BalancingLive {
     return () => {
       alive = false
     }
-  }, [])
+  }, [nonce])
   return state
 }
 
@@ -234,6 +247,7 @@ export interface TielineLive {
  * Lines with no clean mapping (combined-zone pairs) are absent → caller falls back
  * to the fixture. Utilisation is reserved/TTC (real), typically low (uncongested). */
 export function useTielineLive(market = 'DAM'): TielineLive {
+  const nonce = useDataNonce()
   const [state, setState] = useState<TielineLive>({ ready: false, byKey: {}, date: null })
   useEffect(() => {
     let alive = true
@@ -261,7 +275,7 @@ export function useTielineLive(market = 'DAM'): TielineLive {
     return () => {
       alive = false
     }
-  }, [market])
+  }, [market, nonce])
   return state
 }
 
@@ -305,6 +319,7 @@ function toNewestFirst(a: (number | null)[]): number[] {
 }
 
 export function useDriversLive(): DriversLive {
+  const nonce = useDataNonce()
   const [snap, setSnap] = useState<DriversSnapshot | null>(null)
   useEffect(() => {
     let alive = true
@@ -314,7 +329,7 @@ export function useDriversLive(): DriversLive {
     return () => {
       alive = false
     }
-  }, [])
+  }, [nonce])
   if (!snap || !snap.dates || snap.dates.length === 0) {
     return { ready: false, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null }, end: null }
   }
@@ -345,6 +360,7 @@ export interface Windowed {
   avg: number[] // oldest -> newest (plot order)
   max: number[]
   min: number[]
+  dt: string[] // raw ISO datetimes aligned to avg/max/min (for hover)
   labels: [string, string, string] // start, mid, end
 }
 
@@ -369,7 +385,7 @@ export function windowLive(la: LiveArea, gran: Gran, range: Range): Windowed {
     n ? fmtDate(dts[Math.floor((n - 1) / 2)]) : '',
     n ? fmtDate(dts[n - 1]) : '',
   ]
-  return { avg, max, min, labels }
+  return { avg, max, min, dt: dts, labels }
 }
 
 export interface SupplyWindow {
@@ -378,6 +394,7 @@ export interface SupplyWindow {
   solar: number[]
   other: number[] // residual to demand (net imports + storage), >= 0
   demand: number[]
+  dt: string[] // raw ISO datetimes aligned to the windowed arrays (for hover)
   ymax: number
 }
 
@@ -395,10 +412,11 @@ export function windowSupply(la: LiveArea, gran: Gran, range: Range): SupplyWind
   const thermal = pick(la.supTherm)
   const solar = pick(la.supSolar)
   const demand = pick(la.supDemand)
+  const dt = order.map((i) => la.supDt[i])
   const other = demand.map((d, i) => Math.max(0, d - baseload[i] - thermal[i] - solar[i]))
   let ymax = 1
   for (let i = 0; i < demand.length; i++) {
     ymax = Math.max(ymax, demand[i], baseload[i] + thermal[i] + solar[i] + other[i])
   }
-  return { baseload, thermal, solar, other, demand, ymax: ymax * 1.08 }
+  return { baseload, thermal, solar, other, demand, dt, ymax: ymax * 1.08 }
 }

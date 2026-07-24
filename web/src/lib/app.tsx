@@ -8,6 +8,7 @@ import React, {
   useState,
 } from 'react'
 import type { AreaKey, Level } from './types'
+import { refreshSnapshots } from './data'
 
 /**
  * App-wide state mirroring the exports' DCLogic: theme + lang (persisted to
@@ -89,6 +90,14 @@ export interface AppState {
    * write controls (track committees) and the Run catch-up button. False on the
    * static GitHub Pages deployment, which is read-only. */
   interactive: boolean
+
+  /** Clear the snapshot cache and refetch every data hook — the real work behind
+   * the "Refresh" buttons (picks up a freshly re-run `repower export-web`). */
+  refreshData: () => void
+
+  /** True for a brief window after `refreshData()` while snapshots refetch —
+   * drives the spinning refresh icon so the reload is visibly in progress. */
+  refreshing: boolean
 }
 
 const Ctx = createContext<AppState | null>(null)
@@ -261,6 +270,66 @@ export function AppProvider({
 
   const requestArea = useCallback((a: AreaKey) => setFocusArea(a), [])
   const clearFocusArea = useCallback(() => setFocusArea(null), [])
+  const [refreshing, setRefreshing] = useState(false)
+  const refreshTimer = useRef<number | null>(null)
+  const jobTimer = useRef<number | null>(null)
+  const refreshData = useCallback(() => {
+    // Static (GitHub Pages / no backend): there's nothing to re-scrape, so just
+    // bust the snapshot cache and refetch. A short spinner signals the reload.
+    if (!interactive) {
+      refreshSnapshots()
+      setRefreshing(true)
+      if (refreshTimer.current != null) clearTimeout(refreshTimer.current)
+      refreshTimer.current = window.setTimeout(() => setRefreshing(false), 800)
+      return
+    }
+    // Interactive (local `repower web-api`): kick off a real full refresh
+    // (recover gaps → scrape every source → export-web), keep the spinner up for
+    // the whole job, then reload the freshly-written snapshots. Polls the shared
+    // single-flight job slot, so it also attaches to an already-running job (409).
+    const finish = (msg: string) => {
+      if (jobTimer.current) window.clearTimeout(jobTimer.current)
+      jobTimer.current = null
+      setRefreshing(false)
+      refreshSnapshots()
+      toast(msg)
+    }
+    const poll = () => {
+      fetch('/api/data/refresh')
+        .then((r) => r.json())
+        .then((j: { state?: string }) => {
+          if (j && j.state === 'running') {
+            jobTimer.current = window.setTimeout(poll, 2000)
+          } else if (j && j.state === 'error') {
+            finish(pick('Refresh failed — see the web-api console', '更新に失敗しました — web-api のログを確認してください'))
+          } else {
+            finish(pick('Data refreshed', 'データを更新しました'))
+          }
+        })
+        .catch(() => finish(pick('Refresh status unavailable', '更新状況を取得できませんでした')))
+    }
+    setRefreshing(true)
+    fetch('/api/data/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
+      .then(async (r) => {
+        const j = (await r.json().catch(() => null)) as { error?: string } | null
+        if (r.status === 202) {
+          toast(pick('Refreshing data — scraping sources…', 'データ取得中 — 各ソースを収集しています…'))
+          if (jobTimer.current) window.clearTimeout(jobTimer.current)
+          jobTimer.current = window.setTimeout(poll, 2000)
+        } else if (r.status === 409) {
+          toast(pick('A job is already running — waiting…', '実行中のジョブがあります — 完了を待っています…'))
+          if (jobTimer.current) window.clearTimeout(jobTimer.current)
+          jobTimer.current = window.setTimeout(poll, 2000)
+        } else {
+          setRefreshing(false)
+          toast(j && j.error ? j.error : pick('Could not start refresh', '更新を開始できませんでした'))
+        }
+      })
+      .catch(() => {
+        setRefreshing(false)
+        toast(pick('Could not reach the local API', 'ローカル API に接続できませんでした'))
+      })
+  }, [interactive, toast, pick])
 
   // Global keyboard: ⌘K / Ctrl-K opens search, Esc closes any overlay.
   useEffect(() => {
@@ -308,6 +377,8 @@ export function AppProvider({
       requestArea,
       clearFocusArea,
       interactive,
+      refreshData,
+      refreshing,
     }),
     [
       lang,
@@ -339,6 +410,8 @@ export function AppProvider({
       requestArea,
       clearFocusArea,
       interactive,
+      refreshData,
+      refreshing,
     ],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

@@ -1,5 +1,5 @@
 // Ported from screens/market-data.html — the Market Data screen.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
@@ -43,8 +43,102 @@ function dateLabel(daysAgo: number): string {
   return MO[d.getMonth()] + ' ' + d.getDate()
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** ISO datetime → hover label: "Jul 11", or "Jul 11 22:30" for intraday slots.
+ *  Non-ISO strings (fixture day labels like "Jun 12") are shown verbatim. */
+function fmtDT(v: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(v)
+  if (!m) return v
+  const lbl = MONTHS[Number(m[2]) - 1] + ' ' + Number(m[3])
+  return m[4] && !(m[4] === '00' && m[5] === '00') ? lbl + ' ' + m[4] + ':' + m[5] : lbl
+}
+
+/**
+ * Shared hover layer for the static price / generation-mix SVGs. Renders the given
+ * chart `children` inside the SVG and, on mouse-move, a dashed crosshair + an
+ * anchored value tooltip (with the exact datetime) for the nearest data point.
+ * Point `i` maps to x = 8 + i/(n-1)·464 in the 480-wide viewBox — identical to the
+ * polyline geometry. When `n < 2` (e.g. fixtures) the chart renders but is inert.
+ */
+function ChartHover({
+  n,
+  dt,
+  xs,
+  dotY,
+  tip,
+  children,
+}: {
+  n: number
+  dt: string[]
+  xs?: number[]
+  dotY?: (i: number) => number
+  tip: (i: number) => ReactNode
+  children: ReactNode
+}) {
+  const [i, setI] = useState<number | null>(null)
+  // When `xs` (per-point viewBox x-positions) is supplied the chart is plotted on a
+  // shared time axis, so map/invert through it; otherwise fall back to the even
+  // index spacing (x = 8 + k/(n-1)·464).
+  const useXs = !!xs && xs.length === n
+  const xOf = (k: number) => (useXs ? xs![k] : 8 + (k / Math.max(1, n - 1)) * 464)
+  const onMove = (e: ReactMouseEvent<SVGSVGElement>) => {
+    if (n < 2) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const px = ((e.clientX - r.left) / r.width) * 480
+    let k: number
+    if (useXs) {
+      k = 0
+      let best = Infinity
+      for (let j = 0; j < n; j++) {
+        const d = Math.abs(xs![j] - px)
+        if (d < best) {
+          best = d
+          k = j
+        }
+      }
+    } else {
+      k = Math.round(((px - 8) / 464) * (n - 1))
+    }
+    k = Math.max(0, Math.min(n - 1, k))
+    if (k !== i) setI(k)
+  }
+  const onLeave = () => setI(null)
+  const x = i != null ? xOf(i) : 0
+  const leftPct = i != null ? Math.max(10, Math.min(90, (x / 480) * 100)) : 0
+  return (
+    <div style={s('position:relative')}>
+      <svg
+        viewBox="0 0 480 160"
+        style={s('width:100%;height:auto;display:block;margin-top:10px')}
+        preserveAspectRatio="none"
+        onMouseMove={onMove}
+        onMouseLeave={onLeave}
+      >
+        {children}
+        {i != null && (
+          <g>
+            <line x1={x} y1="6" x2={x} y2="152" stroke="var(--mut)" strokeWidth="0.8" strokeDasharray="3 3"></line>
+            {dotY ? <circle cx={x} cy={dotY(i)} r="2.6" fill="var(--tx)"></circle> : null}
+          </g>
+        )}
+      </svg>
+      {i != null && (
+        <div
+          style={s(
+            `position:absolute;top:2px;left:${leftPct}%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--bd);border-radius:8px;padding:4px 9px;font-size:11px;white-space:nowrap;pointer-events:none;color:var(--tx);box-shadow:var(--sh1);z-index:5;font-feature-settings:'tnum' 1`,
+          )}
+        >
+          <span style={s('color:var(--mut);margin-right:6px')}>{fmtDT(dt[i] ?? '')}</span>
+          {tip(i)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function MarketDataScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch, refreshData, refreshing } = useApp()
   const L = lang
   const dark = theme === 'dark'
 
@@ -133,7 +227,10 @@ export function MarketDataScreen() {
   const tProduct = () => toast('Product drill-down (per-slot prices & offers) — not in this prototype · 商品別ドリルダウンは対象外')
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
   const tNav = () => toast('Placeholder destination in this prototype · 本プロトタイプ対象外')
-  const tRefresh = () => toast('Data refreshed · データを更新しました')
+  const tRefresh = () => {
+    refreshData()
+    toast('Reloaded latest data · 最新データを再取得しました')
+  }
   const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
   const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
@@ -168,6 +265,7 @@ export function MarketDataScreen() {
         avg: b.avg,
         max: b.max,
         min: b.min,
+        dt: b.days.map((d) => dateLabel(d)),
         labels: [dateLabel(b.days[0]), dateLabel(b.days[m]), dateLabel(b.days[b.days.length - 1])] as [
           string,
           string,
@@ -261,17 +359,65 @@ export function MarketDataScreen() {
     const pts = (arr: number[], y: (val: number) => number) =>
       arr.map((val, i) => X(i, arr.length).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
 
+    // Shared x time-domain across every selected live area (price + supply windows),
+    // so all area charts map the same x-pixel to the same calendar time ("align the
+    // x-axis"). Fixtures (no live data) keep the even index spacing.
+    const parseT = (iso: string): number => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(iso)
+      return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) : NaN
+    }
+    let gMin = Infinity
+    let gMax = -Infinity
+    const accT = (iso: string) => {
+      const t = parseT(iso)
+      if (Number.isFinite(t)) {
+        if (t < gMin) gMin = t
+        if (t > gMax) gMax = t
+      }
+    }
+    for (const a of selAreas) {
+      const la = live.ready ? live.areas[a.key] ?? null : null
+      if (!la) continue
+      windowLive(la, gran, range).dt.forEach(accT)
+      windowSupply(la, gran, range).dt.forEach(accT)
+    }
+    const haveDomain = Number.isFinite(gMin) && Number.isFinite(gMax) && gMax > gMin
+    const xAtTime = (iso: string): number => {
+      const t = parseT(iso)
+      if (!Number.isFinite(t) || !haveDomain) return 8
+      return 8 + ((t - gMin) / (gMax - gMin)) * 464
+    }
+    const fmtEpoch = (t: number): string => {
+      const d = new Date(t)
+      const lbl = MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate()
+      const hh = d.getUTCHours()
+      const mm = d.getUTCMinutes()
+      return hh || mm ? lbl + ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0') : lbl
+    }
+    const sharedAx: [string, string, string] = haveDomain
+      ? [fmtEpoch(gMin), fmtEpoch((gMin + gMax) / 2), fmtEpoch(gMax)]
+      : ['', '', '']
+
     const sections = selAreas.map((a) => {
-      const la = useLive ? live.areas[a.key] : null
+      // Per-area live/fixture: each chart uses its own snapshot when loaded, so a
+      // single missing/corrupt area falls back alone instead of dragging every
+      // area to fixtures (the KPI block above still gates on the stricter useLive).
+      const la = live.ready ? (live.areas[a.key] ?? null) : null
       const w = la ? windowLive(la, gran, range) : winLabeled(a)
       const n = w.avg.length
       const lo = Math.min(...w.min) * 0.92
       const hi = Math.max(...w.max) * 1.05
       const py = (val: number) => 150 - ((val - lo) / (hi - lo)) * 135
+      // Plot each price point at its real time position on the shared domain (live),
+      // so the same x-pixel is the same calendar time across every area chart.
+      const pxAt = (i: number) => (la && haveDomain ? xAtTime(w.dt[i]) : 8 + (i / Math.max(1, n - 1)) * 464)
+      const ptsP = (arr: number[], y: (val: number) => number) =>
+        arr.map((val, i) => pxAt(i).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
+      const pxs = w.avg.map((_v, i) => pxAt(i))
       const band =
-        pts(w.max, py) +
+        ptsP(w.max, py) +
         ' ' +
-        w.min.map((_val, i) => X(n - 1 - i, n).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
+        w.min.map((_val, i) => pxAt(n - 1 - i).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
 
       // generation mix — real windowed supply when live (gran-responsive), else synthetic "today"
       const supW = la ? windowSupply(la, gran, range) : null
@@ -282,13 +428,23 @@ export function MarketDataScreen() {
       let demandLine: string
       let peakMWStr: string
       let mixMeta: string
+      // Raw windowed mix arrays + geometry for the hover layer (live only).
+      let supN = 0
+      let supYmax = 1
+      let supDtA: string[] = []
+      let supDemandA: number[] = []
+      let supBaseA: number[] = []
+      let supThermA: number[] = []
+      let supSolarA: number[] = []
+      let supOtherA: number[] = []
+      let supXs: number[] = []
       if (supW) {
         const c1 = supW.baseload
         const c2 = c1.map((b, i) => b + supW.thermal[i])
         const c3 = c2.map((val, i) => val + supW.solar[i])
         const c4 = c3.map((val, i) => val + supW.other[i])
         const nS = Math.max(2, c1.length)
-        const Xs = (i: number) => 8 + (i / (nS - 1)) * 464
+        const Xs = (i: number) => (haveDomain ? xAtTime(supW.dt[i]) : 8 + (i / (nS - 1)) * 464)
         const my = (val: number) => 152 - (val / supW.ymax) * 140
         const fwd = (arr: number[]) => arr.map((v, i) => Xs(i).toFixed(1) + ',' + my(v).toFixed(1)).join(' ')
         const rev = (arr: number[]) =>
@@ -300,6 +456,15 @@ export function MarketDataScreen() {
         demandLine = fwd(supW.demand)
         peakMWStr = Math.round(Math.max(1, ...supW.demand)).toLocaleString('en-US')
         mixMeta = range + ' · ' + gran + ' · grouped MW'
+        supN = supW.demand.length
+        supYmax = supW.ymax
+        supDtA = supW.dt
+        supDemandA = supW.demand
+        supBaseA = supW.baseload
+        supThermA = supW.thermal
+        supSolarA = supW.solar
+        supOtherA = supW.other
+        supXs = supW.demand.map((_v, i) => Xs(i))
       } else {
         const P = a.peak
         const dem = Array.from({ length: 48 }, (_, i) => {
@@ -319,19 +484,37 @@ export function MarketDataScreen() {
         const fwd = (arr: number[]) => pts(arr, my)
         const rev = (arr: number[]) =>
           arr.map((_val, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ')
+        const demLine = dem.map((val) => val * 1.018)
         mix1 = fwd(c1) + ' 472,152 8,152'
         mix2 = fwd(c2) + ' ' + rev(c1)
         mix3 = fwd(c3) + ' ' + rev(c2)
         mix4 = ''
-        demandLine = pts(
-          dem.map((val) => val * 1.018),
-          my,
-        )
+        demandLine = pts(demLine, my)
         peakMWStr = P.toLocaleString('en-US')
         mixMeta = 'today · 14 fuels grouped · MW'
+        // hover arrays for the synthetic "today" mix (half-hourly, oldest→newest)
+        supN = 48
+        supYmax = ymax
+        supDtA = Array.from({ length: 48 }, (_, i) => String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 === 0 ? '00' : '30'))
+        supDemandA = demLine
+        supBaseA = c1
+        supThermA = c2.map((val, i) => Math.max(0, val - c1[i]))
+        supSolarA = c3.map((val, i) => Math.max(0, val - c2[i]))
+        supXs = Array.from({ length: 48 }, (_v, i) => 8 + (i / 47) * 464)
       }
 
       const open = !closed[a.key]
+      // x-axis tick labels (start / mid / end). Shared domain when live so every area
+      // chart reads alike; else the window's own labels (price) / slot times (mix).
+      const priceAx: [string, string, string] = la && haveDomain ? sharedAx : w.labels
+      const mixAx: [string, string, string] =
+        supW && haveDomain
+          ? sharedAx
+          : [
+              supN ? fmtDT(supDtA[0]) : '',
+              supN ? fmtDT(supDtA[Math.floor((supN - 1) / 2)]) : '',
+              supN ? fmtDT(supDtA[supN - 1]) : '',
+            ]
       return {
         key: a.key,
         title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
@@ -353,17 +536,37 @@ export function MarketDataScreen() {
         demand: demandLine,
         peakMW: peakMWStr,
         band,
-        pMax: pts(w.max, py),
-        pAvg: pts(w.avg, py),
-        pMin: pts(w.min, py),
+        pMax: ptsP(w.max, py),
+        pAvg: ptsP(w.avg, py),
+        pMin: ptsP(w.min, py),
         vMax: Math.max(...w.max).toFixed(1),
         vAvg: mean(w.avg).toFixed(1),
         vMin: Math.min(...w.min).toFixed(1),
         rangeLabel: range,
         granLabel: gran,
-        d0: w.labels[0],
-        d1: w.labels[1],
-        d2: w.labels[2],
+        // shared x-axis tick labels (start / mid / end) — identical across all area
+        // charts when live, so the aligned time domain is legible.
+        priceAx,
+        mixAx,
+        // hover geometry — price chart
+        n,
+        plo: lo,
+        phi: hi,
+        pdt: w.dt,
+        pxs,
+        pavg: w.avg,
+        pmax: w.max,
+        pmin: w.min,
+        // hover geometry — generation-mix chart (0 points ⇒ no hover, e.g. fixtures)
+        supN,
+        supYmax,
+        supDt: supDtA,
+        supXs,
+        supDemandA,
+        supBaseA,
+        supThermA,
+        supSolarA,
+        supOtherA,
       }
     })
 
@@ -720,7 +923,7 @@ export function MarketDataScreen() {
           <FreshnessChip inverse style={{ marginTop: 6 }} />
           <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>Hugging Face sync · GitHub Actions daily</div>
           <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Refresh · 更新
+            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>Refresh · 更新
           </Hoverable>
         </div>
       </div>
@@ -916,13 +1119,32 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Generation mix <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>電源構成</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.mixMeta}</span>
                           </div>
-                          <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
+                          <ChartHover
+                            n={sec.supN}
+                            dt={sec.supDt}
+                            xs={sec.supXs}
+                            dotY={(i) => 152 - (sec.supDemandA[i] / sec.supYmax) * 140}
+                            tip={(i) => (
+                              <>
+                                <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span style={s('color:#4A6FA5')}>therm {Math.round(sec.supThermA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span style={s('color:#C99A2E')}>sol/wnd {Math.round(sec.supSolarA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span>dem {Math.round(sec.supDemandA[i]).toLocaleString('en-US')} MW</span>
+                              </>
+                            )}
+                          >
                             <polygon points={sec.mix1} fill="#2A9D8F" fillOpacity="0.78"></polygon>
                             <polygon points={sec.mix2} fill="#4A6FA5" fillOpacity="0.72"></polygon>
                             <polygon points={sec.mix3} fill="#E9C46A" fillOpacity="0.82"></polygon>
                             {sec.mix4 ? <polygon points={sec.mix4} fill="#9AA5B5" fillOpacity="0.6"></polygon> : null}
                             <g style={s('color:var(--tx)')}><polyline points={sec.demand} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline></g>
-                          </svg>
+                          </ChartHover>
+                          <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            <span>{sec.mixAx[0]}</span><span>{sec.mixAx[1]}</span><span>{sec.mixAx[2]}</span>
+                          </div>
                           <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
@@ -937,17 +1159,33 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Price <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>価格</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · {sec.granLabel} · max / avg / min · ¥/kWh</span>
                           </div>
-                          <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
+                          <ChartHover
+                            n={sec.n}
+                            dt={sec.pdt}
+                            xs={sec.pxs}
+                            dotY={(i) => 150 - ((sec.pavg[i] - sec.plo) / (sec.phi - sec.plo)) * 135}
+                            tip={(i) => (
+                              <>
+                                <span style={s('color:#E24B4A')}>max ¥{sec.pmax[i].toFixed(2)}</span>
+                                {' · '}
+                                <span>avg ¥{sec.pavg[i].toFixed(2)}</span>
+                                {' · '}
+                                <span style={s('color:#00A5CF')}>min ¥{sec.pmin[i].toFixed(2)}</span>
+                              </>
+                            )}
+                          >
                             <polygon points={sec.band} fill="#00A5CF" fillOpacity="0.10"></polygon>
                             <polyline points={sec.pMax} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>
                             <g style={s('color:var(--tx)')}><polyline points={sec.pAvg} fill="none" stroke="currentColor" strokeWidth="1.8"></polyline></g>
                             <polyline points={sec.pMin} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>
-                          </svg>
+                          </ChartHover>
+                          <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            <span>{sec.priceAx[0]}</span><span>{sec.priceAx[1]}</span><span>{sec.priceAx[2]}</span>
+                          </div>
                           <div style={s("display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap;font-feature-settings:'tnum' 1")}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #00A5CF')}></span>Min ¥{sec.vMin}</span>
-                            <span style={s('margin-left:auto;display:flex;gap:14px;color:var(--mut)')}><span>{sec.d0}</span><span>{sec.d1}</span><span>{sec.d2}</span></span>
                           </div>
                         </div>
                       </div>
