@@ -19,6 +19,8 @@ export interface SystemSnapshot {
   tokyo_today: (number | null)[]
   now: { system: number | null; tokyo: number | null; slot: string | null }
   areas_now: Record<string, number>
+  areas_today: Record<string, (number | null)[]>
+  areas_yday: Record<string, number>
 }
 
 export interface SystemLive {
@@ -27,6 +29,8 @@ export interface SystemLive {
   yday: number[]
   avg7: number[]
   areasNow: Record<string, number>
+  areasToday: Record<string, (number | null)[]>
+  areasYday: Record<string, number>
   now: { system: number | null; tokyo: number | null; slot: string | null }
   dateToday: string | null
   dateYday: string | null
@@ -59,6 +63,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
       yday: fxYday,
       avg7: fxAvg7,
       areasNow: {},
+      areasToday: {},
+      areasYday: {},
       now: { system: null, tokyo: null, slot: null },
       dateToday: null,
       dateYday: null,
@@ -70,6 +76,8 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
     yday: fill(snap.system_yday, fxYday),
     avg7: fill(snap.system_avg7, fxAvg7),
     areasNow: snap.areas_now || {},
+    areasToday: snap.areas_today || {},
+    areasYday: snap.areas_yday || {},
     now: snap.now || { system: null, tokyo: null, slot: null },
     dateToday: snap.date_today,
     dateYday: snap.date_yday,

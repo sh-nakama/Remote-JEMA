@@ -207,6 +207,8 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
         "tokyo_today": [None] * 48,
         "now": {"system": None, "tokyo": None, "slot": None},
         "areas_now": {},
+        "areas_today": {},
+        "areas_yday": {},
     }
     with eng.connect() as con:
         spot = pd.read_sql_query(
@@ -251,15 +253,34 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
 
         area_df = pd.read_sql_query(
             text(
-                "SELECT area, time, price FROM jepx_area_price_30m "
-                "WHERE date = (SELECT MAX(date) FROM jepx_area_price_30m WHERE date <= :a)"
+                "SELECT date, area, time, price FROM jepx_area_price_30m "
+                "WHERE date IN ("
+                "  SELECT date FROM ("
+                "    SELECT DISTINCT date FROM jepx_area_price_30m WHERE date <= :a "
+                "    ORDER BY date DESC LIMIT 2"
+                "  )"
+                ")"
             ),
             con,
             params={"a": anchor.isoformat()},
         )
     if not area_df.empty:
-        latest = area_df.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
+        area_df["date"] = area_df["date"].astype(str)
+        adays = sorted(area_df["date"].unique())
+        aday = adays[-1]
+        aprev = adays[-2] if len(adays) > 1 else None
+        today_rows = area_df[area_df["date"] == aday]
+        # Per-area intraday on the 48-slot grid (feeds the Market Pulse sparklines).
+        apiv = today_rows.pivot_table(index="time", columns="area", values="price", aggfunc="last")
+        payload["areas_today"] = {str(area): _slot_col(apiv, area) for area in apiv.columns}
+        # Latest (last non-null) per area, today — the price shown in each tile.
+        latest = today_rows.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
         payload["areas_now"] = {a: round(float(p), 3) for a, p in latest.items()}
+        # Latest per area, yesterday — the day-over-day baseline for the ▲/▼ delta.
+        if aprev is not None:
+            prev_rows = area_df[area_df["date"] == aprev]
+            yl = prev_rows.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
+            payload["areas_yday"] = {a: round(float(p), 3) for a, p in yl.items()}
 
     n = _write_json(out / "system.json", payload)
     return {"files": 1, "bytes": n}
