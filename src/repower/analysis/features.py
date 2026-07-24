@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 
 from repower.db import (
     AnalysisRecord,

@@ -14,7 +14,6 @@ from repower.scrapers.eprx import (
     parse_tieline_csv,
 )
 
-
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 # 9 regions + 合計(Total), in CSV column order, after [block_id, metric].
 _HEADER_REGIONS = "北海道,東北,東京,中部,北陸,関西,中国,四国,九州,合計"

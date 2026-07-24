@@ -527,7 +527,7 @@ def test_probe_url_validate_previews_meeting_count(monkeypatch):
                         lambda c, **kw: Discovery("ok", [3, 2, 1]))
     cand = discover_mod.probe_url(
         "https://www.occto.or.jp/iinkai/new_wg/",
-        fetch=lambda u: ("ok", "<html><title>新しい委員会</title></html>".encode("utf-8")),
+        fetch=lambda u: ("ok", "<html><title>新しい委員会</title></html>".encode()),
         validate=True, tracked_urls=set(), tracked_keys=set(),
     )
     assert cand.source == "OCCTO" and "3 meeting" in cand.note
@@ -549,7 +549,7 @@ def test_probe_url_default_path_survives_cached_url(monkeypatch, tmp_path):
     def fake_fetch(u, *, db_path=None, force=False):
         fetched["n"] += 1
         if force or fetched["n"] == 1:
-            return ("ok", "<html><title>制度検討作業部会</title></html>".encode("utf-8"))
+            return ("ok", "<html><title>制度検討作業部会</title></html>".encode())
         return ("not_modified", None)
 
     monkeypatch.setattr(discover_mod, "_fetch", fake_fetch)

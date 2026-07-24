@@ -7,22 +7,26 @@ Uses matplotlib for chart rendering and PdfPages for multi-page output.
 """
 from __future__ import annotations
 
-from io import BytesIO
 from datetime import date
+from io import BytesIO
 
 import matplotlib
+
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_pdf import PdfPages
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
 from matplotlib import font_manager
+from matplotlib.backends.backend_pdf import PdfPages
 
 from repower.dashboard.theme import (
     BRAND_NAVY as NAVY,
+)
+from repower.dashboard.theme import (
     BRAND_TEAL as TEAL,
+)
+from repower.dashboard.theme import (
     METRIC_COLORS as _METRIC_COLORS,
 )
 

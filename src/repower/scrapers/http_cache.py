@@ -13,8 +13,8 @@ optional ``curl_cffi`` fallback impersonates a real Chrome TLS fingerprint.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Literal, Optional
+from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 
@@ -38,7 +38,7 @@ def conditional_get(
     allow_curl_fallback: bool = False,
     force: bool = False,
     timeout: float = 30.0,
-) -> tuple[Status, Optional[bytes]]:
+) -> tuple[Status, bytes | None]:
     """GET *url* with persistent conditional-GET caching.
 
     Returns ``("ok", content)`` on 200, ``("not_modified", None)`` on 304, and
@@ -117,7 +117,7 @@ def _store(session, url: str, etag, last_modified, status: int) -> None:
         entry.etag = etag
         entry.last_modified = last_modified
     entry.last_status = status
-    entry.last_checked = datetime.now(timezone.utc)
+    entry.last_checked = datetime.now(UTC)
     session.commit()
 
 

@@ -12,9 +12,9 @@ Output frames always carry a ``datetime`` column equal to the bucket start
 
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from datetime import date
 from pathlib import Path
-from typing import Callable, Mapping
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +27,6 @@ from repower.db import (
     get_session,
     init_db,
 )
-
 
 # ── Reducer inference ──────────────────────────────────────────────────────
 # Authoritative per-column reducers (plan §B):

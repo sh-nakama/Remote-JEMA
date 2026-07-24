@@ -19,17 +19,30 @@ import plotly.express as px
 import streamlit as st
 from sqlalchemy import func, select
 
-from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
-from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
-from repower.scrapers.areas import AREA_NAMES
-from repower.timeutil import today_jst
-
 import repower.dashboard.theme as theme
+from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
+from repower.dashboard.components.excel_export import build_excel_workbook
+from repower.dashboard.components.generation_chart import render_generation_chart
+from repower.dashboard.components.pdf_export import (
+    generate_pdf,
+    generate_wholesale_pdf,
+)
+from repower.dashboard.components.price_chart import render_price_chart
+from repower.dashboard.components.tieline_chart import render_tieline_chart
+from repower.dashboard.components.volume_chart import render_volume_chart
 from repower.dashboard.i18n import (
     DEFAULT_LANG,
     LANG_OPTIONS,
     T,
     metric_labels,
+)
+
+# Salvaged legacy helpers + views (Drivers / Analyses).
+from repower.dashboard.legacy import (
+    _analyses,
+    _db_session,
+    _fuels,
+    _jepx_area,
 )
 from repower.dashboard.read import (
     MIX_COLUMNS,
@@ -41,23 +54,9 @@ from repower.dashboard.read import (
     wholesale_export_frame,
     wholesale_period_stats_cached,
 )
-from repower.dashboard.components.excel_export import build_excel_workbook
-from repower.dashboard.components.generation_chart import render_generation_chart
-from repower.dashboard.components.pdf_export import (
-    generate_pdf,
-    generate_wholesale_pdf,
-)
-from repower.dashboard.components.price_chart import render_price_chart
-from repower.dashboard.components.volume_chart import render_volume_chart
-from repower.dashboard.components.tieline_chart import render_tieline_chart
-
-# Salvaged legacy helpers + views (Drivers / Analyses).
-from repower.dashboard.legacy import (
-    _analyses,
-    _db_session,
-    _fuels,
-    _jepx_area,
-)
+from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
+from repower.scrapers.areas import AREA_NAMES
+from repower.timeutil import today_jst
 
 # Area order from the plan / scrapers.
 AREA_ORDER: list[str] = [
@@ -893,6 +892,7 @@ def _run_generation(key: str, lang: str, meeting_num: int | None = None) -> None
 def _render_committee_editor(rows: list[dict], lang: str, db: str) -> None:
     """Editable table of tracked committees: toggle tracking + set priority."""
     import pandas as _pd
+
     from repower.policy import store
 
     st.markdown(f"**{T('policy_tracked_editor', lang)}**")

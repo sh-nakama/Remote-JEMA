@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from sqlalchemy import func, or_
 
@@ -45,7 +45,7 @@ INGEST_KINDS = ("minutes", "brief", "compilation", "handout", "agenda", "appendi
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @contextmanager

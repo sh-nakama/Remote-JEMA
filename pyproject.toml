@@ -5,24 +5,26 @@ description = "Tokyo power market analysis bot – TEPCO supply/demand, JEPX spo
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
-    "pandas>=2.2",
+    "pandas>=3",
     "sqlalchemy>=2.0",
     "feedparser>=6.0",
-    "yfinance>=0.2",
+    "yfinance>=1",
     "typer[all]>=0.12",
     "streamlit>=1.36",
-    "plotly>=5.22",
+    "plotly>=6",
     "python-dotenv>=1.0",
-    "huggingface-hub>=0.23",
+    "huggingface-hub>=1.8,<2",  # hf_sync uses the 1.x API; cap the major
     "curl_cffi>=0.7",
     "openpyxl>=3.1",
     "matplotlib>=3.8",
     "beautifulsoup4>=4.12",
-    "lxml>=5.2",
+    "lxml>=6",
+    "pillow>=12.3",  # security floor for a transitive dep (8 advisories fixed in 12.3.0)
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.5"]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
+policy = ["notebooklm-py[browser]>=0.7.3,<1"]
 
 [project.scripts]
 repower = "repower.cli:app"
@@ -34,6 +36,31 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# numpy's bundled stubs use PEP 695 `type` aliases, which mypy rejects under
+# python_version 3.11 (our lowest supported). Skip analyzing them; numpy becomes Any.
+module = "numpy.*"
+follow_imports = "skip"
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Typer CLIs use function-call defaults (typer.Option/Argument) by design; keep B008 off
+# here so a ruff-version change in how it special-cases Typer never breaks CI.
+"src/repower/cli.py" = ["B008"]
+# Embedded HTML/CSS/JS chart templates: long template-literal lines, not reflowable code.
+"src/repower/dashboard/components/*_chart.py" = ["E501"]
+# Long Japanese UI translation strings; splitting them harms grep-ability.
+"src/repower/dashboard/i18n.py" = ["E501"]
+# Scraped-HTML fixtures with long real-world lines.
+"tests/test_energy_board.py" = ["E501"]
+"tests/test_policy_catalog.py" = ["E501"]

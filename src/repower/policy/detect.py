@@ -11,7 +11,6 @@ here; summarisation is a separate, authenticated step.
 from __future__ import annotations
 
 import logging
-
 import time
 
 from repower.policy.scraper import (

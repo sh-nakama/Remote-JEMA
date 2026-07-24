@@ -575,7 +575,9 @@ def fetch_committee_dates(committee: Committee, *, db_path: str | None = None) -
     return _energy_board_dates(committee, db_path=db_path)
 
 
-def fetch_occto_meeting_date(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> datetime.date | None:
+def fetch_occto_meeting_date(
+    committee: Committee, meeting_num: int, *, db_path: str | None = None
+) -> datetime.date | None:
     """The meeting date for one OCCTO meeting, read from its ``{base}/{num}.html`` subpage."""
     base = _occto_base(committee)
     status, body = _fetch(f"{base}/{meeting_num}.html", db_path=db_path, force=True)

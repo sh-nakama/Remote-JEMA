@@ -21,7 +21,6 @@ from repower.db import (
     init_db,
 )
 
-
 # ── Data loaders (cached per DB session) ──────────────────────────────────
 
 @st.cache_resource

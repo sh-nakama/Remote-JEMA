@@ -69,7 +69,8 @@ _ENGLISH_DIGEST_Q = (
     "Key decisions, Points of disagreement, Action items. Base everything strictly on the sources."
 )
 
-_SYNTHESIS_PROMPT = """この委員会のこれまでの会合要約に基づき、現在の政策的な議論の全体像を、会合番号を付して要約してください。
+_SYNTHESIS_PROMPT = """\
+この委員会のこれまでの会合要約に基づき、現在の政策的な議論の全体像を、会合番号を付して要約してください。
 必ず以下の4部構成とすること。
 
 (1) 現在の主要論点

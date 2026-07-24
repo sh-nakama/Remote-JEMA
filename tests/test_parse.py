@@ -53,7 +53,7 @@ def test_hourly_to_30min_expands_and_sorts():
     # Sorted by (date, time) with the new :30 slots interleaved
     assert list(out["time"]) == ["09:00", "09:30", "10:00", "10:30"]
     # Values are duplicated from their source hour
-    by_time = dict(zip(out["time"], out["area_demand_mw"]))
+    by_time = dict(zip(out["time"], out["area_demand_mw"], strict=True))
     assert by_time["09:00"] == 100.0
     assert by_time["09:30"] == 100.0
     assert by_time["10:00"] == 200.0
