@@ -19,6 +19,8 @@ Endpoints (all JSON):
   GET  /api/policy/catchup  -> current job status (alias: /api/policy/job)
   GET  /api/policy/job      -> current job status + output tail / result
   GET  /api/policy/crosscheck -> energy-board vs our catalog (committees we may miss)
+  POST /api/data/refresh    -> 202/409, full data refresh (recover gaps → scrape → export-web)
+  GET  /api/data/refresh    -> current job status (shares the single-flight job slot)
 
 The `command` jobs shell out to the same CLI the cron/skill use (detect, dates,
 schedule, discover, crosscheck, run, backfill, resume, digest) — allowlisted, args
@@ -46,7 +48,7 @@ import subprocess
 import sys
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
@@ -68,6 +70,7 @@ _ALLOWED_ORIGINS = frozenset(
 # refresh or a 'command' subprocess wrapping one `repower policy <cmd>`.
 _OUTPUT_MAX = 300
 _JOB_TIMEOUT_S = 600  # hard cap per command subprocess; a wedged CLI must not pin the single-flight slot forever
+_REFRESH_TIMEOUT_S = 1800  # data refresh scrapes every source + re-exports; give it a wider cap
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'
@@ -119,7 +122,7 @@ def _run_catchup_job(db_path: str | None) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def start_catchup(db_path: str | None) -> dict:
@@ -161,8 +164,8 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
             raw = default
         try:
             return max(lo, min(hi, int(raw)))
-        except (TypeError, ValueError):
-            raise ValueError(f"{name} must be an integer")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer") from exc
 
     if cmd in ("detect", "dates"):
         return ["policy", cmd, "--committee", _committee()]
@@ -181,7 +184,7 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     raise ValueError(f"unsupported command: {cmd}")
 
 
-def _run_command_job(argv: list[str]) -> None:
+def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S) -> None:
     tail: deque[str] = deque(maxlen=_OUTPUT_MAX)
     timed_out = threading.Event()
     try:
@@ -189,6 +192,10 @@ def _run_command_job(argv: list[str]) -> None:
             [sys.executable, "-m", "repower.cli", *argv],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, encoding="utf-8", errors="replace",
+            # Force the child to emit UTF-8 too: on non-UTF-8 consoles (e.g. a
+            # Japanese cp932 Windows locale) the CLI's box-drawing/→ output would
+            # otherwise raise UnicodeEncodeError mid-run and abort the job.
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
 
         # The stdout iteration below blocks for as long as the CLI runs, so the
@@ -197,7 +204,7 @@ def _run_command_job(argv: list[str]) -> None:
             timed_out.set()
             proc.kill()
 
-        timer = threading.Timer(_JOB_TIMEOUT_S, _kill_on_timeout)
+        timer = threading.Timer(timeout, _kill_on_timeout)
         timer.daemon = True
         timer.start()
         try:
@@ -205,13 +212,13 @@ def _run_command_job(argv: list[str]) -> None:
                 tail.append(line.rstrip("\n"))
                 with _job_lock:
                     _job["output"] = list(tail)
-            code = proc.wait(timeout=_JOB_TIMEOUT_S)
+            code = proc.wait(timeout=timeout)
         finally:
             timer.cancel()
         if timed_out.is_set():
             with _job_lock:
                 _job.update(state="error", finished_at=_now(), exit_code=code,
-                            error=f"job killed after {_JOB_TIMEOUT_S}s timeout",
+                            error=f"job killed after {timeout}s timeout",
                             output=list(tail))
         else:
             with _job_lock:
@@ -240,6 +247,28 @@ def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dic
                     result=None, output=[], error=None)
         snap = dict(_job)
     threading.Thread(target=_run_command_job, args=(argv,), daemon=True).start()
+    return 202, snap
+
+
+def start_refresh(db_path: str | None) -> tuple[int, dict]:
+    """Start a full data refresh (recover gaps → scrape every source → export-web)
+    as a single-flight background subprocess. Shares the ``_job`` slot with the
+    policy jobs, so it's 409 while any job runs. Returns ``(202 started | 409 busy,
+    job)``. ``db_path`` is unused (the subprocess uses the default DB) but kept for
+    a uniform call signature with the other job starters.
+    """
+    with _job_lock:
+        if _job["state"] == "running":
+            return 409, {"error": "a job is already running", "job": dict(_job)}
+        argv = ["refresh-web"]
+        _job.update(kind="command", cmd="refresh-web", argv=argv, state="running",
+                    started_at=_now(), finished_at=None, exit_code=None,
+                    result=None, output=[], error=None)
+        snap = dict(_job)
+    threading.Thread(
+        target=_run_command_job, args=(argv,),
+        kwargs={"timeout": _REFRESH_TIMEOUT_S}, daemon=True,
+    ).start()
     return 202, snap
 
 
@@ -333,7 +362,7 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — never 500 the UI; fall back to empty
                 logger.exception("deepdive snapshot failed; serving empty fallback")
                 return self._send(200, {"schema": 1, "committees": [], "meetings": [], "upcoming": [], "error": str(e)})
-        if path in ("/api/policy/catchup", "/api/policy/job"):
+        if path in ("/api/policy/catchup", "/api/policy/job", "/api/data/refresh"):
             with _job_lock:
                 return self._send(200, dict(_job))
         if path == "/api/policy/crosscheck":
@@ -384,6 +413,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": f"could not add committee: {e}"})
         if path == "/api/policy/catchup":
             return self._send(202, start_catchup(self.db_path))
+        if path == "/api/data/refresh":
+            status, out = start_refresh(self.db_path)
+            return self._send(status, out)
         if path == "/api/policy/job":
             cmd = (body.get("cmd") or "").strip()
             status, out = start_command(cmd, body, self.db_path)

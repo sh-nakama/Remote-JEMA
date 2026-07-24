@@ -321,10 +321,16 @@ class BaseAreaScraper:
         return total
 
 
-def _normalize_hhmm(s: str) -> str | None:
+def _normalize_hhmm(s) -> str | None:
+    # Fully-blank trailing rows in a fixed-size monthly template (e.g. a 30-day
+    # month in a 31-day, 1488-row file) arrive as NaN. With a pyarrow-backed
+    # string column, ``astype(str)`` leaves those as nulls rather than the
+    # literal "nan", so a raw float NaN/None can reach here — guard against it.
+    if s is None or (isinstance(s, float) and s != s):
+        return None
+    s = str(s).strip()
     if not s or s == "nan":
         return None
-    s = s.strip()
     # Accept "9:00", "09:00", "9:0", etc.
     if ":" in s:
         try:

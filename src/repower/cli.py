@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
 
 import typer
 
@@ -22,13 +21,13 @@ def scrape(
     skip_fuels: bool = typer.Option(False, help="Skip fuel futures"),
     skip_news: bool = typer.Option(False, help="Skip news RSS"),
     skip_eprx: bool = typer.Option(False, help="Skip EPRX balancing + tieline data"),
-    jepx_year: Optional[int] = typer.Option(None, help="JEPX year to fetch (default: current)"),
+    jepx_year: int | None = typer.Option(None, help="JEPX year to fetch (default: current)"),
     fuel_days: int = typer.Option(7, help="Days of fuel data to fetch"),
 ):
     """Scrape TSO area data + market sources (recent months only)."""
-    from repower.scrapers.areas import scrape_all_areas, scrape_area, AREA_NAMES
-    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.areas import AREA_NAMES, scrape_all_areas, scrape_area
     from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.news_rss import scrape_news
 
     typer.echo("\u2500\u2500 TSO area supply/demand \u2500\u2500")
@@ -137,7 +136,7 @@ def backfill(
 
 @app.command()
 def analyze(
-    target: Optional[str] = typer.Option(None, help="Date to analyze (YYYY-MM-DD, default: yesterday)"),
+    target: str | None = typer.Option(None, help="Date to analyze (YYYY-MM-DD, default: yesterday)"),
     area: str = typer.Option("tepco", help="TSO area slug for the demand/supply features"),
 ):
     """Compute analysis features for a given date."""
@@ -150,7 +149,7 @@ def analyze(
 
 @app.command()
 def notify(
-    target: Optional[str] = typer.Option(None, help="Date to post (YYYY-MM-DD, default: yesterday)"),
+    target: str | None = typer.Option(None, help="Date to post (YYYY-MM-DD, default: yesterday)"),
     dry_run: bool = typer.Option(False, help="Print payload without posting"),
 ):
     """Post analysis digest to webhook."""
@@ -171,13 +170,13 @@ def run_all(
     dry_run: bool = typer.Option(False, help="Skip webhook post"),
 ):
     """Run full pipeline: scrape \u2192 analyze \u2192 notify."""
-    from repower.scrapers.areas import scrape_all_areas, AREA_NAMES
-    from repower.scrapers.jepx_spot import scrape_jepx
-    from repower.scrapers.fuels_futures import scrape_fuels
-    from repower.scrapers.news_rss import scrape_news
-    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
     from repower.analysis.features import run_analysis
     from repower.notify.webhook import notify as do_notify
+    from repower.scrapers.areas import AREA_NAMES, scrape_all_areas
+    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
+    from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.news_rss import scrape_news
 
     typer.echo("\u2550\u2550\u2550 SCRAPE \u2550\u2550\u2550")
     results = scrape_all_areas(months_back=months_back)
@@ -198,7 +197,8 @@ def run_all(
 
     typer.echo("═══ POLICY DETECT ═══")
     try:
-        from repower.policy.detect import backfill_dates, detect as policy_detect
+        from repower.policy.detect import backfill_dates
+        from repower.policy.detect import detect as policy_detect
         res = policy_detect()
         new = sum(r["new"] for r in res)
         typer.echo(f"   {new} new committee meeting(s) detected")
@@ -263,6 +263,59 @@ def export_web(out: str = "web/public/data/web"):
         f"{files} files, {kib} KiB across {sorted(ds)})"
     )
     typer.echo(f"Sources: {manifest['sources']}")
+
+
+@app.command("refresh-web")
+def refresh_web(
+    months_back: int = typer.Option(2, help="TSO months to re-fetch (current + N previous)"),
+    lookback: int = typer.Option(6, help="Completed months to scan for entirely-missing data to recover"),
+    out: str = typer.Option("web/public/data/web", help="Web snapshot output dir"),
+):
+    """Full data refresh for the web app: recover gaps → scrape everything → export.
+
+    Backs the web app's interactive **Refresh** button (via ``web-api``). It first
+    recovers any completed months entirely missing from the DB (parse / stale-304
+    gaps), then re-scrapes every source, then regenerates the static JSON snapshots
+    the frontend reads. Each source is guarded so one failure can't block the
+    export of everything else.
+    """
+    from repower.dashboard.export_web import export_web as run_export
+    from repower.scrapers.areas import AREA_NAMES, recover_missing_months, scrape_all_areas
+
+    def _try(label: str, fn):
+        try:
+            typer.echo(f"   {label}: {fn()}")
+        except Exception as e:  # noqa: BLE001 — a single source failure must not abort the refresh
+            typer.echo(f"   {label} skipped: {e}", err=True)
+
+    typer.echo("═══ RECOVER GAPS ═══")
+    recovered = recover_missing_months(lookback=lookback)
+    if recovered:
+        for r in recovered:
+            typer.echo(f"   recovered {AREA_NAMES.get(r['area'], r['area'])} {r['month']}: {r['rows']} rows")
+    else:
+        typer.echo("   no missing months found")
+
+    typer.echo("═══ SCRAPE ═══")
+    results = scrape_all_areas(months_back=months_back)
+    for a, n in results.items():
+        typer.echo(f"   {AREA_NAMES.get(a, a):<25} {n:>6} rows")
+    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
+    from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.news_rss import scrape_news
+    _try("JEPX rows", lambda: scrape_jepx())
+    _try("fuel rows", lambda: scrape_fuels())
+    _try("news items", lambda: scrape_news())
+    _try("EPRX rows", lambda: scrape_eprx())
+    _try("EPRX tieline rows", lambda: scrape_eprx_tieline())
+
+    typer.echo("═══ EXPORT ═══")
+    manifest = run_export(out)
+    files = sum(d.get("files", 0) for d in manifest["datasets"].values())
+    typer.echo(f"   exported {files} files (anchor {manifest['anchor']})")
+    typer.echo(f"   sources: {manifest['sources']}")
+    typer.echo("═══ DONE ═══")
 
 
 @app.command("web-api")
