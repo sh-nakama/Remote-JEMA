@@ -71,6 +71,13 @@ _ALLOWED_ORIGINS = frozenset(
 _OUTPUT_MAX = 300
 _JOB_TIMEOUT_S = 600  # hard cap per command subprocess; a wedged CLI must not pin the single-flight slot forever
 _REFRESH_TIMEOUT_S = 1800  # data refresh scrapes every source + re-exports; give it a wider cap
+# NotebookLM summarisation (run/backfill/resume) is long-running: a single meeting
+# can block up to ~20 min on one report artifact (see notebook.wait_artifact), and a
+# batch does several back-to-back. The run is naturally bounded by the account's
+# daily generation quota, not wall-clock, so the 10-min command cap would kill it
+# mid-report and surface as a spurious "error" even with valid auth. Give it a wide
+# cap; the pipeline is crash-safe (Resume drains anything left mid-flight).
+_NOTEBOOKLM_TIMEOUT_S = 3600
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'
@@ -172,8 +179,11 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     if cmd in ("schedule", "discover", "crosscheck", "resume", "status"):
         return ["policy", cmd]
     if cmd == "run":
-        return ["policy", "run", "--committee", _committee(),
+        argv = ["policy", "run", "--committee", _committee(),
                 "--max-per-run", str(_int("max_per_run", 5, 1, 20))]
+        if params.get("breadth"):
+            argv.append("--breadth")  # spread a small quota across committees (newest of each first)
+        return argv
     if cmd == "backfill":
         return ["policy", "backfill",
                 "--committee", _committee(required=True, allow_all=False),
@@ -246,7 +256,11 @@ def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dic
                     started_at=_now(), finished_at=None, exit_code=None,
                     result=None, output=[], error=None)
         snap = dict(_job)
-    threading.Thread(target=_run_command_job, args=(argv,), daemon=True).start()
+    # Long-running NotebookLM commands need a much wider cap than the default so the
+    # killer timer doesn't abort them mid-report (see _NOTEBOOKLM_TIMEOUT_S).
+    timeout = _NOTEBOOKLM_TIMEOUT_S if cmd in ("run", "backfill", "resume") else _JOB_TIMEOUT_S
+    threading.Thread(target=_run_command_job, args=(argv,),
+                     kwargs={"timeout": timeout}, daemon=True).start()
     return 202, snap
 
 

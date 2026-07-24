@@ -425,13 +425,19 @@ def policy_schedule():
 def policy_run(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     max_per_run: int = typer.Option(5, help="Max meetings to summarise this run (rate/cost guard)"),
+    breadth: bool = typer.Option(
+        False, "--breadth",
+        help="Breadth-first: summarise the newest pending meeting of each committee "
+             "(in priority order) before going deeper — spreads a small daily quota "
+             "across committees instead of draining one committee's backlog.",
+    ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
     from repower.policy.pipeline import run
 
     _require_auth_or_exit()
     keys = None if committee == "all" else [committee]
-    summary = run(keys, max_per_run=max_per_run)
+    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} synthesized={summary['synthesized']}"

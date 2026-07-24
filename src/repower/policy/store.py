@@ -478,13 +478,20 @@ def set_committee_checked(key: str, db_path: str | None = None) -> None:
 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────
 def pending_meetings(key: str | None = None, db_path: str | None = None,
-                     only_enabled: bool = False) -> list[dict]:
+                     only_enabled: bool = False, breadth_first: bool = False) -> list[dict]:
     """Meetings still needing work, in summarisation order, as plain dicts.
 
     Ordered by: **user-requested first** (a dashboard "Generate summary" that was
     queued), then committee **priority** (so a quota-bounded ``policy run`` drains
     high-priority committees first), then committee key to keep a committee's
     meetings grouped, then newest meeting first within a committee.
+
+    With ``breadth_first`` the order instead interleaves committees by how deep into
+    each one's backlog a meeting sits: every committee's **newest** pending meeting
+    (in priority order) comes before any committee's second-newest, and so on. This
+    spreads a small daily NotebookLM quota across committees — getting the latest
+    meeting of each tracked committee current first — instead of draining a single
+    committee's history. ``gen_requested`` still wins over everything.
 
     Includes everything not yet ``done``, plus ``error`` rows that have failed
     fewer than ``MAX_RETRIES`` times (so transient failures are retried). With
@@ -514,8 +521,22 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
                 return c.priority
             return committee_priority(ck)
 
+        # Depth of each meeting within its committee's backlog (0 = that committee's
+        # newest pending meeting). Only computed for the breadth-first interleave;
+        # when off it stays empty so the sort key below is a constant 0 and the
+        # ordering collapses to the original priority-then-key behaviour.
+        depth: dict[int, int] = {}
+        if breadth_first:
+            by_com: dict[str, list[PolicyMeeting]] = {}
+            for m in rows:
+                by_com.setdefault(m.committee_key, []).append(m)
+            for ms in by_com.values():
+                for r, m in enumerate(sorted(ms, key=lambda x: -x.meeting_num)):
+                    depth[m.id] = r
+
         rows.sort(key=lambda m: (
             0 if m.gen_requested else 1,  # user-requested ("Generate summary") first
+            depth.get(m.id, 0),           # breadth-first: newest-of-each committee first
             _prio(m.committee_key),
             m.committee_key,
             -m.meeting_num,

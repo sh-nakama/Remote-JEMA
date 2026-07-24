@@ -758,7 +758,7 @@ function CommitteesManage() {
             ))}
             <span style={s('width:1px;height:18px;background:var(--dv);margin:0 2px')}></span>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')} title={pick('Needs `notebooklm login`', '`notebooklm login`が必要')}>{pick('SUMMARISE ⚿', '要約 ⚿')}</span>
-            {([['run', pick('Summarise all', '全件要約'), {}, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
+            {([['run', pick('Summarise all', '全件要約'), { breadth: true, max_per_run: 8 }, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
               <Hoverable
                 as="span"
                 key={cmd}

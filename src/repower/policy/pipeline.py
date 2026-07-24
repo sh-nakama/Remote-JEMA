@@ -372,18 +372,21 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
 
 
 def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
-        db_path: str | None = None, states: tuple[str, ...] | None = None) -> dict:
+        db_path: str | None = None, states: tuple[str, ...] | None = None,
+        breadth_first: bool = False) -> dict:
     """Summarise pending meetings (gated on auth), then refresh each committee's synthesis.
 
     ``states`` lets ``resume`` target in-flight rows; default is all not-done work.
-    Returns a summary dict.
+    ``breadth_first`` spreads the run across committees (newest meeting of each, in
+    priority order) rather than draining one committee's backlog — see
+    ``pending_meetings``. Returns a summary dict.
     """
     nb.require_auth()
 
     # When no committees are named ("all"), restrict to tracked (enabled) ones so
     # untracking a committee removes it from the daily run. Explicit --committee
     # keys are an intentional override and run regardless of the enabled flag.
-    work = pending_meetings(db_path=db_path, only_enabled=(not keys))
+    work = pending_meetings(db_path=db_path, only_enabled=(not keys), breadth_first=breadth_first)
     if keys:
         work = [m for m in work if m["committee_key"] in keys]
     if states:
