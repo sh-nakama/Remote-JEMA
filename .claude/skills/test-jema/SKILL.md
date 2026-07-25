@@ -20,7 +20,7 @@ GitHub issues. Nothing is filed to GitHub until the user reviews and approves.
    only. They are explicitly told NOT to run `gh`, `git push`, or any network/
    write command. Filing to GitHub happens only in the review gate below, run by
    the main agent, after explicit user approval.
-3. **No Aurora branding** anywhere in drafts or issues (see CLAUDE.md).
+3. **No banned-brand traces** anywhere in drafts or issues (see the hard rule in CLAUDE.md).
 
 ## Step 1 — Start the backend (API on :8787)
 

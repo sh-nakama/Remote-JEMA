@@ -82,7 +82,7 @@ def _fmt_price(v: float | int | None) -> str:
     """A yen/kW clearing price as ``¥12,345`` (thousands-separated), or ``—``."""
     if v is None:
         return "—"
-    return "¥{:,}".format(int(round(v)))
+    return f"¥{int(round(v)):,}"
 
 
 def _fmt_gw(v: float | int | None) -> str:

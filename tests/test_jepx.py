@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from repower.scrapers.jepx_spot import parse_jepx_csv
 
-
 # JEPX CSV header. We deliberately include エリアプライス東京 (tepco) and
 # エリアプライス関西 (kansai) but OMIT エリアプライス北海道 (hokkaido) so we can
 # assert the missing area is NOT silently filled from another column.

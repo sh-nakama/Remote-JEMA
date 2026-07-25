@@ -1,6 +1,9 @@
 import React, { useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
+import { useManifest } from '../lib/data'
+import { FreshnessChip } from '../lib/freshness'
+import { chip, segBase, filterChipBase, slotLabel } from '../lib/chartkit'
 import { downloadIcs } from '../lib/download'
 import {
   today as fxToday,
@@ -20,72 +23,16 @@ import { useSystemLive, buildPaths, usePolicyMeetings } from './MarketOverview.l
 
 const NOW = 29 // 14:30 slot
 
+// Freshness-rail labels for the manifest's per-source max data dates.
+const SRC_META: Record<string, { en: string; ja: string; subEn: string; subJa: string }> = {
+  system_price: { en: 'JEPX spot', ja: 'JEPXスポット', subEn: 'day-ahead · daily', subJa: '前日約定' },
+  area_price: { en: 'Area prices', ja: 'エリア価格', subEn: '', subJa: '' },
+  supply: { en: 'Supply & demand', ja: '需給実績', subEn: 'per-TSO · 30-min', subJa: '' },
+}
+
 // ---- helpers ported from the DCLogic ----
-function slotLabel(i: number): string {
-  return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00')
-}
-
-const chipBaseStyle = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 4,
-  fontSize: 11.5,
-  fontWeight: 600,
-  padding: '3px 9px',
-  borderRadius: 999,
-  marginTop: 9,
-  fontFeatureSettings: "'tnum' 1",
-} as const
-
-interface Chip {
-  txt: string
-  style: React.CSSProperties
-}
-
-function chip(cur: number, prev: number): Chip {
-  const d = cur - prev
-  const p = prev ? (d / prev) * 100 : 0
-  if (Math.abs(p) < 0.5) {
-    return {
-      txt: '— ±0.0%',
-      style: { ...chipBaseStyle, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' },
-    }
-  }
-  const up = d > 0
-  const sgn = up ? '+' : '−'
-  return {
-    txt: (up ? '▲ ' : '▼ ') + sgn + Math.abs(d).toFixed(2) + ' (' + sgn + Math.abs(p).toFixed(1) + '%)',
-    style: {
-      ...chipBaseStyle,
-      background: up ? 'var(--upBg)' : 'var(--dnBg)',
-      color: up ? 'var(--up)' : 'var(--dn)',
-    },
-  }
-}
-
-const segBase = (on: boolean): React.CSSProperties => ({
-  padding: '4px 13px',
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'pointer',
-  background: on ? 'var(--ac)' : 'transparent',
-  color: on ? '#FFFFFF' : 'var(--mut)',
-  transition: 'all .15s',
-  whiteSpace: 'nowrap',
-})
-
-const filterChipBase = (on: boolean): React.CSSProperties => ({
-  fontSize: 11.5,
-  fontWeight: 600,
-  padding: '3px 11px',
-  borderRadius: 999,
-  cursor: 'pointer',
-  border: on ? '1px solid var(--ac)' : '1px solid var(--bd2)',
-  background: on ? 'var(--acTint)' : 'var(--bg1)',
-  color: on ? 'var(--acT)' : 'var(--mut)',
-  whiteSpace: 'nowrap',
-})
+// chip / segBase / filterChipBase / slotLabel now live in lib/chartkit
+// (shared with the other screens).
 
 const avg = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length
 
@@ -103,12 +50,12 @@ const shortLabel = (m: Meeting, ja: boolean): string => {
 }
 
 export function MarketOverviewScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow, refreshData, refreshing } = useApp()
   const dark = theme === 'dark'
   const L = lang
 
   // local UI state (defaults from DCLogic)
-  const [seg, setSeg] = useState<'today' | 'yday' | 'avg7'>('today')
+  const [seg, setSeg] = useState<'today' | 'avg7'>('today')
   const [ghostOn, setGhostOn] = useState<boolean>(true) // ghostDefault
   const [hover, setHover] = useState<number | null>(null)
   const [showWhy, setShowWhy] = useState(false)
@@ -119,6 +66,7 @@ export function MarketOverviewScreen() {
   const showBrief = false // props.showAiBrief default
 
   // ---- live system-price data (falls back to fixtures while loading) ----
+  const manifest = useManifest()
   const liveSys = useSystemLive(fxToday, fxYday, fxAvg7)
   const today = liveSys.today
   const yday = liveSys.yday
@@ -143,7 +91,10 @@ export function MarketOverviewScreen() {
   const tMarket = () => setScreen('market')
   const tPolicy = () => setScreen('policy')
   const tCapacity = () => setScreen('capacity')
-  const tRefresh = () => toast('Data refreshed · データを更新しました')
+  const tRefresh = () => {
+    refreshData()
+    toast('Reloaded latest data · 最新データを再取得しました')
+  }
   const tIcs = () => {
     if (upcoming.length === 0) {
       toast(L === 'ja' ? '開催予定の会合はありません' : 'No scheduled meetings to export')
@@ -187,20 +138,38 @@ export function MarketOverviewScreen() {
   const k4 = chip(today[loI], Math.min(...yday))
 
   // ---- chart ----
-  const main = seg === 'today' ? today : seg === 'yday' ? yday : avg7
-  const mainPath = seg === 'today' ? paths.today : seg === 'yday' ? paths.yday : paths.avg7
-  const mainArea = seg === 'today' ? paths.todayA : seg === 'yday' ? paths.ydayA : paths.avg7A
+  const main = seg === 'today' ? today : avg7
+  const mainPath = seg === 'today' ? paths.today : paths.avg7
+  const mainArea = seg === 'today' ? paths.todayA : paths.avg7A
   const ghostVis = ghostOn && seg === 'today'
   const mainLegend =
     seg === 'today'
       ? L === 'ja'
         ? '本日 Today'
         : 'Today 本日'
-      : seg === 'yday'
-        ? 'Yesterday 前日'
-        : '7-day avg 7日平均'
+      : '7-day avg 7日平均'
   const tipOn = hover !== null && hover !== undefined
-  const tipMainLabel = seg === 'today' ? 'Today' : seg === 'yday' ? 'Yesterday' : '7-day avg'
+  const tipMainLabel = seg === 'today' ? 'Today' : '7-day avg'
+  // Real calendar dates for the hovered series (from system.json); blank while
+  // fixtures load or for the 7-day average (which spans multiple days).
+  const fmtChartDate = (iso: string | null): string => {
+    if (!iso) return ''
+    const d = new Date(iso + 'T00:00:00')
+    if (Number.isNaN(+d)) return ''
+    return L === 'ja' ? `${d.getMonth() + 1}月${d.getDate()}日` : `${d.getDate()} ${MO[d.getMonth() + 1]}`
+  }
+  const mainDateStr = seg === 'today' ? fmtChartDate(liveSys.dateToday) : ''
+  const ydayDateStr = fmtChartDate(liveSys.dateYday)
+  // Bilingual data date + latest slot for the KPI cards and Market Pulse (both
+  // languages are shown together on these labels).
+  const dataDate = ((): { en: string; ja: string } => {
+    const iso = liveSys.dateToday
+    if (!iso) return { en: '', ja: '' }
+    const d = new Date(iso + 'T00:00:00')
+    if (Number.isNaN(+d)) return { en: '', ja: '' }
+    return { en: `${d.getDate()} ${MO[d.getMonth() + 1]}`, ja: `${d.getMonth() + 1}月${d.getDate()}日` }
+  })()
+  const nowSlot = liveSys.now.slot
 
   let tip: {
     slot: string
@@ -256,17 +225,31 @@ export function MarketOverviewScreen() {
   // ---- pulse rows ----
   const pulse = useMemo(() => {
     return [...areas]
-      .map((a) => ({ ...a, latest: liveSys.areasNow[a.key] ?? a.series[NOW], prev: yday[NOW] + a.off }))
+      .map((a) => ({
+        ...a,
+        latest: liveSys.areasNow[a.key] ?? a.series[NOW],
+        prev: liveSys.areasYday[a.key] ?? yday[NOW] + a.off,
+      }))
       .sort((a, b) => b.latest - a.latest)
       .map((a, i) => {
-        const mn = Math.min(...a.series)
-        const mx = Math.max(...a.series)
-        const pts = a.series
-          .map(
-            (v, j) =>
-              ((j / 47) * 64).toFixed(1) + ',' + (15.5 - ((v - mn) / (mx - mn || 1)) * 13).toFixed(1),
-          )
-          .join(' ')
+        // Real per-area intraday when the snapshot carries it; fixture otherwise.
+        const liveSeries = liveSys.areasToday[a.key]
+        const liveVals = liveSeries
+          ? liveSeries.filter((v): v is number => typeof v === 'number' && Number.isFinite(v))
+          : []
+        const useLive = liveVals.length >= 2
+        const mn = useLive ? Math.min(...liveVals) : Math.min(...a.series)
+        const mx = useLive ? Math.max(...liveVals) : Math.max(...a.series)
+        const norm = (v: number, j: number) =>
+          ((j / 47) * 64).toFixed(1) + ',' + (15.5 - ((v - mn) / (mx - mn || 1)) * 13).toFixed(1)
+        const pts = (
+          useLive
+            ? liveSeries!.reduce<string[]>((acc, v, j) => {
+                if (typeof v === 'number' && Number.isFinite(v)) acc.push(norm(v, j))
+                return acc
+              }, [])
+            : a.series.map((v, j) => norm(v, j))
+        ).join(' ')
         const d = a.latest - a.prev
         const up = d > 0
         const col = dark ? a.dk || a.color : a.color
@@ -496,24 +479,41 @@ export function MarketOverviewScreen() {
   })
 
   // ---- freshness rows ----
-  // JEPX spot / Area prices freshness dates come from the same live snapshot that
-  // drives the KPI tiles + chart (system.json date_today), not a hardcoded literal.
+  // Live: the manifest's per-source max data dates (sources), the same signal the
+  // FreshnessChip uses. Fixture rows (frozen dates) remain the loading/fallback
+  // state; while falling back, JEPX spot / Area prices dates still come from the
+  // live snapshot that drives the KPI tiles + chart (system.json date_today).
   const liveDate = liveSys.ready ? liveSys.dateToday : null
-  const fresh = freshData.map((f) => ({
-    key: f.en,
-    label: L === 'ja' ? f.ja : f.en,
-    sub: L === 'ja' ? f.subJa || f.subEn : f.subEn,
-    value: liveDate && (f.en === 'JEPX spot' || f.en === 'Area prices') ? liveDate : f.v,
-    ok: f.ok,
-    delayed: !!f.delayed,
-    dotStyle: {
-      width: 7,
-      height: 7,
-      borderRadius: 999,
-      background: f.ok ? 'var(--okDot)' : 'var(--warnDot)',
-      flexShrink: 0,
-    } as React.CSSProperties,
-  }))
+  const freshDot = (ok: boolean): React.CSSProperties => ({
+    width: 7,
+    height: 7,
+    borderRadius: 999,
+    background: ok ? 'var(--okDot)' : 'var(--warnDot)',
+    flexShrink: 0,
+  })
+  const fresh = manifest.data
+    ? Object.entries(manifest.data.sources).map(([key, v]) => {
+        const meta = SRC_META[key] ?? { en: key, ja: key, subEn: '', subJa: '' }
+        const ok = v != null
+        return {
+          key,
+          label: L === 'ja' ? meta.ja : meta.en,
+          sub: L === 'ja' ? meta.subJa || meta.subEn : meta.subEn,
+          value: v ?? '—',
+          ok,
+          delayed: !ok,
+          dotStyle: freshDot(ok),
+        }
+      })
+    : freshData.map((f) => ({
+        key: f.en,
+        label: L === 'ja' ? f.ja : f.en,
+        sub: L === 'ja' ? f.subJa || f.subEn : f.subEn,
+        value: liveDate && (f.en === 'JEPX spot' || f.en === 'Area prices') ? liveDate : f.v,
+        ok: f.ok,
+        delayed: !!f.delayed,
+        dotStyle: freshDot(f.ok),
+      }))
 
   // computed top-bar / pulse header values
   // System/Tokyo "now" are read from the same snapshot slot (liveSys.now) so the
@@ -525,9 +525,12 @@ export function MarketOverviewScreen() {
   const tokyoNow = tokyoNowV.toFixed(2)
   const spread = (sysNowV - tokyoNowV).toFixed(2)
 
-  return (
-    <>
-      {/* ============ SIDEBAR ============ */}
+  // ---- section renderers ----
+  // Mechanical extraction for navigability: each renderer holds one section's
+  // JSX verbatim (same closures over state) and is called from the single
+  // return at the bottom — the rendered tree is identical.
+
+  const renderSidebar = () => (
       <div style={s(`width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);flex-direction:column;padding:22px 16px 16px;overflow-y:auto;${collapsed ? 'display:none' : 'display:flex'}`)}>
         <div style={s('padding:0 8px')}>
           <div style={s('display:flex;align-items:center;gap:7px')}>
@@ -594,19 +597,18 @@ export function MarketOverviewScreen() {
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>`} />
             Data freshness · データ鮮度
           </div>
-          <div style={s("font-size:12px;color:rgba(255,255,255,.78);margin-top:6px")}>Last sync <span style={s("font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1")}>06:10 JST</span></div>
+          <FreshnessChip inverse style={{ marginTop: 6 }} />
           <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>Hugging Face sync · GitHub Actions daily</div>
           <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />
+            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>
             Refresh · 更新
           </Hoverable>
         </div>
       </div>
+  )
 
-      {/* ============ MAIN COLUMN ============ */}
-      <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
-
-        {/* Top bar */}
+  // Top bar (breadcrumb, search, theme/language toggles, notifications popover)
+  const renderTopBar = () => (
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Overview <span style={s('color:var(--fnt3)')}>·</span> マーケット概況</div>
           <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
@@ -615,7 +617,7 @@ export function MarketOverviewScreen() {
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
           </div>
           <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
             {dark && (
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />
             )}
@@ -623,7 +625,7 @@ export function MarketOverviewScreen() {
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />
             )}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif}>
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
           </Hoverable>
@@ -677,12 +679,10 @@ export function MarketOverviewScreen() {
             </div>
           )}
         </div>
+  )
 
-        {/* Scrollable content */}
-        <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
-          <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:22px')}>
-
-            {/* A · Page header */}
+  // A · Page header (title, updated badge, CTA buttons)
+  const renderPageHeader = () => (
             <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:16px')}>
               <div>
                 <div style={s('display:flex;align-items:baseline;gap:10px')}>
@@ -700,8 +700,10 @@ export function MarketOverviewScreen() {
                 <Hoverable base="background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" hover="background:var(--acTint2);border-color:var(--ac)" onClick={tPolicy}>All Committees</Hoverable>
               </div>
             </div>
+  )
 
-            {/* B · KPI strip */}
+  // B · KPI strip
+  const renderKpiStrip = () => (
             <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
               <Hoverable base="background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;position:relative;box-shadow:var(--sh1a);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2a)" onClick={tMarket}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
@@ -714,7 +716,7 @@ export function MarketOverviewScreen() {
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
-                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Today's average<br />本日平均</div>
+                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>{dataDate.en ? `Average · ${dataDate.en}` : 'Average'}<br />{dataDate.ja ? `平均 · ${dataDate.ja}` : '平均'}</div>
                   <Hoverable as="span" base="width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0" hover="color:var(--ac);background:var(--bg0)"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></Hoverable>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{avg(today).toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
@@ -723,7 +725,7 @@ export function MarketOverviewScreen() {
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
-                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Today's high<br />本日高値</div>
+                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>{dataDate.en ? `High · ${dataDate.en}` : 'High'}<br />{dataDate.ja ? `高値 · ${dataDate.ja}` : '高値'}</div>
                   <span style={s('width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></span>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{today[hiI].toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
@@ -732,7 +734,7 @@ export function MarketOverviewScreen() {
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
-                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Today's low<br />本日安値</div>
+                  <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>{dataDate.en ? `Low · ${dataDate.en}` : 'Low'}<br />{dataDate.ja ? `安値 · ${dataDate.ja}` : '安値'}</div>
                   <span style={s('width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></span>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{today[loI].toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
@@ -740,11 +742,10 @@ export function MarketOverviewScreen() {
                 <span style={k4.style}>{k4.txt}</span>
               </Hoverable>
             </div>
+  )
 
-            {/* Row: C intraday chart + D market pulse */}
-            <div style={s('display:grid;grid-template-columns:2fr 1fr;gap:20px;align-items:stretch')}>
-
-              {/* C · System-price intraday */}
+  // C · System-price intraday chart
+  const renderIntradayChart = () => (
               <div ref={chartRef} style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);min-height:360px;display:flex;flex-direction:column')}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                   <div>
@@ -754,10 +755,9 @@ export function MarketOverviewScreen() {
                   <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
                     <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
                       <span style={segBase(seg === 'today')} onClick={() => { setSeg('today'); setHover(null) }}>Today</span>
-                      <span style={segBase(seg === 'yday')} onClick={() => { setSeg('yday'); setHover(null) }}>Yesterday</span>
                       <span style={segBase(seg === 'avg7')} onClick={() => { setSeg('avg7'); setHover(null) }}>7-day avg</span>
                     </div>
-                    <Hoverable as="span" base="width:30px;height:30px;border-radius:8px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="color:var(--ac);background:var(--bg0)" onClick={fs} title="Fullscreen · 全画面"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M21 8V5a2 2 0 0 0-2-2h-3"></path><path d="M3 16v3a2 2 0 0 0 2 2h3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path></svg>`} /></Hoverable>
+                    <Hoverable as="span" base="width:30px;height:30px;border-radius:8px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="color:var(--ac);background:var(--bg0)" onClick={fs} title="Fullscreen · 全画面" aria-label="Fullscreen chart"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M21 8V5a2 2 0 0 0-2-2h-3"></path><path d="M3 16v3a2 2 0 0 0 2 2h3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path></svg>`} /></Hoverable>
                   </div>
                 </div>
 
@@ -797,9 +797,9 @@ export function MarketOverviewScreen() {
                   </svg>
                   {tipOn && tip && (
                     <div style={tip.style}>
-                      <div style={s("font-weight:600;font-feature-settings:'tnum' 1")}>{tip.slot} <span style={s('font-weight:400;color:rgba(255,255,255,.65)')}>JST</span></div>
+                      <div style={s("font-weight:600;font-feature-settings:'tnum' 1")}>{mainDateStr ? mainDateStr + ' · ' : ''}{tip.slot} <span style={s('font-weight:400;color:rgba(255,255,255,.65)')}>JST</span></div>
                       <div style={s("display:flex;justify-content:space-between;gap:16px;margin-top:3px;font-feature-settings:'tnum' 1")}><span style={s('color:rgba(255,255,255,.75)')}>{tipMainLabel}</span><span style={s('font-weight:600')}>¥{tip.main}</span></div>
-                      <div style={s("display:flex;justify-content:space-between;gap:16px;font-feature-settings:'tnum' 1")}><span style={s('color:rgba(255,255,255,.75)')}>Yesterday</span><span>¥{tip.ghost}</span></div>
+                      <div style={s("display:flex;justify-content:space-between;gap:16px;font-feature-settings:'tnum' 1")}><span style={s('color:rgba(255,255,255,.75)')}>Yesterday{ydayDateStr ? ` · ${ydayDateStr}` : ''}</span><span>¥{tip.ghost}</span></div>
                       <div style={s("margin-top:2px;font-feature-settings:'tnum' 1")}><span style={tip.deltaS}>{tip.delta}</span></div>
                     </div>
                   )}
@@ -811,10 +811,13 @@ export function MarketOverviewScreen() {
                   <span style={s('margin-left:auto;font-size:11px;color:var(--mut)')}>Click legend to toggle · slot click deep-links to Market Data</span>
                 </div>
               </div>
+  )
 
-              {/* D · Market Pulse */}
+  // D · Market Pulse (per-area latest prices)
+  const renderMarketPulse = () => (
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column;min-width:0')}>
                 <div style={s('font-size:16px;font-weight:600')}>Market Pulse <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>スポット概況</span></div>
+                <div style={s("font-size:11.5px;color:var(--mut);margin-top:3px;font-feature-settings:'tnum' 1")}>{dataDate.en ? `${dataDate.en} · ${dataDate.ja}` : '—'}{nowSlot ? ` · ${nowSlot} JST` : ''}</div>
                 <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:12px')}>
                   <span style={s('font-size:12.5px;color:var(--mut)')}>System now · システム</span>
                   <span style={s("font-size:15px;font-weight:700;font-feature-settings:'tnum' 1")}>¥{sysNow}</span>
@@ -828,7 +831,7 @@ export function MarketOverviewScreen() {
                   <span style={s("font-size:15px;font-weight:700;color:var(--dn);font-feature-settings:'tnum' 1")}>{spread}</span>
                 </div>
                 <div style={s('height:1px;background:var(--dv);margin:13px 0 9px')}></div>
-                <div style={s('font-size:11.5px;font-weight:600;color:var(--mut);letter-spacing:.04em;margin-bottom:4px')}>PER-AREA PRICES (9) · エリア別価格 <span style={s('font-weight:400;letter-spacing:0')}>— ¥/kWh, latest slot</span></div>
+                <div style={s('font-size:11.5px;font-weight:600;color:var(--mut);letter-spacing:.04em;margin-bottom:4px')}>PER-AREA PRICES (9) · エリア別価格 <span style={s('font-weight:400;letter-spacing:0')}>— ¥/kWh, latest slot · trend today · ▲▼ vs yesterday</span></div>
                 <div style={s('display:flex;flex-direction:column;min-width:0')}>
                   {pulse.map((row) => (
                     <Hoverable key={row.key} base="" hover="background:var(--hov)" style={row.rowStyle} onClick={tMarket}>
@@ -843,9 +846,10 @@ export function MarketOverviewScreen() {
                 </div>
                 <div style={s('font-size:11px;color:var(--mut);margin-top:8px')}>Sorted by latest price · highest area tinted · click row → Market Data</div>
               </div>
-            </div>
+  )
 
-            {/* Recent & Scheduled meetings timeline */}
+  // Recent & Scheduled meetings timeline
+  const renderTimeline = () => (
             <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px 10px;box-shadow:var(--sh1)')}>
               <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                 <div>
@@ -884,9 +888,10 @@ export function MarketOverviewScreen() {
                 </div>
               )}
             </div>
+  )
 
-            {/* AI Daily Brief (PROPOSED, tweakable) */}
-            {showBrief && (
+  // AI Daily Brief (PROPOSED, tweakable — rendered only when showBrief)
+  const renderAiBrief = () => (
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;align-items:center;gap:18px')}>
                 <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="width:34px;height:34px;color:var(--fnt3);flex-shrink:0"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>`} />
                 <div style={s('flex:1')}>
@@ -895,12 +900,10 @@ export function MarketOverviewScreen() {
                 </div>
                 <span style={s('border:1px solid var(--bd);color:var(--fnt2);border-radius:999px;padding:7px 16px;font-size:12.5px;font-weight:500;cursor:not-allowed;flex-shrink:0')} title="Coming soon · 近日公開">Generate · 生成</span>
               </div>
-            )}
+  )
 
-            {/* Row: E radar + F freshness */}
-            <div style={s('display:grid;grid-template-columns:2fr 1fr;gap:20px;align-items:start')}>
-
-              {/* E · METI Committee Radar */}
+  // E · METI Committee Radar
+  const renderRadar = () => (
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;position:relative')}>
                   <div>
@@ -908,7 +911,7 @@ export function MarketOverviewScreen() {
                     <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Recent meetings, ranked by importance · 重要度順・直近の会合</div>
                     <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> View data not connected — ranked by recency &amp; institutional weight · 視聴回数データ未接続</div>
                   </div>
-                  <Hoverable as="span" base="width:28px;height:28px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer;flex-shrink:0" hover="background:var(--bg2);color:var(--acT)" onClick={toggleWhy} title="Why this ranking? · この順位の理由"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`} /></Hoverable>
+                  <Hoverable as="span" base="width:28px;height:28px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer;flex-shrink:0" hover="background:var(--bg2);color:var(--acT)" onClick={toggleWhy} title="Why this ranking? · この順位の理由" aria-label="Why this ranking"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`} /></Hoverable>
                   {showWhy && (
                     <div style={s("position:absolute;right:0;top:34px;width:330px;background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);padding:15px;z-index:40;font-size:12px;color:var(--tx2)")}>
                       <div style={s('font-size:13px;font-weight:600;color:var(--tx)')}>Why this ranking? <span style={s('font-weight:400;color:var(--mut)')}>この順位の理由</span></div>
@@ -947,6 +950,16 @@ export function MarketOverviewScreen() {
                             <span
                               onClick={(e) => { e.stopPropagation(); if (m.comKey) toggleFollow(m.comKey) }}
                               title={m.following ? 'Following · フォロー中（クリックで解除）' : 'Follow · フォローする'}
+                              role="button"
+                              tabIndex={0}
+                              aria-label={m.following ? 'Unfollow committee' : 'Follow committee'}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault()
+                                  e.stopPropagation()
+                                  if (m.comKey) toggleFollow(m.comKey)
+                                }
+                              }}
                               style={{ display: 'inline-flex', alignItems: 'center', cursor: 'pointer', flexShrink: 0, color: m.following ? 'var(--ac)' : 'var(--fnt3)' }}
                             >
                               <RawSvg html={`<svg viewBox="0 0 24 24" fill="${m.following ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} />
@@ -981,8 +994,10 @@ export function MarketOverviewScreen() {
                   <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer" hover="color:var(--ac)" onClick={tPolicy}>See all meetings · 全ての会合を見る →</Hoverable>
                 </div>
               </div>
+  )
 
-              {/* F · Data freshness rail */}
+  // F · Data freshness rail
+  const renderFreshness = () => (
               <div style={s('background:linear-gradient(150deg,var(--navyA) 0%,var(--navyB) 100%);border-radius:20px;padding:20px;color:#FFFFFF;box-shadow:var(--sh1a)')}>
                 <div style={s('font-size:16px;font-weight:600')}>Data Freshness <span style={s('font-size:12.5px;font-weight:400;color:rgba(255,255,255,.55)')}>データ鮮度</span></div>
                 <div style={s('font-size:11.5px;color:rgba(255,255,255,.55);margin-top:1px')}>Provenance &amp; last ingest · 取得元と最終更新</div>
@@ -1009,8 +1024,37 @@ export function MarketOverviewScreen() {
                   <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Refresh · 更新
                 </Hoverable>
               </div>
+  )
+
+  return (
+    <>
+      {/* ============ SIDEBAR ============ */}
+      {renderSidebar()}
+
+      {/* ============ MAIN COLUMN ============ */}
+      <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
+        {renderTopBar()}
+
+        {/* Scrollable content */}
+        <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
+          <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:22px')}>
+            {renderPageHeader()}
+            {renderKpiStrip()}
+
+            {/* Row: C intraday chart + D market pulse */}
+            <div style={s('display:grid;grid-template-columns:2fr 1fr;gap:20px;align-items:stretch')}>
+              {renderIntradayChart()}
+              {renderMarketPulse()}
             </div>
 
+            {renderTimeline()}
+            {showBrief && renderAiBrief()}
+
+            {/* Row: E radar + F freshness */}
+            <div style={s('display:grid;grid-template-columns:2fr 1fr;gap:20px;align-items:start')}>
+              {renderRadar()}
+              {renderFreshness()}
+            </div>
           </div>
         </div>
       </div>

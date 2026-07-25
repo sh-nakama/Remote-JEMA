@@ -7,24 +7,27 @@ Supports toggling any combination of volume metrics.
 """
 from __future__ import annotations
 
-import json
+from html import escape
+
 import streamlit.components.v1 as components
+
+from repower.dashboard.components._util import js_json
 
 # Neutral chart accent colour (chart title, tooltip bg, expand button).
 _ACCENT = "#1B2A4A"
 _ACCENT_RGB = "27,42,74"
 
 
-def render_volume_chart(
+def build_volume_chart_html(
     data: list[dict],
     active_metrics: list[str],
     color_map: dict[str, str],
     label_map: dict[str, str],
     title: str = "Volume",
     height: int = 280,
-):
+) -> str:
     """
-    Render an interactive D3.js bar/area chart for volume metrics.
+    Build the standalone HTML document for the D3.js volume chart.
 
     Parameters
     ----------
@@ -42,10 +45,11 @@ def render_volume_chart(
     height : int
         Component height in pixels.
     """
-    data_json = json.dumps(data, default=str)
-    color_json = json.dumps(color_map)
-    label_json = json.dumps(label_map)
-    active_json = json.dumps(active_metrics)
+    data_json = js_json(data, default=str)
+    color_json = js_json(color_map)
+    label_json = js_json(label_map)
+    active_json = js_json(active_metrics)
+    title = escape(str(title))
 
     svg_height = height - 60
 
@@ -116,10 +120,12 @@ def render_volume_chart(
         const allMetrics = {active_json};
         const svgH = {svg_height};
 
-        // Parse dates
+        // Parse dates; missing values stay null (gaps), instead of collapsing to 0.
         rawData.forEach(d => {{
             d._dt = new Date(d.datetime);
-            allMetrics.forEach(m => {{ d[m] = +(d[m] || 0); }});
+            allMetrics.forEach(m => {{
+                d[m] = (d[m] != null && Number.isFinite(+d[m])) ? +d[m] : null;
+            }});
         }});
 
         const activeMetrics = new Set(allMetrics);
@@ -151,16 +157,18 @@ def render_volume_chart(
 
             // MW y-axis (left)
             const activeMW = mwMetrics.filter(m => activeMetrics.has(m));
-            const maxMW = activeMW.length > 0
+            let maxMW = activeMW.length > 0
                 ? d3.max(rawData, d => d3.max(activeMW, m => d[m])) * 1.1
                 : 100;
+            if (!Number.isFinite(maxMW) || maxMW <= 0) maxMW = 100;
             const yMW = d3.scaleLinear().domain([0, maxMW]).nice().range([innerH, 0]);
 
             // Count y-axis (right) — only if count metrics are active
             const activeCnt = cntMetrics.filter(m => activeMetrics.has(m));
-            const maxCnt = activeCnt.length > 0
+            let maxCnt = activeCnt.length > 0
                 ? d3.max(rawData, d => d3.max(activeCnt, m => d[m])) * 1.1
                 : 10;
+            if (!Number.isFinite(maxCnt) || maxCnt <= 0) maxCnt = 10;
             const yCnt = d3.scaleLinear().domain([0, maxCnt]).nice().range([innerH, 0]);
 
             const svg = d3.select("#chart").append("svg")
@@ -203,9 +211,14 @@ def render_volume_chart(
             // ── Draw lines / areas ───────────────────────────────────
             const sorted = rawData.slice().sort((a,b) => a._dt - b._dt);
 
-            // Missing MW as shaded area between demand and contracted
-            if (activeMetrics.has("missing_mw") && activeMetrics.has("demand_mw")) {{
+            // Missing MW as shaded area between demand and contracted.
+            // Only when the records actually carry both series — the caller
+            // passes a constant metric list, so membership alone proves nothing.
+            const hasBandData = sorted.some(
+                d => Number.isFinite(d.missing_mw) && Number.isFinite(d.contracted_mw));
+            if (activeMetrics.has("missing_mw") && activeMetrics.has("demand_mw") && hasBandData) {{
                 const areaGen = d3.area()
+                    .defined(d => Number.isFinite(d.demand_mw) && Number.isFinite(d.contracted_mw))
                     .x(d => x(d._dt))
                     .y0(d => yMW(Math.min(d.demand_mw, d.contracted_mw)))
                     .y1(d => yMW(d.demand_mw))
@@ -253,7 +266,6 @@ def render_volume_chart(
                     .x(d => x(d._dt))
                     .y(d => yCnt(d[metric]))
                     .curve(d3.curveStepAfter);
-                const sorted = rawData.slice().sort((a,b) => a._dt - b._dt);
                 svg.append("path").datum(sorted)
                     .attr("d", lineGen)
                     .attr("fill", "none")
@@ -352,5 +364,19 @@ def render_volume_chart(
     </body>
     </html>
     """
+    return html
 
+
+def render_volume_chart(
+    data: list[dict],
+    active_metrics: list[str],
+    color_map: dict[str, str],
+    label_map: dict[str, str],
+    title: str = "Volume",
+    height: int = 280,
+):
+    """Render the volume chart into the Streamlit app (see build_volume_chart_html)."""
+    html = build_volume_chart_html(
+        data, active_metrics, color_map, label_map, title=title, height=height,
+    )
     components.html(html, height=height, scrolling=False)

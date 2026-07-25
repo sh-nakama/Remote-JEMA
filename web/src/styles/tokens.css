@@ -16,6 +16,13 @@ body {
   box-sizing: border-box;
 }
 
+/* Refresh-button feedback: the icon spins while a data refetch is in flight. */
+@keyframes jema-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 [data-jema-root] {
   --bg0: #f6f8fb;
   --bg1: #ffffff;

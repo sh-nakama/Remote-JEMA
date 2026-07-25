@@ -69,7 +69,8 @@ _ENGLISH_DIGEST_Q = (
     "Key decisions, Points of disagreement, Action items. Base everything strictly on the sources."
 )
 
-_SYNTHESIS_PROMPT = """この委員会のこれまでの会合要約に基づき、現在の政策的な議論の全体像を、会合番号を付して要約してください。
+_SYNTHESIS_PROMPT = """\
+この委員会のこれまでの会合要約に基づき、現在の政策的な議論の全体像を、会合番号を付して要約してください。
 必ず以下の4部構成とすること。
 
 (1) 現在の主要論点
@@ -169,6 +170,16 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             return "error"
 
         title = f"{committee.key} 第{meeting_num}回"
+        # A resumed/retried meeting may still own the notebook from its earlier
+        # interrupted attempt (the wait-timeout path deliberately keeps it). The
+        # rerun restages every source from scratch, so reusing that notebook would
+        # duplicate them — delete it first instead of orphaning it.
+        stale_notebook_id = _meeting_notebook_id(meeting_row, db_path)
+        if stale_notebook_id:
+            try:
+                nb.delete_notebook(stale_notebook_id)
+            except nb.NotebookLMError as e:
+                logger.warning("could not delete stale notebook %s: %s", stale_notebook_id, e)
         notebook_id = nb.create_notebook(title)
         # Persist the notebook id + state BEFORE generation, so a crash is recoverable.
         update_meeting(meeting_row, db_path=db_path, state="ingesting", notebook_id=notebook_id)
@@ -298,6 +309,17 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
             "policy synthesis for %s near source cap (%d/%d) — archive roll-up needed",
             committee.key, src_count, NOTEBOOKLM_SOURCE_CAP,
         )
+    if src_count >= NOTEBOOKLM_SOURCE_CAP and new_meetings:
+        # Hard gate: at the cap, adding would only fail/duplicate on the NotebookLM
+        # side. Leave these meetings unsynthesized (synth_done stays unset, so a
+        # future archive roll-up can fold them in) but still regenerate the report
+        # below so the synthesis keeps refreshing from the existing sources.
+        logger.error(
+            "policy synthesis for %s AT source cap (%d/%d) — %d new briefing(s) NOT "
+            "added; archive roll-up required",
+            committee.key, src_count, NOTEBOOKLM_SOURCE_CAP, len(new_meetings),
+        )
+        new_meetings = []
 
     work = _scratch() / committee.key / "synthesis"
     work.mkdir(parents=True, exist_ok=True)
@@ -350,18 +372,21 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
 
 
 def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
-        db_path: str | None = None, states: tuple[str, ...] | None = None) -> dict:
+        db_path: str | None = None, states: tuple[str, ...] | None = None,
+        breadth_first: bool = False) -> dict:
     """Summarise pending meetings (gated on auth), then refresh each committee's synthesis.
 
     ``states`` lets ``resume`` target in-flight rows; default is all not-done work.
-    Returns a summary dict.
+    ``breadth_first`` spreads the run across committees (newest meeting of each, in
+    priority order) rather than draining one committee's backlog — see
+    ``pending_meetings``. Returns a summary dict.
     """
     nb.require_auth()
 
     # When no committees are named ("all"), restrict to tracked (enabled) ones so
     # untracking a committee removes it from the daily run. Explicit --committee
     # keys are an intentional override and run regardless of the enabled flag.
-    work = pending_meetings(db_path=db_path, only_enabled=(not keys))
+    work = pending_meetings(db_path=db_path, only_enabled=(not keys), breadth_first=breadth_first)
     if keys:
         work = [m for m in work if m["committee_key"] in keys]
     if states:
@@ -429,6 +454,18 @@ def _meeting_id(key: str, meeting_num: int, db_path: str | None) -> int | None:
     try:
         row = session.query(PolicyMeeting.id).filter_by(committee_key=key, meeting_num=meeting_num).one_or_none()
         return row[0] if row else None
+    finally:
+        session.close()
+
+
+def _meeting_notebook_id(meeting_id: int, db_path: str | None) -> str | None:
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        row = session.get(PolicyMeeting, meeting_id)
+        return row.notebook_id if row is not None else None
     finally:
         session.close()
 

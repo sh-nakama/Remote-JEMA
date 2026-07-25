@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -31,7 +31,7 @@ def _digest_answer(digest_en_json: str | None) -> str:
 def build_digest(since_days: int = 7, db_path: str | None = None) -> str:
     """Markdown digest of meetings summarised in the last ``since_days``."""
     meetings = recent_done_meetings(since_days, db_path=db_path)
-    header = f"# Policy digest — {datetime.now(timezone.utc):%Y-%m-%d} (last {since_days}d)"
+    header = f"# Policy digest — {datetime.now(UTC):%Y-%m-%d} (last {since_days}d)"
     if not meetings:
         return f"{header}\n\nNo new committee meetings summarised this period."
 

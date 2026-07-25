@@ -1,0 +1,14 @@
+# Trims the LOCAL build context only — the HF Space build context is a clean
+# deploy dir assembled by .github/workflows/sync-space.yml.
+.git
+.venv
+.env
+data/
+Reference/
+test-runs/
+web/node_modules/
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+.pytest_cache/
+.ruff_cache/

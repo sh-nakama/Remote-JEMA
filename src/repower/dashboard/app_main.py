@@ -19,16 +19,30 @@ import plotly.express as px
 import streamlit as st
 from sqlalchemy import func, select
 
-from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
-from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
-from repower.scrapers.areas import AREA_NAMES
-
 import repower.dashboard.theme as theme
+from repower.config import DB_PATH, EPRX_BALANCING_PARQUET
+from repower.dashboard.components.excel_export import build_excel_workbook
+from repower.dashboard.components.generation_chart import render_generation_chart
+from repower.dashboard.components.pdf_export import (
+    generate_pdf,
+    generate_wholesale_pdf,
+)
+from repower.dashboard.components.price_chart import render_price_chart
+from repower.dashboard.components.tieline_chart import render_tieline_chart
+from repower.dashboard.components.volume_chart import render_volume_chart
 from repower.dashboard.i18n import (
     DEFAULT_LANG,
     LANG_OPTIONS,
     T,
     metric_labels,
+)
+
+# Salvaged legacy helpers + views (Drivers / Analyses).
+from repower.dashboard.legacy import (
+    _analyses,
+    _db_session,
+    _fuels,
+    _jepx_area,
 )
 from repower.dashboard.read import (
     MIX_COLUMNS,
@@ -40,23 +54,9 @@ from repower.dashboard.read import (
     wholesale_export_frame,
     wholesale_period_stats_cached,
 )
-from repower.dashboard.components.excel_export import build_excel_workbook
-from repower.dashboard.components.generation_chart import render_generation_chart
-from repower.dashboard.components.pdf_export import (
-    generate_pdf,
-    generate_wholesale_pdf,
-)
-from repower.dashboard.components.price_chart import render_price_chart
-from repower.dashboard.components.volume_chart import render_volume_chart
-from repower.dashboard.components.tieline_chart import render_tieline_chart
-
-# Salvaged legacy helpers + views (Drivers / Analyses).
-from repower.dashboard.legacy import (
-    _analyses,
-    _db_session,
-    _fuels,
-    _jepx_area,
-)
+from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
+from repower.scrapers.areas import AREA_NAMES
+from repower.timeutil import today_jst
 
 # Area order from the plan / scrapers.
 AREA_ORDER: list[str] = [
@@ -294,7 +294,7 @@ def _render_sidebar(show_refresh: bool) -> dict:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=365)
     default_start = max(data_min, data_max - timedelta(days=60))
 
@@ -340,7 +340,7 @@ def _render_wholesale_comparison(cfg: dict) -> None:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=30)
     (a_def, b_def) = _default_periods(data_min, data_max)
 
@@ -489,7 +489,7 @@ def _render_balancing_comparison(cfg: dict, product: str) -> None:
     if bounds:
         data_min, data_max = bounds
     else:
-        data_max = date.today()
+        data_max = today_jst()
         data_min = data_max - timedelta(days=30)
     (a_def, b_def) = _default_periods(data_min, data_max)
 
@@ -892,6 +892,7 @@ def _run_generation(key: str, lang: str, meeting_num: int | None = None) -> None
 def _render_committee_editor(rows: list[dict], lang: str, db: str) -> None:
     """Editable table of tracked committees: toggle tracking + set priority."""
     import pandas as _pd
+
     from repower.policy import store
 
     st.markdown(f"**{T('policy_tracked_editor', lang)}**")
@@ -976,7 +977,7 @@ def _render_committee_discovery(lang: str, db: str) -> None:
     if st.button(T("policy_search_btn", lang), key="policy_discover_btn"):
         try:
             with st.spinner(T("policy_searching", lang)):
-                cands = discover.discover_committees(q, db_path=db)
+                cands = discover.search_committees(q, db_path=db)
             st.session_state["policy_discover_results"] = [c.__dict__ for c in cands]
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
@@ -994,9 +995,15 @@ def _render_committee_discovery(lang: str, db: str) -> None:
                 if c["already_tracked"]:
                     st.caption(T("policy_already_tracked", lang))
                 elif st.button(T("policy_track_btn", lang), key=f"policy_track_{i}"):
-                    store.add_committee(
-                        key=c["key"], name_ja=c["name_ja"], name_en=c["name_en"] or c["key"],
-                        url=c["url"], source=c["source"], db_path=db,
+                    # add_user_committee (not add_committee): it dedups by URL and
+                    # suffixes colliding keys, so tracking a second committee whose
+                    # guessed key collides (e.g. two EGC pages) can't silently
+                    # overwrite the first row.
+                    store.add_user_committee(
+                        {"key": c["key"], "name_ja": c["name_ja"],
+                         "name_en": c["name_en"] or c["key"],
+                         "url": c["url"], "source": c["source"]},
+                        db_path=db,
                     )
                     st.success(T("policy_added", lang, name=c["name_ja"]))
                     st.session_state.pop("policy_discover_results", None)

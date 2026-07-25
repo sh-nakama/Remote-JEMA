@@ -1,6 +1,6 @@
 # Data Dashboard Reengineering Plan
 
-Restyle the Streamlit dashboard into a **9-area × 2-column grid** (supply/demand left, price right) for **both the wholesale (JEPX) and balancing (EPRX) markets**, modeled on the layout in `Reference/dashboard_hh/` — but with **zero brand trace** (see CLAUDE.md: no "Aurora" anywhere; reuse color *values*, drop brand *names*).
+Restyle the Streamlit dashboard into a **9-area × 2-column grid** (supply/demand left, price right) for **both the wholesale (JEPX) and balancing (EPRX) markets**, modeled on the layout in `Reference/dashboard_hh/` — but with **zero brand trace** (see the CLAUDE.md hard rule: reuse color *values*, drop brand *names*).
 
 ## Confirmed decisions
 
@@ -79,7 +79,7 @@ Shared `aggregate(df, level)` helper, default **Daily**. Levels: Native / Daily 
 - `src/repower/config.py` — optional `EPRX_BASE` override.
 - `pyproject.toml` — add `openpyxl`, `matplotlib`.
 - `Dockerfile` — add `fonts-noto-cjk` for Japanese PDF text on Linux.
-- `.github/workflows/ci.yml` — grep gate: fail if `aurora` appears in `src/`, `space/`, `dashboard/` (case-insensitive).
+- `.github/workflows/ci.yml` — grep gate: fail if the banned brand word appears in `src/`, `space/`, `dashboard/` (case-insensitive).
 
 **New — UI package (`src/repower/dashboard/` — converted from the old `dashboard.py` module):**
 - `dashboard/__init__.py` — exposes `main()`; builds the tabbed app.
@@ -115,8 +115,8 @@ Ported into `src/repower/dashboard/` (Reference stays gitignored, untouched). Va
 
 | Reference | Ported | Change |
 |---|---|---|
-| `styles/aurora_theme.py` | `dashboard/theme.py` | rename file |
-| `AURORA_*` color consts (7) | `dashboard/theme.py` | prefix `AURORA_` → `BRAND_` (+ all `GLOBAL_CSS` refs) |
+| the reference theme module (brand-named file) | `dashboard/theme.py` | rename file |
+| brand-prefixed color consts (7) | `dashboard/theme.py` | rename prefix → `BRAND_` (+ all `GLOBAL_CSS` refs) |
 | brand docstrings / "⚡ … Japan" title / PDF footer "Source: EPRX \| …" | all | neutral text ("Source: EPRX") |
 | chart literals `#1B2A4A`, `rgba(27,42,74,*)`, price band fill | `dashboard/components/*` | values via neutral constant |
 

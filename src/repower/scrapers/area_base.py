@@ -23,7 +23,6 @@ import io
 import logging
 import re
 import zipfile
-from datetime import date
 from typing import ClassVar
 
 import pandas as pd
@@ -31,6 +30,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.db import DemandSupply30m, get_session, init_db
 from repower.scrapers.http_cache import conditional_get, invalidate
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -271,7 +271,7 @@ class BaseAreaScraper:
         return n
 
     def scrape(self, months_back: int = 1, db_path: str | None = None) -> int:
-        today = date.today()
+        today = today_jst()
         targets: list[tuple[int, int]] = []
         for off in range(months_back + 1):
             m = today.month - off
@@ -321,10 +321,16 @@ class BaseAreaScraper:
         return total
 
 
-def _normalize_hhmm(s: str) -> str | None:
+def _normalize_hhmm(s) -> str | None:
+    # Fully-blank trailing rows in a fixed-size monthly template (e.g. a 30-day
+    # month in a 31-day, 1488-row file) arrive as NaN. With a pyarrow-backed
+    # string column, ``astype(str)`` leaves those as nulls rather than the
+    # literal "nan", so a raw float NaN/None can reach here — guard against it.
+    if s is None or (isinstance(s, float) and s != s):
+        return None
+    s = str(s).strip()
     if not s or s == "nan":
         return None
-    s = s.strip()
     # Accept "9:00", "09:00", "9:0", etc.
     if ":" in s:
         try:

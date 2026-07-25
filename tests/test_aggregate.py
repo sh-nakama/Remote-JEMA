@@ -16,7 +16,6 @@ from repower.dashboard.read import (
     default_reducer_for,
 )
 
-
 # ── Reducer inference (plan §B table) ──────────────────────────────────────
 
 def test_default_reducer_inference():

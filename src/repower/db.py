@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
@@ -31,7 +31,8 @@ class Base(DeclarativeBase):
 class DemandSupply30m(Base):
     __tablename__ = "demand_supply_30m"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    area = Column(String(16), nullable=False, default="tepco")  # tepco, hokkaido, tohoku, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
+    # tepco, hokkaido, tohoku, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
+    area = Column(String(16), nullable=False, default="tepco")
     date = Column(Date, nullable=False)
     time = Column(String(5), nullable=False)  # "HH:MM"
     area_demand_mw = Column(Float)
@@ -71,7 +72,8 @@ class JepxAreaPrice30m(Base):
     """Per-region JEPX area price, keyed (area, date, time) like DemandSupply30m."""
     __tablename__ = "jepx_area_price_30m"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    area = Column(String(16), nullable=False)  # hokkaido, tohoku, tepco, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
+    # hokkaido, tohoku, tepco, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
+    area = Column(String(16), nullable=False)
     date = Column(Date, nullable=False)
     time = Column(String(5), nullable=False)
     price = Column(Float)
@@ -116,7 +118,7 @@ class NewsItem(Base):
     title = Column(Text)
     summary = Column(Text)
     published_at = Column(DateTime)
-    fetched_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    fetched_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
 # ── Analysis outputs ──────────────────────────────────────────────────────
@@ -130,7 +132,7 @@ class AnalysisRecord(Base):
     tokens_in = Column(Integer)
     tokens_out = Column(Integer)
     cost_usd = Column(Float)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
 
 
 # ── Policy observer ─────────────────────────────────────────────────────────
@@ -147,18 +149,6 @@ class PolicyCommittee(Base):
     name_en = Column(Text)
     url = Column(Text)
     source = Column(String(8))  # METI | OCCTO | EGC
-    # Registry state (editable from the dashboard, so DB — not code config — wins).
-    # `enabled` gates detection/summarisation; `user_added` marks committees created
-    # from the UI (not seeded from the code config). Scrape params mirror the
-    # `Committee` dataclass so a user-added committee can be scraped without a code
-    # change: OCCTO uses max_meeting/prefix; EGC uses log_pages (JSON list)/min_meeting.
-    enabled = Column(Boolean, default=True, nullable=False)
-    user_added = Column(Boolean, default=False, nullable=False)
-    priority = Column(Integer)  # summarisation order (lower = first); NULL until seeded
-    max_meeting = Column(Integer)  # OCCTO probe cap
-    prefix = Column(String(64))   # OCCTO material-id prefix
-    log_pages = Column(Text)      # EGC historical log pages, JSON array of filenames
-    min_meeting = Column(Integer)  # EGC earliest meeting to consider
     latest_meeting = Column(Integer)  # highest meeting reaching state='done'
     synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
     last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
@@ -211,8 +201,8 @@ class PolicyMeeting(Base):
     # Set when a user asks the dashboard to summarise this meeting but auth was stale
     # (or they queued it): the next `policy run` drains requested meetings first.
     gen_requested = Column(Boolean, default=False)
-    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    detected_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
     )
@@ -241,7 +231,7 @@ class PolicyUpcoming(Base):
     meeting_num = Column(Integer)  # from 第N回, if present
     source = Column(String(16))  # meti (the METI committee calendar)
     source_url = Column(Text)
-    detected_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    detected_at = Column(DateTime, default=lambda: datetime.now(UTC))
     __table_args__ = (
         UniqueConstraint("meeting_date", "source_key", name="uq_policy_upcoming"),
     )
@@ -310,7 +300,8 @@ def _migrate_add_area_column(engine) -> None:
     SQLite cannot drop an inline UNIQUE constraint, so we detect the old shape and
     perform a CREATE-INSERT-DROP-RENAME cycle to swap to the new schema.
     """
-    from sqlalchemy import inspect, text as sql_text
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
     insp = inspect(engine)
     if "demand_supply_30m" not in insp.get_table_names():
         return
@@ -361,7 +352,8 @@ def _migrate_add_policy_synth_done(engine) -> None:
     re-added to the synthesis: meetings at or below a committee's
     ``last_synth_meeting`` were already folded in.
     """
-    from sqlalchemy import inspect, text as sql_text
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
     insp = inspect(engine)
     if "policy_meeting" not in insp.get_table_names():
         return
@@ -387,7 +379,8 @@ def _migrate_add_policy_registry(engine) -> None:
     tracked set is unchanged); ``priority`` is added NULL and seeded from the code
     config by ``sync_committees`` (which can't be expressed in plain SQL here).
     """
-    from sqlalchemy import inspect, text as sql_text
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
     insp = inspect(engine)
     names = insp.get_table_names()
 

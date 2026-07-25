@@ -66,8 +66,17 @@ jobs:
         run: pip install -e .
 
       - name: Pull latest DB from Hugging Face
+        id: pull
         run: python -m repower.cli pull-hf
-        continue-on-error: true # first run / missing secrets: fall back to curated data
+        # Bootstrap runs (push/dispatch, e.g. before secrets exist) may fall back
+        # to the curated in-repo data; a *scheduled* run must not — it would
+        # silently replace the live site with a near-empty one (and, because the
+        # no-DB fingerprint is unique per run, redeploy it every day).
+        continue-on-error: ${{ github.event_name != 'schedule' }}
+
+      - name: Warn when building without the HF DB
+        if: steps.pull.outcome == 'failure'
+        run: echo "::warning::HF DB pull failed — building from curated in-repo data only (check HF_TOKEN / HF_DATASET_REPO)."
 
       # ---- Change detection: skip the daily rebuild when the HF DB is unchanged ----
       # Fingerprint the pulled DB. A `actions/cache` entry keyed on that fingerprint
@@ -144,6 +153,18 @@ jobs:
         with:
           path: .dbfp
           key: web-deploy-dbfp-${{ steps.fp.outputs.fp }}
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Web deploy build failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Web deploy build failed — $url\"}" || true
+          fi
 
   deploy:
     needs: build

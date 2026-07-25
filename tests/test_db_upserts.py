@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import threading
 
+import pandas as pd
 from sqlalchemy import func, select
 
 from repower.db import (
@@ -21,8 +22,6 @@ from repower.db import (
 from repower.scrapers.area_base import BaseAreaScraper
 from repower.scrapers.fuels_futures import upsert_fuels
 from repower.scrapers.news_rss import upsert_news
-
-import pandas as pd
 
 
 # ── #4: get_engine memoization ─────────────────────────────────────────────

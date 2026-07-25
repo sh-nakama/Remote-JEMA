@@ -371,6 +371,42 @@ def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
 
 
+def test_synthesize_committee_hard_gate_at_source_cap(monkeypatch, tmp_path):
+    """At the NotebookLM source cap, new briefings must NOT be added (they stay
+    unsynthesized, awaiting the archive roll-up) — but the report is still
+    regenerated from the notebook's existing sources."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
+
+    # One new done meeting, and a synthesis notebook already at the cap.
+    store.record_meeting(key, 7, None, db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 7")
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-9", source_count=2)
+
+    monkeypatch.setattr(nb_mod, "add_source",
+                        lambda *a, **k: pytest.fail("must not add sources past the cap"))
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+
+    def fake_download(nb_id, task_id, out):
+        Path(out).write_text("capped synthesis", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(nb_mod, "download_report", fake_download)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+    row = store.get_committee(key, db_path=db)
+    assert row.running_summary_md == "capped synthesis"  # report still refreshed
+    assert row.source_count == 2  # nothing was added
+    # The skipped meeting stays selectable for a future (post-roll-up) pass.
+    assert [m["meeting_num"] for m in store.meetings_for_synthesis(key, db_path=db)] == [7]
+
+
 # ── Web committee discovery (network injected) ───────────────────────────────
 METI_ROOT_INDEX = """
 <html><body>
@@ -404,36 +440,73 @@ def test_parse_committee_links_filters_nav_and_cross_host():
     assert sr.url == "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/system_review/"
 
 
-def test_discover_committees_query_and_tracked_flag():
+def test_search_committees_query_and_tracked_flag():
     root = "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/"
 
     def fake_fetch(u):
         return ("ok", METI_ROOT_INDEX.encode("utf-8"))
 
     # Japanese-name query.
-    cands = discover_mod.discover_committees(
+    cands = discover_mod.search_committees(
         "CCS", roots=(root,), fetch=fake_fetch, tracked_urls=set(), tracked_keys=set())
     assert [c.key for c in cands] == ["ccus_jigyo"]
 
     # already_tracked is flagged when the key is in the registry.
-    cands = discover_mod.discover_committees(
+    cands = discover_mod.search_committees(
         "", roots=(root,), fetch=fake_fetch,
         tracked_urls=set(), tracked_keys={"system_review"})
     tracked = {c.key: c.already_tracked for c in cands}
     assert tracked["system_review"] is True and tracked["ccus_jigyo"] is False
 
 
-def test_discover_english_query_bridges_to_japanese():
+def test_search_english_query_bridges_to_japanese():
     root = "https://www.occto.or.jp/iinkai/"
 
     def fake_fetch(u):
         return ("ok", OCCTO_ROOT_INDEX.encode("utf-8"))
 
     # "capacity" (EN) should match 容量市場… via the EN→JA hint bridge.
-    cands = discover_mod.discover_committees(
+    cands = discover_mod.search_committees(
         "capacity", roots=(root,), fetch=fake_fetch, tracked_urls=set(), tracked_keys=set())
     assert [c.key for c in cands] == ["youryou_kentoukai"]
     assert cands[0].source == "OCCTO"
+
+
+def test_search_committees_default_fetch_survives_cached_root(monkeypatch, tmp_path):
+    """Regression: the default fetch must force a body. The index roots overlap
+    the catalog/detect crawls, so a plain conditional GET of an already-cached
+    root 304s with no content — and the second search over the same root used to
+    silently return zero candidates."""
+    db = str(tmp_path / "t.db")
+    root = "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/"
+    calls = {"n": 0}
+
+    def fake_fetch(url, *, db_path=None, force=False):
+        calls["n"] += 1
+        if force or calls["n"] == 1:  # conditional_get: force=True always yields a body
+            return ("ok", METI_ROOT_INDEX.encode("utf-8"))
+        return ("not_modified", None)  # warm cache → 304, no body
+
+    monkeypatch.setattr(discover_mod, "_fetch", fake_fetch)
+    first = discover_mod.search_committees("", db_path=db, roots=(root,))
+    second = discover_mod.search_committees("", db_path=db, roots=(root,))
+    assert {c.key for c in first} == {"system_review", "saisei_kano", "ccus_jigyo"}
+    assert {c.key for c in second} == {c.key for c in first}
+
+
+def test_guess_key_egc_shape_and_others_unchanged():
+    # EGC pages are flat files under /activity/ — the key must be emsc_<slug>
+    # (aligned with catalog.parse_egc_committees), not a collapsed "activity".
+    assert discover_mod.guess_key(
+        "https://www.egc.meti.go.jp/activity/index_system.html") == "emsc_system"
+    assert discover_mod.guess_key(
+        "https://www.egc.meti.go.jp/activity/index_systemsurveillance.html"
+    ) == "emsc_systemsurveillance"
+    # OCCTO / METI behaviour is unchanged.
+    assert discover_mod.guess_key(
+        "https://www.occto.or.jp/iinkai/chousei_jukyu/index.html") == "chousei_jukyu"
+    assert discover_mod.guess_key(
+        "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/system_review/") == "system_review"
 
 
 def test_probe_url_guesses_source_key_name(monkeypatch):
@@ -454,7 +527,7 @@ def test_probe_url_validate_previews_meeting_count(monkeypatch):
                         lambda c, **kw: Discovery("ok", [3, 2, 1]))
     cand = discover_mod.probe_url(
         "https://www.occto.or.jp/iinkai/new_wg/",
-        fetch=lambda u: ("ok", "<html><title>新しい委員会</title></html>".encode("utf-8")),
+        fetch=lambda u: ("ok", "<html><title>新しい委員会</title></html>".encode()),
         validate=True, tracked_urls=set(), tracked_keys=set(),
     )
     assert cand.source == "OCCTO" and "3 meeting" in cand.note
@@ -463,6 +536,50 @@ def test_probe_url_validate_previews_meeting_count(monkeypatch):
 def test_probe_url_rejects_non_http():
     assert discover_mod.probe_url("not a url", validate=False,
                                   tracked_urls=set(), tracked_keys=set()) is None
+
+
+def test_probe_url_default_path_survives_cached_url(monkeypatch, tmp_path):
+    """Regression: probe_url fetches the pasted URL, then its validation
+    (discover_meetings) re-fetches it — so both must force a body, or the
+    second (conditional) GET 304s and the meeting-count preview breaks."""
+    db = str(tmp_path / "t.db")
+    url = "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/system_review/"
+    fetched = {"n": 0}
+
+    def fake_fetch(u, *, db_path=None, force=False):
+        fetched["n"] += 1
+        if force or fetched["n"] == 1:
+            return ("ok", "<html><title>制度検討作業部会</title></html>".encode())
+        return ("not_modified", None)
+
+    monkeypatch.setattr(discover_mod, "_fetch", fake_fetch)
+    seen: dict = {}
+
+    def fake_discover(c, **kw):
+        seen.update(kw)
+        # Mirror the real METI path: only a forced fetch has a body to parse.
+        return Discovery("ok", [3, 2, 1]) if kw.get("force") else Discovery("unchanged", [])
+
+    monkeypatch.setattr(discover_mod, "discover_meetings", fake_discover)
+    cand = discover_mod.probe_url(url, db_path=db, validate=True)
+    assert cand is not None and cand.name_ja == "制度検討作業部会"
+    assert seen.get("force") is True
+    # The OCCTO by-number scan is capped on the preview path only.
+    assert seen.get("max_probes") == discover_mod.PROBE_PREVIEW_MAX
+    assert "3 meeting" in cand.note
+
+
+def test_probe_url_flags_unreachable():
+    """A fetch that errors (or raises) must yield a Candidate noted 'unreachable',
+    not a silent empty note — the UI distinguishes it from a parse failure."""
+    def boom(u):
+        raise OSError("network down")
+
+    for fetch in (lambda u: ("error", None), boom):
+        cand = discover_mod.probe_url(
+            "https://www.meti.go.jp/shingikai/nowhere/", fetch=fetch, validate=False,
+            tracked_urls=set(), tracked_keys=set())
+        assert cand is not None and cand.note == "unreachable"
 
 
 # ── No-Aurora gate ───────────────────────────────────────────────────────────

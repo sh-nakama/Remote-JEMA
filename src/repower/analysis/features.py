@@ -12,7 +12,7 @@ from datetime import date, timedelta
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import select, and_
+from sqlalchemy import and_, select
 
 from repower.db import (
     AnalysisRecord,
@@ -28,9 +28,15 @@ from repower.timeutil import yesterday_jst
 logger = logging.getLogger(__name__)
 
 
-def _query_demand_supply(session, start: date, end: date) -> pd.DataFrame:
+def _query_demand_supply(session, start: date, end: date, area: str) -> pd.DataFrame:
+    # The table holds all 9 TSO areas; demand/mix stats are per-area figures, so
+    # an unfiltered query would mash unrelated areas' 30-min rows together.
     stmt = select(DemandSupply30m).where(
-        and_(DemandSupply30m.date >= start, DemandSupply30m.date <= end)
+        and_(
+            DemandSupply30m.area == area,
+            DemandSupply30m.date >= start,
+            DemandSupply30m.date <= end,
+        )
     )
     rows = session.execute(stmt).scalars().all()
     if not rows:
@@ -62,13 +68,18 @@ def _query_fuels(session, start: date, end: date) -> pd.DataFrame:
 
 
 def _safe_pct(value, reference) -> float | None:
-    if reference and reference != 0:
-        return round((value - reference) / abs(reference) * 100, 2)
-    return None
+    if pd.isna(value) or pd.isna(reference) or not reference:
+        return None
+    return round((value - reference) / abs(reference) * 100, 2)
 
 
-def compute_features(target_date: date, db_path: str | None = None) -> dict[str, Any]:
-    """Compute analysis features for a single date. Returns a dict."""
+def compute_features(target_date: date, db_path: str | None = None, area: str = "tepco") -> dict[str, Any]:
+    """Compute analysis features for a single date. Returns a dict.
+
+    Demand/supply metrics are computed for one TSO ``area`` (default Tokyo);
+    the JEPX section is always the Tokyo area price, matching the digest's
+    "Tokyo Power Market" framing.
+    """
     init_db(db_path)
     session = get_session(db_path)
 
@@ -78,12 +89,15 @@ def compute_features(target_date: date, db_path: str | None = None) -> dict[str,
         d30 = target_date - timedelta(days=30)
 
         # ── Demand/Supply for target date ──────────────────────────────────
-        ds_today = _query_demand_supply(session, target_date, target_date)
-        ds_30d = _query_demand_supply(session, d30, target_date - timedelta(days=1))
+        ds_today = _query_demand_supply(session, target_date, target_date, area)
+        ds_30d = _query_demand_supply(session, d30, target_date - timedelta(days=1), area)
 
-        features: dict[str, Any] = {"date": target_date.isoformat()}
+        features: dict[str, Any] = {"date": target_date.isoformat(), "area": area}
 
-        if ds_today.empty:
+        # Rows can exist with every numeric value NULL (e.g. a TSO column shift
+        # that parsed dates but no figures) — idxmax/idxmin raise on all-NaN, so
+        # treat that the same as no rows at all.
+        if ds_today.empty or not ds_today["area_demand_mw"].notna().any():
             features["demand"] = {"status": "no_data"}
         else:
             demand = ds_today["area_demand_mw"]
@@ -121,7 +135,7 @@ def compute_features(target_date: date, db_path: str | None = None) -> dict[str,
         jepx_today = _query_jepx(session, target_date, target_date)
         jepx_30d = _query_jepx(session, d30, target_date - timedelta(days=1))
 
-        if jepx_today.empty:
+        if jepx_today.empty or not jepx_today["tokyo_area_price"].notna().any():
             features["jepx"] = {"status": "no_data"}
         else:
             price = jepx_today["tokyo_area_price"]
@@ -190,12 +204,14 @@ def save_features(target_date: date, features: dict, db_path: str | None = None)
         session.close()
 
 
-def run_analysis(target_date: date | None = None, db_path: str | None = None) -> dict[str, Any]:
+def run_analysis(
+    target_date: date | None = None, db_path: str | None = None, area: str = "tepco"
+) -> dict[str, Any]:
     """Compute and persist features for a date (default: yesterday)."""
     if target_date is None:
         target_date = yesterday_jst()
 
-    features = compute_features(target_date, db_path)
+    features = compute_features(target_date, db_path, area=area)
     save_features(target_date, features, db_path)
     logger.info("Analysis for %s: %d keys", target_date, len(features))
     return features

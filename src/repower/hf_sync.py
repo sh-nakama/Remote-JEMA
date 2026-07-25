@@ -8,6 +8,7 @@ the per-file transfers stay small.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from huggingface_hub import HfApi, hf_hub_download
 
@@ -71,19 +72,23 @@ def pull_db_from_hf() -> None:
     if not HF_TOKEN or not HF_DATASET_REPO:
         raise RuntimeError("HF_TOKEN and HF_DATASET_REPO must be set in environment")
 
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-
     for local_path, repo_name in _SYNC_FILES:
         required = repo_name == "repower.db"
+        local_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            hf_hub_download(
+            downloaded = Path(hf_hub_download(
                 repo_id=HF_DATASET_REPO,
                 repo_type="dataset",
                 filename=repo_name,
                 token=HF_TOKEN,
                 local_dir=str(local_path.parent),
-            )
-            logger.info("Pulled %s", repo_name)
+            ))
+            # The download lands at <dir>/<repo_name>. When the configured local
+            # filename differs (e.g. a custom REPOWER_DB_PATH), move it into place
+            # so the app reads what was pulled — the repo filename stays stable.
+            if downloaded.name != local_path.name:
+                downloaded.replace(local_path)
+            logger.info("Pulled %s -> %s", repo_name, local_path)
         except Exception as e:  # noqa: BLE001
             if required:
                 raise

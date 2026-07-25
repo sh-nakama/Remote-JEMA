@@ -6,6 +6,15 @@ on:
     - cron: "30 20 * * *"
   workflow_dispatch:
 
+# All workflows that pull/push the shared HF dataset queue behind one group so
+# two runs can never race on the DB (last push-hf wins silently otherwise).
+# queue: max — the default single pending slot would silently *evict* a queued
+# run when a third cron stacks up (e.g. Sunday: weekly-backfill → daily → policy).
+concurrency:
+  group: hf-dataset
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
@@ -26,7 +35,10 @@ jobs:
 
       - name: Pull latest DB from Hugging Face
         run: python -m repower.cli pull-hf
-        continue-on-error: true  # First run won't have a DB yet
+        # Bootstrap runs (manual dispatch before the dataset exists) may proceed
+        # from an empty DB; a *scheduled* run must not — scraping into a fresh DB
+        # and pushing it would clobber the dataset's history.
+        continue-on-error: ${{ github.event_name != 'schedule' }}
 
       - name: Run full pipeline
         # months-back 1 = current + previous month only. Conditional-GET caching
@@ -37,3 +49,13 @@ jobs:
 
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Daily scrape pipeline failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Daily scrape pipeline failed — $url\"}" || true
+          fi

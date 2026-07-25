@@ -33,7 +33,9 @@ class Committee:
     # quota is the binding constraint). Untagged committees share the default and
     # sort after the prioritised ones. See ``pending_meetings`` for how it's applied.
     priority: int = 100
-    # OCCTO: cap the meeting-number probe; prefix for stable material ids.
+    # OCCTO: cap the meeting-number probe. ``prefix`` (the URL slug) is currently
+    # unused config — material ids are derived from meeting number + URL stem
+    # (see ``scraper.material_id``) — retained so the DB registry round-trips it.
     max_meeting: int | None = None
     prefix: str | None = None
     # EGC: historical log pages (newest first) + earliest meeting to consider.

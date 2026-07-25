@@ -1,8 +1,10 @@
 // Ported from screens/market-data.html — the Market Data screen.
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
+import { FreshnessChip } from '../lib/freshness'
+import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate } from '../lib/chartkit'
 import { downloadCsv } from '../lib/download'
 import {
   areas,
@@ -29,69 +31,11 @@ type Range = '7D' | '30D' | '60D' | '1Y'
 type Gran = 'Native' | 'Daily' | 'Weekly' | 'Monthly'
 type DrRange = '30D' | '90D' | '1Y'
 
-interface Chip {
-  txt: string
-  style: CSS
-}
+// makeChip / segBase / filterChipBase / slotLabel / fmtDate now live in
+// lib/chartkit (shared with the other screens).
 
-const CHIP_BASE: CSS = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 4,
-  fontSize: 11.5,
-  fontWeight: 600,
-  padding: '3px 9px',
-  borderRadius: 999,
-  marginTop: 9,
-  fontFeatureSettings: "'tnum' 1",
-}
-
-function makeChip(d: number, p: number): Chip {
-  if (Math.abs(p) < 0.05)
-    return {
-      txt: '— ±0.0%',
-      style: { ...CHIP_BASE, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' },
-    }
-  const up = d > 0
-  const sgn = up ? '+' : '−'
-  return {
-    txt: (up ? '▲ ' : '▼ ') + sgn + Math.abs(d).toFixed(2) + ' (' + sgn + Math.abs(p).toFixed(1) + '%)',
-    style: {
-      ...CHIP_BASE,
-      background: up ? 'var(--upBg)' : 'var(--dnBg)',
-      color: up ? 'var(--up)' : 'var(--dn)',
-    },
-  }
-}
-
-const segBase = (on: boolean): CSS => ({
-  padding: '4px 13px',
-  borderRadius: 999,
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'pointer',
-  background: on ? 'var(--ac)' : 'transparent',
-  color: on ? '#FFFFFF' : 'var(--mut)',
-  transition: 'all .15s',
-  whiteSpace: 'nowrap',
-})
-
-const chipBase = (on: boolean): CSS => ({
-  fontSize: 11.5,
-  fontWeight: 600,
-  padding: '3px 11px',
-  borderRadius: 999,
-  cursor: 'pointer',
-  border: on ? '1px solid var(--ac)' : '1px solid var(--bd2)',
-  background: on ? 'var(--acTint)' : 'var(--bg1)',
-  color: on ? 'var(--acT)' : 'var(--mut)',
-  whiteSpace: 'nowrap',
-})
-
-function slotLabel(i: number): string {
-  return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00')
-}
-
+// Fixture-only: the synthetic series have no real dates, so "days ago" is counted
+// back from the fixtures' frozen "today". Live data labels use its actual datetimes.
 function dateLabel(daysAgo: number): string {
   const d = new Date(2026, 6, 2)
   d.setDate(d.getDate() - daysAgo)
@@ -99,8 +43,102 @@ function dateLabel(daysAgo: number): string {
   return MO[d.getMonth()] + ' ' + d.getDate()
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** ISO datetime → hover label: "Jul 11", or "Jul 11 22:30" for intraday slots.
+ *  Non-ISO strings (fixture day labels like "Jun 12") are shown verbatim. */
+function fmtDT(v: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(v)
+  if (!m) return v
+  const lbl = MONTHS[Number(m[2]) - 1] + ' ' + Number(m[3])
+  return m[4] && !(m[4] === '00' && m[5] === '00') ? lbl + ' ' + m[4] + ':' + m[5] : lbl
+}
+
+/**
+ * Shared hover layer for the static price / generation-mix SVGs. Renders the given
+ * chart `children` inside the SVG and, on mouse-move, a dashed crosshair + an
+ * anchored value tooltip (with the exact datetime) for the nearest data point.
+ * Point `i` maps to x = 8 + i/(n-1)·464 in the 480-wide viewBox — identical to the
+ * polyline geometry. When `n < 2` (e.g. fixtures) the chart renders but is inert.
+ */
+function ChartHover({
+  n,
+  dt,
+  xs,
+  dotY,
+  tip,
+  children,
+}: {
+  n: number
+  dt: string[]
+  xs?: number[]
+  dotY?: (i: number) => number
+  tip: (i: number) => ReactNode
+  children: ReactNode
+}) {
+  const [i, setI] = useState<number | null>(null)
+  // When `xs` (per-point viewBox x-positions) is supplied the chart is plotted on a
+  // shared time axis, so map/invert through it; otherwise fall back to the even
+  // index spacing (x = 8 + k/(n-1)·464).
+  const useXs = !!xs && xs.length === n
+  const xOf = (k: number) => (useXs ? xs![k] : 8 + (k / Math.max(1, n - 1)) * 464)
+  const onMove = (e: ReactMouseEvent<SVGSVGElement>) => {
+    if (n < 2) return
+    const r = e.currentTarget.getBoundingClientRect()
+    const px = ((e.clientX - r.left) / r.width) * 480
+    let k: number
+    if (useXs) {
+      k = 0
+      let best = Infinity
+      for (let j = 0; j < n; j++) {
+        const d = Math.abs(xs![j] - px)
+        if (d < best) {
+          best = d
+          k = j
+        }
+      }
+    } else {
+      k = Math.round(((px - 8) / 464) * (n - 1))
+    }
+    k = Math.max(0, Math.min(n - 1, k))
+    if (k !== i) setI(k)
+  }
+  const onLeave = () => setI(null)
+  const x = i != null ? xOf(i) : 0
+  const leftPct = i != null ? Math.max(10, Math.min(90, (x / 480) * 100)) : 0
+  return (
+    <div style={s('position:relative')}>
+      <svg
+        viewBox="0 0 480 160"
+        style={s('width:100%;height:auto;display:block;margin-top:10px')}
+        preserveAspectRatio="none"
+        onMouseMove={onMove}
+        onMouseLeave={onLeave}
+      >
+        {children}
+        {i != null && (
+          <g>
+            <line x1={x} y1="6" x2={x} y2="152" stroke="var(--mut)" strokeWidth="0.8" strokeDasharray="3 3"></line>
+            {dotY ? <circle cx={x} cy={dotY(i)} r="2.6" fill="var(--tx)"></circle> : null}
+          </g>
+        )}
+      </svg>
+      {i != null && (
+        <div
+          style={s(
+            `position:absolute;top:2px;left:${leftPct}%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--bd);border-radius:8px;padding:4px 9px;font-size:11px;white-space:nowrap;pointer-events:none;color:var(--tx);box-shadow:var(--sh1);z-index:5;font-feature-settings:'tnum' 1`,
+          )}
+        >
+          <span style={s('color:var(--mut);margin-right:6px')}>{fmtDT(dt[i] ?? '')}</span>
+          {tip(i)}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function MarketDataScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch, refreshData, refreshing } = useApp()
   const L = lang
   const dark = theme === 'dark'
 
@@ -189,7 +227,10 @@ export function MarketDataScreen() {
   const tProduct = () => toast('Product drill-down (per-slot prices & offers) — not in this prototype · 商品別ドリルダウンは対象外')
   const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
   const tNav = () => toast('Placeholder destination in this prototype · 本プロトタイプ対象外')
-  const tRefresh = () => toast('Data refreshed · データを更新しました')
+  const tRefresh = () => {
+    refreshData()
+    toast('Reloaded latest data · 最新データを再取得しました')
+  }
   const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
   const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
@@ -224,6 +265,7 @@ export function MarketDataScreen() {
         avg: b.avg,
         max: b.max,
         min: b.min,
+        dt: b.days.map((d) => dateLabel(d)),
         labels: [dateLabel(b.days[0]), dateLabel(b.days[m]), dateLabel(b.days[b.days.length - 1])] as [
           string,
           string,
@@ -245,7 +287,7 @@ export function MarketDataScreen() {
     let kAvgP: number
     let pkPrev: number
     let demV: number
-    let pk: { v: number; area: (typeof areas)[number] | null; d: number } = { v: -1, area: null, d: 0 }
+    let pk: { v: number; area: (typeof areas)[number] | null; d: number; dt: string } = { v: -1, area: null, d: 0, dt: '' }
     if (useLive) {
       const curAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(0, N))))
       const prevAvgs = act.map((a) => meanF(finite(live.areas[a.key].dAvg.slice(N, N * 2))))
@@ -254,7 +296,7 @@ export function MarketDataScreen() {
       act.forEach((a) => {
         const dm = live.areas[a.key].dMax
         for (let d = 0; d < Math.min(N, dm.length); d++)
-          if (Number.isFinite(dm[d]) && dm[d] > pk.v) pk = { v: dm[d], area: a, d }
+          if (Number.isFinite(dm[d]) && dm[d] > pk.v) pk = { v: dm[d], area: a, d, dt: live.areas[a.key].dDt[d] ?? '' }
       })
       pkPrev = Math.max(
         0,
@@ -270,7 +312,7 @@ export function MarketDataScreen() {
       kAvgV = mean(curAvgs)
       kAvgP = mean(prevAvgs)
       act.forEach((a) => {
-        for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d }
+        for (let d = 0; d < N; d++) if (a.dailyMax[d] > pk.v) pk = { v: a.dailyMax[d], area: a, d, dt: '' }
       })
       pkPrev = Math.max(...act.map((a) => Math.max(...a.dailyMax.slice(N, N * 2))))
       demV = act.reduce((sum, a) => sum + a.peak, 0)
@@ -309,7 +351,7 @@ export function MarketDataScreen() {
     const areaChips = areas.map((a) => ({
       key: a.key,
       label: L === 'ja' ? a.ja : a.en,
-      s: chipBase(!!sel[a.key]),
+      s: filterChipBase(!!sel[a.key]),
     }))
 
     // ---- per-area sections ----
@@ -317,17 +359,65 @@ export function MarketDataScreen() {
     const pts = (arr: number[], y: (val: number) => number) =>
       arr.map((val, i) => X(i, arr.length).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
 
+    // Shared x time-domain across every selected live area (price + supply windows),
+    // so all area charts map the same x-pixel to the same calendar time ("align the
+    // x-axis"). Fixtures (no live data) keep the even index spacing.
+    const parseT = (iso: string): number => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(iso)
+      return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) : NaN
+    }
+    let gMin = Infinity
+    let gMax = -Infinity
+    const accT = (iso: string) => {
+      const t = parseT(iso)
+      if (Number.isFinite(t)) {
+        if (t < gMin) gMin = t
+        if (t > gMax) gMax = t
+      }
+    }
+    for (const a of selAreas) {
+      const la = live.ready ? live.areas[a.key] ?? null : null
+      if (!la) continue
+      windowLive(la, gran, range).dt.forEach(accT)
+      windowSupply(la, gran, range).dt.forEach(accT)
+    }
+    const haveDomain = Number.isFinite(gMin) && Number.isFinite(gMax) && gMax > gMin
+    const xAtTime = (iso: string): number => {
+      const t = parseT(iso)
+      if (!Number.isFinite(t) || !haveDomain) return 8
+      return 8 + ((t - gMin) / (gMax - gMin)) * 464
+    }
+    const fmtEpoch = (t: number): string => {
+      const d = new Date(t)
+      const lbl = MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate()
+      const hh = d.getUTCHours()
+      const mm = d.getUTCMinutes()
+      return hh || mm ? lbl + ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0') : lbl
+    }
+    const sharedAx: [string, string, string] = haveDomain
+      ? [fmtEpoch(gMin), fmtEpoch((gMin + gMax) / 2), fmtEpoch(gMax)]
+      : ['', '', '']
+
     const sections = selAreas.map((a) => {
-      const la = useLive ? live.areas[a.key] : null
+      // Per-area live/fixture: each chart uses its own snapshot when loaded, so a
+      // single missing/corrupt area falls back alone instead of dragging every
+      // area to fixtures (the KPI block above still gates on the stricter useLive).
+      const la = live.ready ? (live.areas[a.key] ?? null) : null
       const w = la ? windowLive(la, gran, range) : winLabeled(a)
       const n = w.avg.length
       const lo = Math.min(...w.min) * 0.92
       const hi = Math.max(...w.max) * 1.05
       const py = (val: number) => 150 - ((val - lo) / (hi - lo)) * 135
+      // Plot each price point at its real time position on the shared domain (live),
+      // so the same x-pixel is the same calendar time across every area chart.
+      const pxAt = (i: number) => (la && haveDomain ? xAtTime(w.dt[i]) : 8 + (i / Math.max(1, n - 1)) * 464)
+      const ptsP = (arr: number[], y: (val: number) => number) =>
+        arr.map((val, i) => pxAt(i).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
+      const pxs = w.avg.map((_v, i) => pxAt(i))
       const band =
-        pts(w.max, py) +
+        ptsP(w.max, py) +
         ' ' +
-        w.min.map((_val, i) => X(n - 1 - i, n).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
+        w.min.map((_val, i) => pxAt(n - 1 - i).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
 
       // generation mix — real windowed supply when live (gran-responsive), else synthetic "today"
       const supW = la ? windowSupply(la, gran, range) : null
@@ -338,13 +428,23 @@ export function MarketDataScreen() {
       let demandLine: string
       let peakMWStr: string
       let mixMeta: string
+      // Raw windowed mix arrays + geometry for the hover layer (live only).
+      let supN = 0
+      let supYmax = 1
+      let supDtA: string[] = []
+      let supDemandA: number[] = []
+      let supBaseA: number[] = []
+      let supThermA: number[] = []
+      let supSolarA: number[] = []
+      let supOtherA: number[] = []
+      let supXs: number[] = []
       if (supW) {
         const c1 = supW.baseload
         const c2 = c1.map((b, i) => b + supW.thermal[i])
         const c3 = c2.map((val, i) => val + supW.solar[i])
         const c4 = c3.map((val, i) => val + supW.other[i])
         const nS = Math.max(2, c1.length)
-        const Xs = (i: number) => 8 + (i / (nS - 1)) * 464
+        const Xs = (i: number) => (haveDomain ? xAtTime(supW.dt[i]) : 8 + (i / (nS - 1)) * 464)
         const my = (val: number) => 152 - (val / supW.ymax) * 140
         const fwd = (arr: number[]) => arr.map((v, i) => Xs(i).toFixed(1) + ',' + my(v).toFixed(1)).join(' ')
         const rev = (arr: number[]) =>
@@ -356,6 +456,15 @@ export function MarketDataScreen() {
         demandLine = fwd(supW.demand)
         peakMWStr = Math.round(Math.max(1, ...supW.demand)).toLocaleString('en-US')
         mixMeta = range + ' · ' + gran + ' · grouped MW'
+        supN = supW.demand.length
+        supYmax = supW.ymax
+        supDtA = supW.dt
+        supDemandA = supW.demand
+        supBaseA = supW.baseload
+        supThermA = supW.thermal
+        supSolarA = supW.solar
+        supOtherA = supW.other
+        supXs = supW.demand.map((_v, i) => Xs(i))
       } else {
         const P = a.peak
         const dem = Array.from({ length: 48 }, (_, i) => {
@@ -375,19 +484,37 @@ export function MarketDataScreen() {
         const fwd = (arr: number[]) => pts(arr, my)
         const rev = (arr: number[]) =>
           arr.map((_val, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ')
+        const demLine = dem.map((val) => val * 1.018)
         mix1 = fwd(c1) + ' 472,152 8,152'
         mix2 = fwd(c2) + ' ' + rev(c1)
         mix3 = fwd(c3) + ' ' + rev(c2)
         mix4 = ''
-        demandLine = pts(
-          dem.map((val) => val * 1.018),
-          my,
-        )
+        demandLine = pts(demLine, my)
         peakMWStr = P.toLocaleString('en-US')
         mixMeta = 'today · 14 fuels grouped · MW'
+        // hover arrays for the synthetic "today" mix (half-hourly, oldest→newest)
+        supN = 48
+        supYmax = ymax
+        supDtA = Array.from({ length: 48 }, (_, i) => String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 === 0 ? '00' : '30'))
+        supDemandA = demLine
+        supBaseA = c1
+        supThermA = c2.map((val, i) => Math.max(0, val - c1[i]))
+        supSolarA = c3.map((val, i) => Math.max(0, val - c2[i]))
+        supXs = Array.from({ length: 48 }, (_v, i) => 8 + (i / 47) * 464)
       }
 
       const open = !closed[a.key]
+      // x-axis tick labels (start / mid / end). Shared domain when live so every area
+      // chart reads alike; else the window's own labels (price) / slot times (mix).
+      const priceAx: [string, string, string] = la && haveDomain ? sharedAx : w.labels
+      const mixAx: [string, string, string] =
+        supW && haveDomain
+          ? sharedAx
+          : [
+              supN ? fmtDT(supDtA[0]) : '',
+              supN ? fmtDT(supDtA[Math.floor((supN - 1) / 2)]) : '',
+              supN ? fmtDT(supDtA[supN - 1]) : '',
+            ]
       return {
         key: a.key,
         title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
@@ -409,17 +536,37 @@ export function MarketDataScreen() {
         demand: demandLine,
         peakMW: peakMWStr,
         band,
-        pMax: pts(w.max, py),
-        pAvg: pts(w.avg, py),
-        pMin: pts(w.min, py),
+        pMax: ptsP(w.max, py),
+        pAvg: ptsP(w.avg, py),
+        pMin: ptsP(w.min, py),
         vMax: Math.max(...w.max).toFixed(1),
         vAvg: mean(w.avg).toFixed(1),
         vMin: Math.min(...w.min).toFixed(1),
         rangeLabel: range,
         granLabel: gran,
-        d0: w.labels[0],
-        d1: w.labels[1],
-        d2: w.labels[2],
+        // shared x-axis tick labels (start / mid / end) — identical across all area
+        // charts when live, so the aligned time domain is legible.
+        priceAx,
+        mixAx,
+        // hover geometry — price chart
+        n,
+        plo: lo,
+        phi: hi,
+        pdt: w.dt,
+        pxs,
+        pavg: w.avg,
+        pmax: w.max,
+        pmin: w.min,
+        // hover geometry — generation-mix chart (0 points ⇒ no hover, e.g. fixtures)
+        supN,
+        supYmax,
+        supDt: supDtA,
+        supXs,
+        supDemandA,
+        supBaseA,
+        supThermA,
+        supSolarA,
+        supOtherA,
       }
     })
 
@@ -450,18 +597,6 @@ export function MarketDataScreen() {
         bar: { display: 'block', width: ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
       }
     })
-    const chipNeutral: CSS = {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      fontSize: 11.5,
-      fontWeight: 600,
-      padding: '3px 9px',
-      borderRadius: 999,
-      marginTop: 9,
-      fontFeatureSettings: "'tnum' 1",
-    }
-
     // ---- interconnectors ----
     const pxN: Record<string, number> = {}
     areas.forEach((a) => {
@@ -537,18 +672,6 @@ export function MarketDataScreen() {
     const icMaxLabel = icMaxDef
       ? `${L === 'ja' ? icMaxDef.ja : icMaxDef.en} · ${icAreaName(icMaxDef.from)} → ${icAreaName(icMaxDef.to)}`
       : ''
-    const chipNeutral2: CSS = {
-      display: 'inline-flex',
-      alignItems: 'center',
-      gap: 4,
-      fontSize: 11.5,
-      fontWeight: 600,
-      padding: '3px 9px',
-      borderRadius: 999,
-      marginTop: 9,
-      fontFeatureSettings: "'tnum' 1",
-    }
-
     // ---- drivers (live fuels/FX when loaded, else fixtures) ----
     const dvLive = driversLive.ready
     const D: { spot: number[]; jkm: number[]; ncl: number[]; fx: number[] } = dvLive
@@ -627,7 +750,26 @@ export function MarketDataScreen() {
       }
     })
 
+    // ---- caption "as of" dates (data-truth) ----
+    // Live captions show the real snapshot dates (ISO, matching the fixtures'
+    // format); while a snapshot is still loading, its fixture date renders.
+    let wsToday = '2026-07-02'
+    if (useLive) {
+      let latest = ''
+      for (const a of selAreas) {
+        const d = (live.areas[a.key].dDt[0] ?? '').slice(0, 10)
+        if (d > latest) latest = d
+      }
+      if (latest) wsToday = latest
+    }
+    const tlDate = tielineLive.ready && tielineLive.date ? tielineLive.date.slice(0, 10) : null
+
     return {
+      heatDate: wsToday,
+      balDate: balLive.ready && balLive.end ? balLive.end.slice(0, 10) : '2026-07-01',
+      icMapDate: tlDate ?? '2026-07-01',
+      icTodayDate: tlDate ?? '2026-07-02',
+      drCloseDate: driversLive.ready && driversLive.end ? driversLive.end.slice(0, 10) : '2026-07-01',
       icCong: icCongN,
       icMaxU: Math.round(icMaxUv * 100),
       icMaxLabel,
@@ -638,8 +780,8 @@ export function MarketDataScreen() {
       icPx,
       icF,
       icRows,
-      icWarnChip: { ...chipNeutral2, background: 'var(--dnBg)', color: 'var(--dn)' } as CSS,
-      icChipN: { ...chipNeutral2, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } as CSS,
+      icWarnChip: { ...CHIP_BASE, background: 'var(--dnBg)', color: 'var(--dn)' } as CSS,
+      icChipN: { ...CHIP_BASE, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } as CSS,
       dr30S: segBase(drRange === '30D'),
       dr90S: segBase(drRange === '90D'),
       dr1yS: segBase(drRange === '1Y'),
@@ -695,7 +837,7 @@ export function MarketDataScreen() {
       kAvgSub: (selAreas.length || 9) + ' areas · ' + range + ' · vs prior ' + range,
       kAvgD: kAvgC.txt,
       kPeak: pk.v.toFixed(2),
-      kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + dateLabel(pk.d) + ' · vs prior period',
+      kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + (pk.dt ? fmtDate(pk.dt) : dateLabel(pk.d)) + ' · vs prior period',
       kPeakD: kPeakC.txt,
       kPeakDS: kPeakC.style,
       kDem: demV.toLocaleString('en-US'),
@@ -709,17 +851,20 @@ export function MarketDataScreen() {
       balRows,
       balProcTot: balLive.ready ? Math.round(balLive.procTot).toLocaleString('en-US') : '9,321',
       balAvgPrice: balLive.ready && balLive.avgPrice != null ? balLive.avgPrice.toFixed(2) : '4.87',
-      balD1S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
-      balD2S: { ...chipNeutral, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
+      balD1S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
+      balD2S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
     }
   }, [view, range, gran, sel, closed, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive])
 
   const isDarkB = dark
   const isLightB = !dark
 
-  return (
-    <>
-      {/* ============ SIDEBAR ============ */}
+  // ---- section renderers ----
+  // Mechanical extraction for navigability: each renderer holds one section's
+  // JSX verbatim (same closures over state/`v`) and is called from the single
+  // return at the bottom — the rendered tree is identical.
+
+  const renderSidebar = () => (
       <div style={s(`width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);flex-direction:column;padding:22px 16px 16px;overflow-y:auto;${collapsed ? 'display:none' : 'display:flex'}`)}>
         <div style={s('padding:0 8px')}>
           <div style={s('display:flex;align-items:center;gap:7px')}>
@@ -775,18 +920,17 @@ export function MarketDataScreen() {
 
         <div style={s('background:linear-gradient(135deg,var(--navyA),var(--navyB));border-radius:16px;padding:15px 15px 13px;color:#FFFFFF;margin-top:12px')}>
           <div style={s('display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>`} />Data freshness · データ鮮度</div>
-          <div style={s('font-size:12px;color:rgba(255,255,255,.78);margin-top:6px')}>Last sync <span style={s("font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1")}>06:10 JST</span></div>
+          <FreshnessChip inverse style={{ marginTop: 6 }} />
           <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>Hugging Face sync · GitHub Actions daily</div>
           <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} />Refresh · 更新
+            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>Refresh · 更新
           </Hoverable>
         </div>
       </div>
+  )
 
-      {/* ============ MAIN COLUMN ============ */}
-      <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
-
-        {/* Top bar */}
+  // Top bar (breadcrumb, search, theme/language toggles, profile)
+  const renderTopBar = () => (
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Data <span style={s('color:var(--fnt3)')}>·</span> マーケットデータ</div>
           <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
@@ -795,11 +939,11 @@ export function MarketDataScreen() {
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
           </div>
           <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
             {isDarkB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />)}
             {isLightB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />)}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif}>
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
           </Hoverable>
@@ -815,12 +959,10 @@ export function MarketDataScreen() {
             </div>
           </div>
         </div>
+  )
 
-        {/* Scrollable content */}
-        <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
-          <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px')}>
-
-            {/* Page header */}
+  // Page header (title + Export CSV)
+  const renderPageHeader = () => (
             <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:16px')}>
               <div>
                 <div style={s('display:flex;align-items:baseline;gap:10px')}>
@@ -835,8 +977,10 @@ export function MarketDataScreen() {
                 </Hoverable>
               </div>
             </div>
+  )
 
-            {/* Sub-view switcher */}
+  // Sub-view switcher (Wholesale / Balancing · Interconnectors / Drivers)
+  const renderViewSwitcher = () => (
             <div style={s('display:flex;align-items:center;gap:14px;flex-wrap:wrap')}>
               <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
                 <span style={v.vwWS} onClick={() => setView('wholesale')}>Wholesale (Spot) 卸電力</span>
@@ -848,9 +992,10 @@ export function MarketDataScreen() {
                 <span style={v.vwDS} onClick={() => setView('drivers')}>Drivers 燃料・為替</span>
               </div>
             </div>
+  )
 
-            {/* Control bar (spot & balancing only) */}
-            {v.isSpotBal && (
+  // Control bar: range / area chips / granularity (spot & balancing only)
+  const renderControlBar = () => (
               <div style={s('background:var(--bg1);border-radius:16px;padding:12px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap')}>
                 <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
                   <span style={v.r7S} onClick={() => setRange('7D')}>7D</span>
@@ -879,10 +1024,10 @@ export function MarketDataScreen() {
                   <Hoverable as="span" base="font-size:12px;font-weight:500;color:var(--mut);cursor:pointer;white-space:nowrap" hover="color:var(--tx2)" onClick={resetAll}>Reset リセット</Hoverable>
                 </span>
               </div>
-            )}
+  )
 
-            {/* ================= WHOLESALE VIEW ================= */}
-            {v.isWholesale && (
+  // ================= WHOLESALE VIEW =================
+  const renderWholesaleView = () => (
               <div style={s('display:flex;flex-direction:column;gap:20px')}>
 
                 {/* KPI row */}
@@ -924,7 +1069,7 @@ export function MarketDataScreen() {
                           <span style={s('font-size:16px;font-weight:600')}>Price Heatmap <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>価格ヒートマップ</span></span>
                           <span style={s('font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px')}>PROPOSED · new component</span>
                         </div>
-                        <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Area × 30-min slot · today 2026-07-02 · ¥/kWh · deselected areas dimmed</div>
+                        <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Area × 30-min slot · today {v.heatDate} · ¥/kWh · deselected areas dimmed</div>
                       </div>
                       <div style={s('display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px')}>
                         <span>low</span>
@@ -960,11 +1105,11 @@ export function MarketDataScreen() {
                   <div key={sec.key} style={s('display:flex;flex-direction:column;gap:10px')}>
                     <div style={s('display:flex;align-items:center;gap:10px')}>
                       <span style={s('background:var(--bg1);border:1px solid var(--bd);border-radius:999px;padding:4px 14px;font-size:12.5px;font-weight:600')}>{sec.title} <span style={s('font-weight:400;color:var(--mut)')}>{sec.sub}</span></span>
-                      <Hoverable as="span" base="width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="background:var(--bg2);color:var(--tx2)" onClick={() => toggleSec(sec.key)} title="Collapse / expand · 折りたたみ">
+                      <Hoverable as="span" base="width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="background:var(--bg2);color:var(--tx2)" onClick={() => toggleSec(sec.key)} title="Collapse / expand · 折りたたみ" aria-label={sec.open ? 'Collapse section' : 'Expand section'}>
                         {sec.open && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M18 15l-6-6-6 6"></path></svg>`} />)}
                         {sec.closed && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M6 9l6 6 6-6"></path></svg>`} />)}
                       </Hoverable>
-                      <Hoverable as="span" base={`width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${isWatched('area:' + sec.key) ? 'var(--ac)' : 'var(--fnt)'}`} hover="background:var(--bg2)" onClick={() => { const am = areas.find((x) => x.key === sec.key); toggleWatch({ id: 'area:' + sec.key, kind: 'area', en: am?.en || sec.key, ja: am?.ja || sec.key, screen: 'market' }) }} title={isWatched('area:' + sec.key) ? 'Remove from watchlist · ウォッチリストから削除' : 'Add to watchlist · ウォッチリストに追加'}><RawSvg html={`<svg viewBox="0 0 24 24" fill="${isWatched('area:' + sec.key) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /></Hoverable>
+                      <Hoverable as="span" base={`width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${isWatched('area:' + sec.key) ? 'var(--ac)' : 'var(--fnt)'}`} hover="background:var(--bg2)" onClick={() => { const am = areas.find((x) => x.key === sec.key); toggleWatch({ id: 'area:' + sec.key, kind: 'area', en: am?.en || sec.key, ja: am?.ja || sec.key, screen: 'market' }) }} title={isWatched('area:' + sec.key) ? 'Remove from watchlist · ウォッチリストから削除' : 'Add to watchlist · ウォッチリストに追加'} aria-label={isWatched('area:' + sec.key) ? 'Remove from watchlist' : 'Add to watchlist'}><RawSvg html={`<svg viewBox="0 0 24 24" fill="${isWatched('area:' + sec.key) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /></Hoverable>
                       <span style={s("font-size:11.5px;color:var(--mut);margin-left:auto;font-feature-settings:'tnum' 1")}>{sec.meta}</span>
                     </div>
                     {sec.open && (
@@ -974,13 +1119,32 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Generation mix <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>電源構成</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.mixMeta}</span>
                           </div>
-                          <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
+                          <ChartHover
+                            n={sec.supN}
+                            dt={sec.supDt}
+                            xs={sec.supXs}
+                            dotY={(i) => 152 - (sec.supDemandA[i] / sec.supYmax) * 140}
+                            tip={(i) => (
+                              <>
+                                <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span style={s('color:#4A6FA5')}>therm {Math.round(sec.supThermA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span style={s('color:#C99A2E')}>sol/wnd {Math.round(sec.supSolarA[i]).toLocaleString('en-US')}</span>
+                                {' · '}
+                                <span>dem {Math.round(sec.supDemandA[i]).toLocaleString('en-US')} MW</span>
+                              </>
+                            )}
+                          >
                             <polygon points={sec.mix1} fill="#2A9D8F" fillOpacity="0.78"></polygon>
                             <polygon points={sec.mix2} fill="#4A6FA5" fillOpacity="0.72"></polygon>
                             <polygon points={sec.mix3} fill="#E9C46A" fillOpacity="0.82"></polygon>
                             {sec.mix4 ? <polygon points={sec.mix4} fill="#9AA5B5" fillOpacity="0.6"></polygon> : null}
                             <g style={s('color:var(--tx)')}><polyline points={sec.demand} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline></g>
-                          </svg>
+                          </ChartHover>
+                          <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            <span>{sec.mixAx[0]}</span><span>{sec.mixAx[1]}</span><span>{sec.mixAx[2]}</span>
+                          </div>
                           <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
@@ -995,17 +1159,33 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Price <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>価格</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · {sec.granLabel} · max / avg / min · ¥/kWh</span>
                           </div>
-                          <svg viewBox="0 0 480 160" style={s('width:100%;height:auto;display:block;margin-top:10px')} preserveAspectRatio="none">
+                          <ChartHover
+                            n={sec.n}
+                            dt={sec.pdt}
+                            xs={sec.pxs}
+                            dotY={(i) => 150 - ((sec.pavg[i] - sec.plo) / (sec.phi - sec.plo)) * 135}
+                            tip={(i) => (
+                              <>
+                                <span style={s('color:#E24B4A')}>max ¥{sec.pmax[i].toFixed(2)}</span>
+                                {' · '}
+                                <span>avg ¥{sec.pavg[i].toFixed(2)}</span>
+                                {' · '}
+                                <span style={s('color:#00A5CF')}>min ¥{sec.pmin[i].toFixed(2)}</span>
+                              </>
+                            )}
+                          >
                             <polygon points={sec.band} fill="#00A5CF" fillOpacity="0.10"></polygon>
                             <polyline points={sec.pMax} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>
                             <g style={s('color:var(--tx)')}><polyline points={sec.pAvg} fill="none" stroke="currentColor" strokeWidth="1.8"></polyline></g>
                             <polyline points={sec.pMin} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>
-                          </svg>
+                          </ChartHover>
+                          <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            <span>{sec.priceAx[0]}</span><span>{sec.priceAx[1]}</span><span>{sec.priceAx[2]}</span>
+                          </div>
                           <div style={s("display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap;font-feature-settings:'tnum' 1")}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #00A5CF')}></span>Min ¥{sec.vMin}</span>
-                            <span style={s('margin-left:auto;display:flex;gap:14px;color:var(--mut)')}><span>{sec.d0}</span><span>{sec.d1}</span><span>{sec.d2}</span></span>
                           </div>
                         </div>
                       </div>
@@ -1014,10 +1194,10 @@ export function MarketDataScreen() {
                 ))}
                 <div style={s('font-size:12px;color:var(--mut);text-align:center;padding:2px 0 6px')}>{v.hiddenNote}</div>
               </div>
-            )}
+  )
 
-            {/* ================= BALANCING VIEW ================= */}
-            {v.isBalancing && (
+  // ================= BALANCING VIEW =================
+  const renderBalancingView = () => (
               <div style={s('display:flex;flex-direction:column;gap:20px')}>
                 <div style={s('display:grid;grid-template-columns:repeat(3,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
@@ -1044,7 +1224,7 @@ export function MarketDataScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Balancing Products <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>需給調整市場 商品別</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>EPRX · FY2025+ · daily · 2026-07-01 · nationwide procurement</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>EPRX · FY2025+ · daily · {v.balDate} · nationwide procurement</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/ΔkW·30min · MW</span>
                   </div>
@@ -1069,10 +1249,10 @@ export function MarketDataScreen() {
                   <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · Prices are weighted daily averages · 価格は日次加重平均</div>
                 </div>
               </div>
-            )}
+  )
 
-            {/* ================= INTERCONNECTORS VIEW ================= */}
-            {v.isInterco && (
+  // ================= INTERCONNECTORS VIEW =================
+  const renderIntercoView = () => (
               <div style={s('display:flex;flex-direction:column;gap:20px')}>
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
@@ -1107,7 +1287,7 @@ export function MarketDataScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Flow Map — 9 Areas <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線フロー</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Net flows at latest slot 14:30 · labels in MW · line width ∝ transfer capability · OCCTO 系統情報 2026-07-01</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Net flows at latest slot 14:30 · labels in MW · line width ∝ transfer capability · OCCTO 系統情報 {v.icMapDate}</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>node prices = area spot ¥/kWh</span>
                   </div>
@@ -1224,7 +1404,7 @@ export function MarketDataScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Congestion Timeline <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>混雑タイムライン</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Utilization by 30-min slot · today 2026-07-02 · 30分コマ別利用率</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Utilization by 30-min slot · today {v.icTodayDate} · 30分コマ別利用率</div>
                     </div>
                     <div style={s('display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px')}>
                       <span>free</span>
@@ -1256,17 +1436,17 @@ export function MarketDataScreen() {
                   </div>
                 </div>
               </div>
-            )}
+  )
 
-            {/* ================= DRIVERS VIEW ================= */}
-            {v.isDrivers && (
+  // ================= DRIVERS VIEW =================
+  const renderDriversView = () => (
               <div style={s('display:flex;flex-direction:column;gap:20px')}>
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>JKM LNG front-month<br />JKM（LNGスポット）</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drJkmV} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>$/MMBtu</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>ICE · close 2026-07-01 · vs prior close</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>ICE · close {v.drCloseDate} · vs prior close</div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.drJkmC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
@@ -1370,8 +1550,27 @@ export function MarketDataScreen() {
                   </div>
                 </div>
               </div>
-            )}
+  )
 
+  return (
+    <>
+      {/* ============ SIDEBAR ============ */}
+      {renderSidebar()}
+
+      {/* ============ MAIN COLUMN ============ */}
+      <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
+        {renderTopBar()}
+
+        {/* Scrollable content */}
+        <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
+          <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px')}>
+            {renderPageHeader()}
+            {renderViewSwitcher()}
+            {v.isSpotBal && renderControlBar()}
+            {v.isWholesale && renderWholesaleView()}
+            {v.isBalancing && renderBalancingView()}
+            {v.isInterco && renderIntercoView()}
+            {v.isDrivers && renderDriversView()}
           </div>
         </div>
       </div>

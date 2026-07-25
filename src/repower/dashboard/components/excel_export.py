@@ -12,6 +12,19 @@ import pandas as pd
 from openpyxl import Workbook
 
 
+def _guard_formula(value):
+    """Neutralize spreadsheet formula injection for string cells.
+
+    openpyxl turns any string starting with ``=`` into a live formula (and
+    ``+``/``-``/``@`` are formula-leading in Excel/other tools), so a hostile
+    value like ``=cmd|' /C calc'!A0`` would execute on open. Prefix such
+    strings with a single quote so they round-trip as text.
+    """
+    if isinstance(value, str) and value.startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def _sanitize_sheet_title(name: str, used: set[str]) -> str:
     """Return an Excel-legal, unique worksheet title.
 
@@ -61,10 +74,10 @@ def build_excel_workbook(sheets: dict[str, pd.DataFrame]) -> bytes:
         if df is None:
             continue
         # Header row
-        ws.append([str(c) for c in df.columns])
+        ws.append([_guard_formula(str(c)) for c in df.columns])
         # Data rows
         for row in df.itertuples(index=False, name=None):
-            ws.append(list(row))
+            ws.append([_guard_formula(v) for v in row])
 
     buf = BytesIO()
     wb.save(buf)

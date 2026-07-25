@@ -46,6 +46,16 @@ def test_write_json_roundtrip_utf8(tmp_path: Path):
     assert json.loads(p.read_text(encoding="utf-8")) == {"x": 1, "ja": "東京"}
 
 
+def test_write_json_nan_becomes_null(tmp_path: Path):
+    """Pandas NaN/Inf must serialize as null — a literal ``NaN`` token is invalid
+    strict JSON and makes the browser's res.json() throw (silent fixture fallback)."""
+    p = tmp_path / "nan.json"
+    _write_json(p, {"rows": [{"v": float("nan")}, {"v": float("inf")}, {"v": 1.5}], "t": ("a", float("nan"))})
+    text = p.read_text(encoding="utf-8")
+    assert "NaN" not in text and "Infinity" not in text
+    assert json.loads(text) == {"rows": [{"v": None}, {"v": None}, {"v": 1.5}], "t": ["a", None]}
+
+
 def test_area_and_level_shape():
     assert len(AREAS) == 9
     assert "tepco" in AREAS  # Tokyo slug

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import io
 import logging
-from datetime import date
 
 import httpx
 import pandas as pd
@@ -21,6 +20,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_upsert
 
 from repower.db import JepxAreaPrice30m, JepxSpot30m, get_session, init_db
 from repower.scrapers.http_cache import conditional_get, invalidate
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -180,7 +180,7 @@ def upsert_jepx(df: pd.DataFrame, db_path: str | None = None) -> int:
 def scrape_jepx(year: int | None = None, db_path: str | None = None) -> int:
     """Scrape JEPX for the given year (default: current year). Returns rows upserted."""
     if year is None:
-        year = date.today().year
+        year = today_jst().year
 
     try:
         df = fetch_jepx_csv(year, db_path)
@@ -201,7 +201,7 @@ def scrape_jepx_years(start_year: int, end_year: int | None = None,
                       db_path: str | None = None) -> dict[int, int]:
     """Backfill multiple JEPX years (inclusive). Returns ``{year: rows}``."""
     if end_year is None:
-        end_year = date.today().year
+        end_year = today_jst().year
     out: dict[int, int] = {}
     for y in range(start_year, end_year + 1):
         out[y] = scrape_jepx(y, db_path)

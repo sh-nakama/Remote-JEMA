@@ -19,6 +19,8 @@ Endpoints (all JSON):
   GET  /api/policy/catchup  -> current job status (alias: /api/policy/job)
   GET  /api/policy/job      -> current job status + output tail / result
   GET  /api/policy/crosscheck -> energy-board vs our catalog (committees we may miss)
+  POST /api/data/refresh    -> 202/409, full data refresh (recover gaps → scrape → export-web)
+  GET  /api/data/refresh    -> current job status (shares the single-flight job slot)
 
 The `command` jobs shell out to the same CLI the cron/skill use (detect, dates,
 schedule, discover, crosscheck, run, backfill, resume, digest) — allowlisted, args
@@ -28,29 +30,54 @@ auth in the CLI and surface a clean "needs login" line in the job output.
 The catch-up job runs the **auth-free** steps only (detect new meetings, backfill
 dates, refresh the schedule, refresh the catalog) and reports the resulting
 pending backlog. NotebookLM summarisation stays in the ``policy-catchup`` skill /
-``repower policy run`` (it needs interactive auth and a daily quota). CORS is open
-because this is a localhost dev helper — do not expose it publicly.
+``repower policy run`` (it needs interactive auth and a daily quota).
+
+This is a localhost dev helper — do not expose it publicly. Still, it is hardened
+a little: CORS is pinned to the Vite dev origins (override with a comma-separated
+``REPOWER_WEB_ORIGINS``), and setting ``REPOWER_API_TOKEN`` makes every request
+require a matching ``X-API-Token`` header (unset — the default — means no auth).
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+
+# CORS allowlist: the Vite dev servers (the dev proxy makes requests same-origin,
+# so this only matters for direct cross-origin calls from the SPA).
+_ALLOWED_ORIGINS = frozenset(
+    o.strip()
+    for o in os.environ.get(
+        "REPOWER_WEB_ORIGINS", "http://localhost:5173,http://localhost:5199"
+    ).split(",")
+    if o.strip()
+)
 
 # ── Background job (single-flight) ───────────────────────────────────────────
 # One job runs at a time (they share the SQLite DB and, for `run`/`backfill`, the
 # single NotebookLM account). A job is either the in-process auth-free 'catchup'
 # refresh or a 'command' subprocess wrapping one `repower policy <cmd>`.
 _OUTPUT_MAX = 300
+_JOB_TIMEOUT_S = 600  # hard cap per command subprocess; a wedged CLI must not pin the single-flight slot forever
+_REFRESH_TIMEOUT_S = 1800  # data refresh scrapes every source + re-exports; give it a wider cap
+# NotebookLM summarisation (run/backfill/resume) is long-running: a single meeting
+# can block up to ~20 min on one report artifact (see notebook.wait_artifact), and a
+# batch does several back-to-back. The run is naturally bounded by the account's
+# daily generation quota, not wall-clock, so the 10-min command cap would kill it
+# mid-report and surface as a spurious "error" even with valid auth. Give it a wide
+# cap; the pipeline is crash-safe (Resume drains anything left mid-flight).
+_NOTEBOOKLM_TIMEOUT_S = 3600
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'
@@ -102,7 +129,7 @@ def _run_catchup_job(db_path: str | None) -> None:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def start_catchup(db_path: str | None) -> dict:
@@ -144,16 +171,19 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
             raw = default
         try:
             return max(lo, min(hi, int(raw)))
-        except (TypeError, ValueError):
-            raise ValueError(f"{name} must be an integer")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name} must be an integer") from exc
 
     if cmd in ("detect", "dates"):
         return ["policy", cmd, "--committee", _committee()]
     if cmd in ("schedule", "discover", "crosscheck", "resume", "status"):
         return ["policy", cmd]
     if cmd == "run":
-        return ["policy", "run", "--committee", _committee(),
+        argv = ["policy", "run", "--committee", _committee(),
                 "--max-per-run", str(_int("max_per_run", 5, 1, 20))]
+        if params.get("breadth"):
+            argv.append("--breadth")  # spread a small quota across committees (newest of each first)
+        return argv
     if cmd == "backfill":
         return ["policy", "backfill",
                 "--committee", _committee(required=True, allow_all=False),
@@ -164,22 +194,46 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     raise ValueError(f"unsupported command: {cmd}")
 
 
-def _run_command_job(argv: list[str]) -> None:
+def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S) -> None:
     tail: deque[str] = deque(maxlen=_OUTPUT_MAX)
+    timed_out = threading.Event()
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "repower.cli", *argv],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1, encoding="utf-8", errors="replace",
+            # Force the child to emit UTF-8 too: on non-UTF-8 consoles (e.g. a
+            # Japanese cp932 Windows locale) the CLI's box-drawing/→ output would
+            # otherwise raise UnicodeEncodeError mid-run and abort the job.
+            env={**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"},
         )
-        for line in proc.stdout or []:
-            tail.append(line.rstrip("\n"))
+
+        # The stdout iteration below blocks for as long as the CLI runs, so the
+        # timeout has to come from the side: kill the process and flag it.
+        def _kill_on_timeout() -> None:
+            timed_out.set()
+            proc.kill()
+
+        timer = threading.Timer(timeout, _kill_on_timeout)
+        timer.daemon = True
+        timer.start()
+        try:
+            for line in proc.stdout or []:
+                tail.append(line.rstrip("\n"))
+                with _job_lock:
+                    _job["output"] = list(tail)
+            code = proc.wait(timeout=timeout)
+        finally:
+            timer.cancel()
+        if timed_out.is_set():
             with _job_lock:
-                _job["output"] = list(tail)
-        code = proc.wait()
-        with _job_lock:
-            _job.update(state="done" if code == 0 else "error",
-                        finished_at=_now(), exit_code=code, output=list(tail))
+                _job.update(state="error", finished_at=_now(), exit_code=code,
+                            error=f"job killed after {timeout}s timeout",
+                            output=list(tail))
+        else:
+            with _job_lock:
+                _job.update(state="done" if code == 0 else "error",
+                            finished_at=_now(), exit_code=code, output=list(tail))
     except Exception as e:  # noqa: BLE001
         logger.exception("command job failed")
         with _job_lock:
@@ -202,7 +256,33 @@ def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dic
                     started_at=_now(), finished_at=None, exit_code=None,
                     result=None, output=[], error=None)
         snap = dict(_job)
-    threading.Thread(target=_run_command_job, args=(argv,), daemon=True).start()
+    # Long-running NotebookLM commands need a much wider cap than the default so the
+    # killer timer doesn't abort them mid-report (see _NOTEBOOKLM_TIMEOUT_S).
+    timeout = _NOTEBOOKLM_TIMEOUT_S if cmd in ("run", "backfill", "resume") else _JOB_TIMEOUT_S
+    threading.Thread(target=_run_command_job, args=(argv,),
+                     kwargs={"timeout": timeout}, daemon=True).start()
+    return 202, snap
+
+
+def start_refresh(db_path: str | None) -> tuple[int, dict]:
+    """Start a full data refresh (recover gaps → scrape every source → export-web)
+    as a single-flight background subprocess. Shares the ``_job`` slot with the
+    policy jobs, so it's 409 while any job runs. Returns ``(202 started | 409 busy,
+    job)``. ``db_path`` is unused (the subprocess uses the default DB) but kept for
+    a uniform call signature with the other job starters.
+    """
+    with _job_lock:
+        if _job["state"] == "running":
+            return 409, {"error": "a job is already running", "job": dict(_job)}
+        argv = ["refresh-web"]
+        _job.update(kind="command", cmd="refresh-web", argv=argv, state="running",
+                    started_at=_now(), finished_at=None, exit_code=None,
+                    result=None, output=[], error=None)
+        snap = dict(_job)
+    threading.Thread(
+        target=_run_command_job, args=(argv,),
+        kwargs={"timeout": _REFRESH_TIMEOUT_S}, daemon=True,
+    ).start()
     return 202, snap
 
 
@@ -214,9 +294,12 @@ class _Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin")
+        if origin in _ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-API-Token")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if self.command != "HEAD":
@@ -231,8 +314,19 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             return {}
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight
+    def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight (no auth: preflights can't carry custom headers)
         self._send(200, {})
+
+    def _check_auth(self) -> bool:
+        """Optional shared secret: with REPOWER_API_TOKEN set, every GET/POST must
+        carry a matching X-API-Token header. Unset (the default) means no auth."""
+        token = os.environ.get("REPOWER_API_TOKEN")
+        if not token:
+            return True
+        if hmac.compare_digest(self.headers.get("X-API-Token") or "", token):
+            return True
+        self._send(401, {"error": "missing or invalid X-API-Token"})
+        return False
 
     def _guard(self, route) -> None:
         """Run one routed handler; anything that escapes still gets a JSON answer.
@@ -254,10 +348,12 @@ class _Handler(BaseHTTPRequestHandler):
                 pass  # client already disconnected
 
     def do_GET(self) -> None:  # noqa: N802
-        self._guard(self._route_get)
+        if self._check_auth():
+            self._guard(self._route_get)
 
     def do_POST(self) -> None:  # noqa: N802
-        self._guard(self._route_post)
+        if self._check_auth():
+            self._guard(self._route_post)
 
     def _route_get(self) -> None:
         path = urlparse(self.path).path
@@ -280,7 +376,7 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — never 500 the UI; fall back to empty
                 logger.exception("deepdive snapshot failed; serving empty fallback")
                 return self._send(200, {"schema": 1, "committees": [], "meetings": [], "upcoming": [], "error": str(e)})
-        if path in ("/api/policy/catchup", "/api/policy/job"):
+        if path in ("/api/policy/catchup", "/api/policy/job", "/api/data/refresh"):
             with _job_lock:
                 return self._send(200, dict(_job))
         if path == "/api/policy/crosscheck":
@@ -331,6 +427,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": f"could not add committee: {e}"})
         if path == "/api/policy/catchup":
             return self._send(202, start_catchup(self.db_path))
+        if path == "/api/data/refresh":
+            status, out = start_refresh(self.db_path)
+            return self._send(status, out)
         if path == "/api/policy/job":
             cmd = (body.get("cmd") or "").strip()
             status, out = start_command(cmd, body, self.db_path)

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Optional
 
 import typer
 
-from repower.timeutil import yesterday_jst
+from repower.timeutil import today_jst, yesterday_jst
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -22,13 +21,13 @@ def scrape(
     skip_fuels: bool = typer.Option(False, help="Skip fuel futures"),
     skip_news: bool = typer.Option(False, help="Skip news RSS"),
     skip_eprx: bool = typer.Option(False, help="Skip EPRX balancing + tieline data"),
-    jepx_year: Optional[int] = typer.Option(None, help="JEPX year to fetch (default: current)"),
+    jepx_year: int | None = typer.Option(None, help="JEPX year to fetch (default: current)"),
     fuel_days: int = typer.Option(7, help="Days of fuel data to fetch"),
 ):
     """Scrape TSO area data + market sources (recent months only)."""
-    from repower.scrapers.areas import scrape_all_areas, scrape_area, AREA_NAMES
-    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.areas import AREA_NAMES, scrape_all_areas, scrape_area
     from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.news_rss import scrape_news
 
     typer.echo("\u2500\u2500 TSO area supply/demand \u2500\u2500")
@@ -90,7 +89,6 @@ def backfill(
     Also backfills JEPX per-area spot prices from --jepx-since through the
     current year (skip with --jepx-since 0).
     """
-    from datetime import date as _date
     from repower.scrapers.areas import ALL_SCRAPERS, AREA_NAMES
 
     try:
@@ -98,7 +96,8 @@ def backfill(
     except Exception as e:
         raise typer.BadParameter(f"--since must be YYYY-MM, got {since!r}") from e
 
-    today = _date.today()
+    # JST, not date.today(): the CI cron fires ~20:30 UTC, already the next day in JST.
+    today = today_jst()
     months = (today.year - sy) * 12 + (today.month - sm)
     if months < 0:
         raise typer.BadParameter(f"--since {since} is in the future")
@@ -137,19 +136,20 @@ def backfill(
 
 @app.command()
 def analyze(
-    target: Optional[str] = typer.Option(None, help="Date to analyze (YYYY-MM-DD, default: yesterday)"),
+    target: str | None = typer.Option(None, help="Date to analyze (YYYY-MM-DD, default: yesterday)"),
+    area: str = typer.Option("tepco", help="TSO area slug for the demand/supply features"),
 ):
     """Compute analysis features for a given date."""
     from repower.analysis.features import run_analysis
 
     target_date = date.fromisoformat(target) if target else yesterday_jst()
-    features = run_analysis(target_date)
-    typer.echo(f"Analysis for {target_date}: {len(features)} feature keys computed")
+    features = run_analysis(target_date, area=area)
+    typer.echo(f"Analysis for {target_date} ({area}): {len(features)} feature keys computed")
 
 
 @app.command()
 def notify(
-    target: Optional[str] = typer.Option(None, help="Date to post (YYYY-MM-DD, default: yesterday)"),
+    target: str | None = typer.Option(None, help="Date to post (YYYY-MM-DD, default: yesterday)"),
     dry_run: bool = typer.Option(False, help="Print payload without posting"),
 ):
     """Post analysis digest to webhook."""
@@ -170,13 +170,13 @@ def run_all(
     dry_run: bool = typer.Option(False, help="Skip webhook post"),
 ):
     """Run full pipeline: scrape \u2192 analyze \u2192 notify."""
-    from repower.scrapers.areas import scrape_all_areas, AREA_NAMES
-    from repower.scrapers.jepx_spot import scrape_jepx
-    from repower.scrapers.fuels_futures import scrape_fuels
-    from repower.scrapers.news_rss import scrape_news
-    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
     from repower.analysis.features import run_analysis
     from repower.notify.webhook import notify as do_notify
+    from repower.scrapers.areas import AREA_NAMES, scrape_all_areas
+    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
+    from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.news_rss import scrape_news
 
     typer.echo("\u2550\u2550\u2550 SCRAPE \u2550\u2550\u2550")
     results = scrape_all_areas(months_back=months_back)
@@ -190,11 +190,15 @@ def run_all(
 
     typer.echo("═══ ANALYZE ═══")
     yesterday = yesterday_jst()
-    run_analysis(yesterday)
+    try:
+        run_analysis(yesterday)
+    except Exception as e:  # noqa: BLE001 — analysis must not block the HF push of scraped data
+        typer.echo(f"   analyze skipped: {e}", err=True)
 
     typer.echo("═══ POLICY DETECT ═══")
     try:
-        from repower.policy.detect import backfill_dates, detect as policy_detect
+        from repower.policy.detect import backfill_dates
+        from repower.policy.detect import detect as policy_detect
         res = policy_detect()
         new = sum(r["new"] for r in res)
         typer.echo(f"   {new} new committee meeting(s) detected")
@@ -222,7 +226,10 @@ def run_all(
         typer.echo(f"   policy catalog skipped: {e}", err=True)
 
     typer.echo("═══ NOTIFY ═══")
-    do_notify(yesterday, dry_run=dry_run)
+    try:
+        do_notify(yesterday, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 — a failed webhook post must not block the HF push
+        typer.echo(f"   notify skipped: {e}", err=True)
 
     typer.echo("═══ DONE ═══")
 
@@ -256,6 +263,59 @@ def export_web(out: str = "web/public/data/web"):
         f"{files} files, {kib} KiB across {sorted(ds)})"
     )
     typer.echo(f"Sources: {manifest['sources']}")
+
+
+@app.command("refresh-web")
+def refresh_web(
+    months_back: int = typer.Option(2, help="TSO months to re-fetch (current + N previous)"),
+    lookback: int = typer.Option(6, help="Completed months to scan for entirely-missing data to recover"),
+    out: str = typer.Option("web/public/data/web", help="Web snapshot output dir"),
+):
+    """Full data refresh for the web app: recover gaps → scrape everything → export.
+
+    Backs the web app's interactive **Refresh** button (via ``web-api``). It first
+    recovers any completed months entirely missing from the DB (parse / stale-304
+    gaps), then re-scrapes every source, then regenerates the static JSON snapshots
+    the frontend reads. Each source is guarded so one failure can't block the
+    export of everything else.
+    """
+    from repower.dashboard.export_web import export_web as run_export
+    from repower.scrapers.areas import AREA_NAMES, recover_missing_months, scrape_all_areas
+
+    def _try(label: str, fn):
+        try:
+            typer.echo(f"   {label}: {fn()}")
+        except Exception as e:  # noqa: BLE001 — a single source failure must not abort the refresh
+            typer.echo(f"   {label} skipped: {e}", err=True)
+
+    typer.echo("═══ RECOVER GAPS ═══")
+    recovered = recover_missing_months(lookback=lookback)
+    if recovered:
+        for r in recovered:
+            typer.echo(f"   recovered {AREA_NAMES.get(r['area'], r['area'])} {r['month']}: {r['rows']} rows")
+    else:
+        typer.echo("   no missing months found")
+
+    typer.echo("═══ SCRAPE ═══")
+    results = scrape_all_areas(months_back=months_back)
+    for a, n in results.items():
+        typer.echo(f"   {AREA_NAMES.get(a, a):<25} {n:>6} rows")
+    from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
+    from repower.scrapers.fuels_futures import scrape_fuels
+    from repower.scrapers.jepx_spot import scrape_jepx
+    from repower.scrapers.news_rss import scrape_news
+    _try("JEPX rows", lambda: scrape_jepx())
+    _try("fuel rows", lambda: scrape_fuels())
+    _try("news items", lambda: scrape_news())
+    _try("EPRX rows", lambda: scrape_eprx())
+    _try("EPRX tieline rows", lambda: scrape_eprx_tieline())
+
+    typer.echo("═══ EXPORT ═══")
+    manifest = run_export(out)
+    files = sum(d.get("files", 0) for d in manifest["datasets"].values())
+    typer.echo(f"   exported {files} files (anchor {manifest['anchor']})")
+    typer.echo(f"   sources: {manifest['sources']}")
+    typer.echo("═══ DONE ═══")
 
 
 @app.command("web-api")
@@ -365,13 +425,19 @@ def policy_schedule():
 def policy_run(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     max_per_run: int = typer.Option(5, help="Max meetings to summarise this run (rate/cost guard)"),
+    breadth: bool = typer.Option(
+        False, "--breadth",
+        help="Breadth-first: summarise the newest pending meeting of each committee "
+             "(in priority order) before going deeper — spreads a small daily quota "
+             "across committees instead of draining one committee's backlog.",
+    ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
     from repower.policy.pipeline import run
 
     _require_auth_or_exit()
     keys = None if committee == "all" else [committee]
-    summary = run(keys, max_per_run=max_per_run)
+    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} synthesized={summary['synthesized']}"

@@ -20,6 +20,7 @@ from repower.policy.scraper import (
     parse_page_date,
 )
 
+
 # ── Meeting-date parsing (no network) ─────────────────────────────────────────
 def test_parse_jp_date_gregorian_and_eras():
     assert parse_jp_date("2026年5月8日　第114回") == datetime.date(2026, 5, 8)
@@ -125,8 +126,12 @@ def test_parse_meti_calendar_name_starting_with_year_is_not_a_date_header():
 def test_dedupe_future_drops_past_and_prefers_matched():
     today = datetime.date(2026, 7, 6)
     past = sched.Upcoming(datetime.date(2026, 6, 1), "調整力…委員会", "OCCTO", "meti", "u", None, None)
-    fut_unmatched = sched.Upcoming(datetime.date(2026, 7, 10), "電力・ガス基本政策小委員会", "METI", "meti", "u", None, None)
-    fut_matched = sched.Upcoming(datetime.date(2026, 7, 10), "電力・ガス基本政策小委員会", "METI", "meti", "u", 85, "chousei_jukyu")
+    fut_unmatched = sched.Upcoming(
+        datetime.date(2026, 7, 10), "電力・ガス基本政策小委員会", "METI", "meti", "u", None, None
+    )
+    fut_matched = sched.Upcoming(
+        datetime.date(2026, 7, 10), "電力・ガス基本政策小委員会", "METI", "meti", "u", 85, "chousei_jukyu"
+    )
     out = sched._dedupe_future([past, fut_unmatched, fut_matched], today)
     assert len(out) == 1  # past dropped, dup collapsed
     assert out[0].committee_key == "chousei_jukyu"  # matched wins
@@ -150,7 +155,10 @@ def test_replace_and_list_upcoming(tmp_path):
     db = str(tmp_path / "t.db")
     rows = [
         sched.Upcoming(datetime.date(2026, 7, 7), "電力・ガス基本政策小委員会", "METI", "meti", "http://x", 85, None),
-        sched.Upcoming(datetime.date(2026, 7, 10), "調整力及び需給バランス評価等に関する委員会", "OCCTO", "meti", "http://y", 106, "chousei_jukyu"),
+        sched.Upcoming(
+            datetime.date(2026, 7, 10), "調整力及び需給バランス評価等に関する委員会",
+            "OCCTO", "meti", "http://y", 106, "chousei_jukyu",
+        ),
     ]
     assert store.replace_upcoming(rows, db_path=db) == 2
     got = store.list_upcoming(db_path=db)

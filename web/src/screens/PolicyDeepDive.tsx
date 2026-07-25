@@ -2,6 +2,8 @@
 import { useState, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
+import { useManifest } from '../lib/data'
+import { FreshnessChip, fmtStamp, policyCounts } from '../lib/freshness'
 import {
   committees as fxCommittees,
   meetings as fxMeetings,
@@ -17,10 +19,13 @@ type AnyMeeting = Meeting | Upcoming
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-// dUntil: days between a date string and 2026-07-02 (the export's "today")
-function dUntil(ds: string): number {
-  return Math.round((new Date(ds).getTime() - new Date(2026, 6, 2).getTime()) / 864e5)
+// dUntil: days between a date string and the given "today" anchor. Live data
+// counts down from the real today; the fixtures are a frozen snapshot authored
+// around 2026-07-02, so fixture mode keeps that anchor to match its baked-in dates.
+function dUntil(ds: string, anchor: Date): number {
+  return Math.round((new Date(ds).getTime() - anchor.getTime()) / 864e5)
 }
+const FX_TODAY = new Date(2026, 6, 2)
 
 // Minimal markdown → React for the committee-level synthesis (raw markdown from
 // NotebookLM). Handles `#`/`##`/`###` headings, `-`/`•`/`*` bullets, and blank-line
@@ -103,6 +108,16 @@ export function PolicyDeepDiveScreen() {
   // Interactive (local master) reads the live DB via /api/policy/deepdive; the
   // read-only deploy reads the static snapshots. Either way the shape is identical.
   const pol = usePolicyLive(interactive)
+  const manifest = useManifest()
+  // Pipeline-status line: live from the manifest's datasets.policy counts + its
+  // generated_at; the frozen fixture string remains the loading/fallback state.
+  const polC = policyCounts(manifest.data)
+  const pipelineLine =
+    polC && manifest.data
+      ? lang === 'ja'
+        ? `最終書き出し ${fmtStamp(manifest.data.generated_at)} — 追跡委員会 ${polC.committees} · 会合 ${polC.meetings} · 要約済 ${polC.summarised}`
+        : `Last export ${fmtStamp(manifest.data.generated_at)} — Committees ${polC.committees} · Meetings ${polC.meetings} · Summarised ${polC.summarised}`
+      : 'Last run 2026-07-02 06:10 JST — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no'
   // The catalog (committees.json) now carries the full energy catalog — the
   // explorer/feed show only the *tracked* set; the full catalog (incl. discovered
   // committees) lives in the Manage modal. Fixtures are the loading fallback.
@@ -111,6 +126,10 @@ export function PolicyDeepDiveScreen() {
   const meetings = pol.ready ? pol.meetings : fxMeetings
   const untracked: Meeting[] = pol.ready ? [] : fxUntracked
   const upcoming: Upcoming[] = pol.ready ? pol.upcoming : fxUpcoming
+  // Countdown anchor: real today (midnight) for live data, the fixtures' frozen
+  // "today" while they are still the fallback — flips together with the arrays above.
+  const now = new Date()
+  const dayAnchor = pol.ready ? new Date(now.getFullYear(), now.getMonth(), now.getDate()) : FX_TODAY
 
   // ---- handlers ----
   const selAll = () => {
@@ -234,7 +253,7 @@ export function PolicyDeepDiveScreen() {
         const following = isFol(c)
         let nx = ''
         if (c.nextDate) {
-          const dd = dUntil(c.nextDate)
+          const dd = dUntil(c.nextDate, dayAnchor)
           const mo = parseInt(c.nextDate.slice(5, 7), 10)
           const dy = parseInt(c.nextDate.slice(8, 10), 10)
           nx = L === 'ja'
@@ -344,7 +363,7 @@ export function PolicyDeepDiveScreen() {
     const on = selMtg === m.key
     const isQueued = !!queued[m.key]
     const st = stChip(isQueued ? 'pending' : m.status)
-    const dd = m.status === 'scheduled' ? dUntil(m.date) : 0
+    const dd = m.status === 'scheduled' ? dUntil(m.date, dayAnchor) : 0
     const org = m.com ? comOrg[m.com] : (m as Meeting).org || ''
     const tori = (m as Meeting).tori
     const prevEn = (m as Meeting).prevEn ?? (m as Upcoming).prevEn
@@ -416,7 +435,7 @@ export function PolicyDeepDiveScreen() {
   const dNoDigest = !hasDigest && !hasAgenda
   const dFailed = dEffSt === 'failed'
   const dAgenda = hasAgenda ? (L === 'ja' ? dU.agendaJa : dU.agendaEn) : []
-  const dCountdown = hasAgenda ? (L === 'ja' ? 'あと' + dUntil(d.date) + '日' : 'in ' + dUntil(d.date) + ' days') : ''
+  const dCountdown = hasAgenda ? (L === 'ja' ? 'あと' + dUntil(d.date, dayAnchor) + '日' : 'in ' + dUntil(d.date, dayAnchor) + ' days') : ''
   const dPrevLabel = dPrev ? (L === 'ja' ? dPrev.ja : dPrev.en) : ''
   const dPrevClick = () => { if (dPrev) selectMeeting(dPrev.key) }
   const dEmptyTitle = dIsUn
@@ -480,13 +499,13 @@ export function PolicyDeepDiveScreen() {
       {/* ============ COLLAPSED ICON RAIL ============ */}
       <div style={s('width:68px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);display:flex;flex-direction:column;align-items:center;padding:22px 0 16px;gap:4px')}>
         <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px;color:var(--ac);flex-shrink:0;margin-bottom:18px"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>`} />
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('overview')} title="Market Overview · 概況">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('overview')} title="Market Overview · 概況" aria-label="Market Overview">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>`} />
         </Hoverable>
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('market')} title="Market Data · データ">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('market')} title="Market Data · データ" aria-label="Market Data">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg>`} />
         </Hoverable>
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('capacity')} title="Capacity & Auctions · 容量市場">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('capacity')} title="Capacity & Auctions · 容量市場" aria-label="Capacity and Auctions">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg>`} />
         </Hoverable>
         <div style={s('width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#FFFFFF;background:var(--acBadge);cursor:pointer;position:relative')} title="Policy Deep Dive · 政策">
@@ -494,14 +513,14 @@ export function PolicyDeepDiveScreen() {
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} />
         </div>
         <div style={s('width:28px;height:1px;background:var(--dv);margin:6px 0')}></div>
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('watchlist')} title="Watchlist · ウォッチリスト">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('watchlist')} title="Watchlist · ウォッチリスト" aria-label="Watchlist">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} />
         </Hoverable>
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')} title="Settings · 設定">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')} title="Settings · 設定" aria-label="Settings">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} />
         </Hoverable>
         <div style={s('flex:1')}></div>
-        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="background:var(--bg2);color:var(--tx2)" onClick={tExpand} title="Expand nav · ナビを展開">
+        <Hoverable base="width:42px;height:42px;border-radius:12px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="background:var(--bg2);color:var(--tx2)" onClick={tExpand} title="Expand nav · ナビを展開" aria-label="Expand navigation">
           <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><path d="M13 17l5-5-5-5"></path><path d="M6 17l5-5-5-5"></path></svg>`} />
         </Hoverable>
       </div>
@@ -518,7 +537,7 @@ export function PolicyDeepDiveScreen() {
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
           </div>
           <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
             {dark && (
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />
             )}
@@ -526,7 +545,7 @@ export function PolicyDeepDiveScreen() {
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />
             )}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif}>
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
           </Hoverable>
@@ -555,6 +574,7 @@ export function PolicyDeepDiveScreen() {
                   <span style={s('font-size:15px;font-weight:500;color:var(--mut)')}>政策ディープダイブ</span>
                 </div>
                 <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>Committee tracking &amp; AI briefings · METI · OCCTO · EGC · 委員会追跡とAIブリーフィング</div>
+                <FreshnessChip style={{ marginTop: 8 }} />
               </div>
               <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>
                 {interactive && (
@@ -656,7 +676,7 @@ export function PolicyDeepDiveScreen() {
                   </Hoverable>
                 ))}
               </div>
-              <div style={s("font-size:11px;color:var(--mut);margin-top:9px;font-feature-settings:'tnum' 1")}>Last run 2026-07-02 06:10 JST — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no</div>
+              <div style={s("font-size:11px;color:var(--mut);margin-top:9px;font-feature-settings:'tnum' 1")}>{pipelineLine}</div>
             </div>
 
             {/* ============ THREE PANES ============ */}
@@ -677,7 +697,19 @@ export function PolicyDeepDiveScreen() {
                   <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;color:var(--mut);flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>`} />
                   <input placeholder={L === 'ja' ? '委員会を検索…' : 'Search committees…'} value={comQ} onChange={(e) => setComQ(e.target.value)} style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:12.5px;background:transparent;color:var(--tx);min-width:0')} />
                   {comQ && (
-                    <span onClick={() => setComQ('')} style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}>✕</span>
+                    <span
+                      onClick={() => setComQ('')}
+                      role="button"
+                      tabIndex={0}
+                      aria-label="Clear committee search"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          setComQ('')
+                        }
+                      }}
+                      style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}
+                    >✕</span>
                   )}
                 </div>
                 {/* recommended to follow */}

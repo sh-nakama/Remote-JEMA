@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from './app'
 import type { Screen, WatchEntry } from './app'
-import { getSnapshot } from './data'
-import type { AreaKey, Level, Manifest } from './types'
+import { getSnapshot, useManifest } from './data'
+import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s } from './style'
 
 /**
@@ -285,16 +285,7 @@ const SUB = 'font-size:11.5px;color:var(--mut);margin-top:2px'
 function SettingsPanel() {
   const app = useApp()
   const L = app.lang
-  const [meta, setMeta] = useState<Manifest | null>(null)
-  useEffect(() => {
-    let alive = true
-    getSnapshot<Manifest>('manifest.json')
-      .then((m) => alive && setMeta(m))
-      .catch(() => {})
-    return () => {
-      alive = false
-    }
-  }, [])
+  const { data: meta } = useManifest()
 
   const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
 
@@ -308,6 +299,7 @@ function SettingsPanel() {
             base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
             hover="background:var(--bg2);color:var(--tx)"
             onClick={app.closeOverlay}
+            aria-label="Close"
           >
             {icon(I_X, 16)}
           </Hoverable>
@@ -421,6 +413,7 @@ function WatchlistPanel() {
             base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
             hover="background:var(--bg2);color:var(--tx)"
             onClick={app.closeOverlay}
+            aria-label="Close"
           >
             {icon(I_X, 16)}
           </Hoverable>
@@ -457,6 +450,7 @@ function WatchlistPanel() {
                   app.toggleWatch(w)
                 }}
                 title={pick('Remove', '削除')}
+                aria-label="Remove from watchlist"
               >
                 {icon(I_X, 15)}
               </Hoverable>
@@ -606,13 +600,13 @@ function CommitteesManage() {
   }
 
   // ---- policy CLI jobs (local master only): run the same commands as the cron/skill ----
-  const [job, setJob] = useState<Record<string, any> | null>(null)
+  const [job, setJob] = useState<PolicyJob | null>(null)
   const jobTimer = useRef<number | null>(null)
 
   const pollJob = () => {
     fetch('/api/policy/job')
       .then((r) => r.json())
-      .then((j) => {
+      .then((j: PolicyJob) => {
         setJob(j)
         if (j && j.state === 'running') {
           jobTimer.current = window.setTimeout(pollJob, 1500)
@@ -633,9 +627,10 @@ function CommitteesManage() {
       body: JSON.stringify({ cmd, ...params }),
     })
       .then(async (r) => {
-        const j = await r.json().catch(() => ({}))
+        // 202 bodies are the job snapshot; 400/409 bodies only carry `error`.
+        const j = (await r.json().catch(() => null)) as PolicyJob | null
         if (r.status === 202) {
-          setJob(j)
+          if (j) setJob(j)
           if (jobTimer.current) window.clearTimeout(jobTimer.current)
           jobTimer.current = window.setTimeout(pollJob, 1200)
           app.toast(pick(`Started: ${label || cmd}`, `実行開始: ${label || cmd}`))
@@ -668,7 +663,7 @@ function CommitteesManage() {
     if (!app.interactive) return
     fetch('/api/policy/job')
       .then((r) => r.json())
-      .then((j) => {
+      .then((j: PolicyJob) => {
         if (j && j.state && j.state !== 'idle') {
           setJob(j)
           if (j.state === 'running') jobTimer.current = window.setTimeout(pollJob, 1200)
@@ -700,6 +695,7 @@ function CommitteesManage() {
             base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
             hover="background:var(--bg2);color:var(--tx)"
             onClick={app.closeOverlay}
+            aria-label="Close"
           >
             {icon(I_X, 16)}
           </Hoverable>
@@ -714,7 +710,19 @@ function CommitteesManage() {
             style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0')}
           />
           {!!needle && (
-            <span onClick={() => setQ('')} style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}>✕</span>
+            <span
+              onClick={() => setQ('')}
+              role="button"
+              tabIndex={0}
+              aria-label="Clear search"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setQ('')
+                }
+              }}
+              style={s('font-size:11px;color:var(--mut);cursor:pointer;flex-shrink:0')}
+            >✕</span>
           )}
         </div>
 
@@ -750,7 +758,7 @@ function CommitteesManage() {
             ))}
             <span style={s('width:1px;height:18px;background:var(--dv);margin:0 2px')}></span>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')} title={pick('Needs `notebooklm login`', '`notebooklm login`が必要')}>{pick('SUMMARISE ⚿', '要約 ⚿')}</span>
-            {([['run', pick('Summarise all', '全件要約'), {}, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
+            {([['run', pick('Summarise all', '全件要約'), { breadth: true, max_per_run: 8 }, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
               <Hoverable
                 as="span"
                 key={cmd}
@@ -805,6 +813,7 @@ function CommitteesManage() {
                             hover="background:var(--acTint2);color:var(--ac)"
                             onClick={() => app.toggleFollow(c.key)}
                             title={following ? pick('Following — click to unfollow', 'フォロー中 — クリックで解除') : pick('Follow', 'フォロー')}
+                            aria-label={following ? 'Unfollow committee' : 'Follow committee'}
                           >
                             {icon(following ? I_STAR : I_STAR_O, 15, 'currentColor')}
                           </Hoverable>
@@ -883,6 +892,7 @@ function CommitteesManage() {
                                 hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
                                 onClick={() => !running && postJob('run', { committee: c.key }, `run ${c.key}`)}
                                 title={pick('Summarise pending meetings only (policy run) — needs notebooklm login', '未要約の会合のみ要約（policy run）— notebooklm loginが必要')}
+                                aria-label="Summarise pending meetings"
                               >
                                 {icon(I_PLAY, 12, 'currentColor')}
                               </Hoverable>
@@ -892,6 +902,7 @@ function CommitteesManage() {
                                 hover={running ? '' : 'border-color:var(--ac);background:var(--acTint)'}
                                 onClick={() => !running && backfill(c)}
                                 title={pick('Scrape older meetings back to a chosen number, then summarise (policy backfill)', '指定した回まで過去の会合を取得してから要約（policy backfill）')}
+                                aria-label="Backfill older meetings"
                               >
                                 {icon(I_REWIND, 12, 'currentColor')}
                               </Hoverable>
@@ -917,7 +928,19 @@ function CommitteesManage() {
               </span>
               <span style={s('flex:1')}></span>
               {job.state !== 'running' && (
-                <span onClick={() => setJob(null)} style={s('cursor:pointer;color:var(--mut);font-size:12px')}>✕</span>
+                <span
+                  onClick={() => setJob(null)}
+                  role="button"
+                  tabIndex={0}
+                  aria-label="Dismiss job status"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      setJob(null)
+                    }
+                  }}
+                  style={s('cursor:pointer;color:var(--mut);font-size:12px')}
+                >✕</span>
               )}
             </div>
             {job.result && (
@@ -990,6 +1013,7 @@ export function SidebarExpander() {
       hover="background:var(--bg2);color:var(--tx)"
       onClick={toggleCollapsed}
       title={lang === 'ja' ? 'サイドバーを開く' : 'Expand sidebar'}
+      aria-label="Expand sidebar"
     >
       {icon(I_CHEV_RR, 16, 'currentColor')}
       <span style={s('font-size:12.5px;font-weight:600')}>JEMA</span>

@@ -19,6 +19,12 @@ on:
         description: "Max meetings to summarise this run"
         default: "8"
 
+# Queue behind the other HF-dataset-mutating workflows (see daily.yml).
+concurrency:
+  group: hf-dataset
+  cancel-in-progress: false
+  queue: max
+
 jobs:
   summarise:
     runs-on: ubuntu-latest
@@ -44,8 +50,11 @@ jobs:
           pip install "notebooklm-py[browser]"
 
       - name: Pull latest DB from Hugging Face
+        id: pull
         run: python -m repower.cli pull-hf
-        continue-on-error: true
+        # A scheduled run must not detect/summarise into a fresh DB and push it
+        # over the dataset's history; manual dispatch may (bootstrap).
+        continue-on-error: ${{ github.event_name != 'schedule' }}
 
       - name: Detect new meetings (no auth required)
         run: python -m repower.cli policy detect
@@ -75,5 +84,20 @@ jobs:
           fi
 
       - name: Push updated DB to Hugging Face
-        if: always()
+        # Preserve DB state from the cheap detection step even when summarisation
+        # fails — but never push a fresh DB created because the pull itself failed
+        # (only manual bootstrap runs may do that). NB: `outcome` only matters in
+        # the schedule branch, where the pull step's continue-on-error uses the
+        # identical `github.event_name != 'schedule'` expression — keep them in sync.
+        if: always() && (steps.pull.outcome == 'success' || github.event_name != 'schedule')
         run: python -m repower.cli push-hf
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Weekly policy summaries failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Weekly policy summaries failed — $url\"}" || true
+          fi

@@ -3,10 +3,12 @@
 Two entry points, both best-effort and network-injectable (so they're unit-tested
 against saved HTML without hitting the network):
 
-- :func:`discover_committees` crawls a curated set of METI / OCCTO / EGC index
+- :func:`search_committees` crawls a curated set of METI / OCCTO / EGC index
   roots, extracts links that look like committee homepages, filters them by a
   free-text query (Japanese names + URL slugs, with a small English→Japanese
-  keyword bridge), and flags the ones already tracked.
+  keyword bridge), and flags the ones already tracked. (Distinct from
+  :func:`repower.policy.catalog.discover_committees`, which enumerates the org
+  indexes and persists catalog rows.)
 - :func:`probe_url` takes a committee URL the user pasted, guesses its source /
   key / name, and (optionally) validates it by running the real detector so the
   UI can preview "N meetings found" before the committee is added.
@@ -19,14 +21,15 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
 from repower.policy.committees import Committee
 from repower.policy.scraper import _fetch, discover_meetings
+from repower.policy.store import _norm_url
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +46,10 @@ INDEX_ROOTS: tuple[str, ...] = (
     "https://www.occto.or.jp/iinkai/",
     "https://www.egc.meti.go.jp/activity/",
 )
+
+# Cap on OCCTO by-number page probes when previewing a pasted URL (each probe
+# sleeps ~1s, so an unbounded scan stalls the UI). Detection stays unbounded.
+PROBE_PREVIEW_MAX = 15
 
 # A link is treated as a committee homepage if its text contains one of these.
 _COMMITTEE_MARKERS = ("委員会", "小委員会", "部会", "分科会", "検討会", "研究会",
@@ -79,12 +86,10 @@ class Candidate:
 
 # ── URL / source / key heuristics ────────────────────────────────────────────
 def normalize_url(url: str) -> str:
-    """Canonical form for dedup: drop scheme host-case, trailing index.html + slash."""
-    u = url.strip()
-    u = re.sub(r"/index\.html?(?:[?#].*)?$", "/", u, flags=re.IGNORECASE)
-    if not u.endswith("/") and "." not in u.rsplit("/", 1)[-1]:
-        u += "/"
-    return u.rstrip("/").lower()
+    """Canonical form for dedup: drop fragment/query + trailing index.html + slash,
+    lowercased. Delegates to :func:`repower.policy.store._norm_url` so discovery
+    and the store agree on what counts as "the same committee URL"."""
+    return _norm_url(url)
 
 
 def guess_source(url: str) -> str:
@@ -97,8 +102,17 @@ def guess_source(url: str) -> str:
 
 
 def guess_key(url: str) -> str:
-    """A stable committee key from the URL's last meaningful path segment."""
+    """A stable committee key from the URL's last meaningful path segment.
+
+    EGC pages are all flat files under ``/activity/`` (``index_<slug>.html``), so
+    stripping the filename would collapse every EGC committee to key "activity" —
+    those map to ``emsc_<slug>`` instead, aligned with
+    :func:`repower.policy.catalog.parse_egc_committees`.
+    """
     path = urlparse(url).path
+    egc = re.match(r"^/activity/index_([a-z0-9_]+)\.html$", path, flags=re.IGNORECASE)
+    if egc and "egc.meti.go.jp" in urlparse(url).netloc.lower():
+        return f"emsc_{egc.group(1).lower()}"
     path = re.sub(r"/index\.html?$", "/", path, flags=re.IGNORECASE)
     segs = [s for s in path.split("/") if s and not s.endswith((".html", ".htm"))]
     seg = segs[-1] if segs else "committee"
@@ -167,19 +181,22 @@ def _matches(cand: Candidate, tokens: list[str]) -> bool:
     return True
 
 
-# ── Public: discover from the curated index roots ─────────────────────────────
-def discover_committees(
+# ── Public: search the curated index roots ────────────────────────────────────
+def search_committees(
     query: str = "", *, db_path: str | None = None, roots: tuple[str, ...] | None = None,
     fetch: FetchFn | None = None, tracked_urls: set[str] | None = None,
     tracked_keys: set[str] | None = None, limit: int = 40,
 ) -> list[Candidate]:
     """Crawl the index roots and return committee candidates matching *query*.
 
-    ``fetch`` defaults to the shared conditional-GET fetcher; inject a fake in
-    tests. ``tracked_urls``/``tracked_keys`` mark already-tracked committees; if
-    omitted they're read from the registry.
+    ``fetch`` defaults to a **forced** fetch (inject a fake in tests): the index
+    roots overlap the catalog/detect crawls, so a conditional GET of an
+    already-cached root would 304 with no body and the search would silently
+    return zero candidates. ``tracked_urls``/``tracked_keys`` mark
+    already-tracked committees; if omitted they're read from the registry.
     """
-    fetch = fetch or (lambda u: _fetch(u, db_path=db_path))
+    # force=True: we always need a body to parse, never a 304 (see docstring).
+    fetch = fetch or (lambda u: _fetch(u, db_path=db_path, force=True))
     roots = roots or INDEX_ROOTS
     if tracked_urls is None or tracked_keys is None:
         from repower.policy.store import list_committees
@@ -195,7 +212,7 @@ def discover_committees(
         except Exception as e:  # noqa: BLE001 — one bad root must not abort discovery
             logger.warning("discover: fetch failed for %s: %s", root, e)
             continue
-        if status not in ("ok", "not_modified") or not content:
+        if status != "ok" or not content:
             continue
         for cand in parse_committee_links(content, root):
             if not _matches(cand, tokens):
@@ -215,31 +232,39 @@ def probe_url(
     validate: bool = True, tracked_urls: set[str] | None = None,
     tracked_keys: set[str] | None = None,
 ) -> Candidate | None:
-    """Inspect a pasted committee URL → a :class:`Candidate` (or None if unreachable).
+    """Inspect a pasted committee URL → a :class:`Candidate`.
 
-    Guesses source/key from the URL, reads the page ``<title>``/``<h1>`` for a
-    name, and — when ``validate`` — runs the real detector so the UI can preview
-    how many meetings would be tracked.
+    Returns ``None`` only for non-http(s) input; an unreachable URL still yields
+    a Candidate, with ``note="unreachable"``. Guesses source/key from the URL,
+    reads the page ``<title>``/``<h1>`` for a name, and — when ``validate`` —
+    runs the real detector so the UI can preview how many meetings would be
+    tracked.
     """
     url = url.strip()
     if not re.match(r"^https?://", url):
         return None
-    fetch = fetch or (lambda u: _fetch(u, db_path=db_path))
+    # force=True: the URL may already be in the conditional-GET cache (e.g. an
+    # index the catalog crawl touched), and a 304 carries no body to parse.
+    fetch = fetch or (lambda u: _fetch(u, db_path=db_path, force=True))
     source = guess_source(url)
     key = guess_key(url)
 
     name_ja = ""
+    unreachable = False
     try:
         status, content = fetch(url)
-        if status in ("ok", "not_modified") and content:
+        if status == "ok" and content:
             soup = BeautifulSoup(content, "lxml")
             h1 = soup.find("h1")
             title = soup.find("title")
             raw = (h1.get_text(strip=True) if h1 else "") or (
                 title.get_text(strip=True) if title else "")
             name_ja = _clean_name(raw)
+        else:
+            unreachable = True
     except Exception as e:  # noqa: BLE001
         logger.warning("probe_url fetch failed for %s: %s", url, e)
+        unreachable = True
 
     if tracked_urls is None or tracked_keys is None:
         from repower.policy.store import list_committees
@@ -250,19 +275,26 @@ def probe_url(
     cand = Candidate(
         key=key, name_ja=name_ja or key, name_en="", url=url, source=source,
         already_tracked=normalize_url(url) in tracked_urls or key in tracked_keys,
+        note="unreachable" if unreachable else "",
     )
 
     if validate:
         try:
             probe = Committee(key=key, name_ja=cand.name_ja, name_en=key,
                               url=url, source=source)
-            disc = discover_meetings(probe, db_path=db_path)
-            if disc.status in ("ok", "unchanged"):
+            # force=True: this re-fetches the URL we just fetched, so a
+            # conditional GET would 304 and the meeting preview would break.
+            # max_probes bounds the OCCTO by-number scan (1s sleep per probe) so
+            # a UI preview stays snappy; detect keeps the unbounded scan.
+            disc = discover_meetings(probe, db_path=db_path, force=True,
+                                     max_probes=PROBE_PREVIEW_MAX)
+            if disc.status == "ok":
                 n = len(disc.meeting_nums)
                 cand.note = f"{n} meeting(s) found" if n else "reachable (0 numbered meetings parsed)"
-            else:
+            elif not unreachable:
                 cand.note = "could not parse meetings — check the URL"
         except Exception as e:  # noqa: BLE001
             logger.warning("probe_url validate failed for %s: %s", url, e)
-            cand.note = "could not validate"
+            if not unreachable:
+                cand.note = "could not validate"
     return cand

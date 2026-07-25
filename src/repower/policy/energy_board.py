@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime
 import logging
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
@@ -135,6 +136,7 @@ def _url_to_dir(url: str | None) -> str | None:
 # ── Networked fetch (memoised) ───────────────────────────────────────────────
 _feed_cache: list[BoardEntry] | None = None
 _feed_ts: float = 0.0
+_feed_lock = threading.Lock()  # Streamlit threads share this module-level cache
 
 
 def _fetch(url: str, *, db_path: str | None = None) -> bytes | None:
@@ -152,15 +154,18 @@ def _fetch(url: str, *, db_path: str | None = None) -> bytes | None:
 def fetch_feed(*, db_path: str | None = None, refresh: bool = False) -> list[BoardEntry]:
     """The current energy-board feed, memoised for ``_FEED_TTL`` seconds."""
     global _feed_cache, _feed_ts
-    now = time.time()
-    if _feed_cache is not None and not refresh and (now - _feed_ts) < _FEED_TTL:
+    # One lock around check+fetch+store: concurrent callers see a consistent
+    # cache and a cold cache is fetched once, not once per thread.
+    with _feed_lock:
+        now = time.time()
+        if _feed_cache is not None and not refresh and (now - _feed_ts) < _FEED_TTL:
+            return _feed_cache
+        content = _fetch(BASE_URL, db_path=db_path)
+        if content is not None:
+            _feed_cache, _feed_ts = parse_feed(content), now
+        elif _feed_cache is None:
+            _feed_cache = []
         return _feed_cache
-    content = _fetch(BASE_URL, db_path=db_path)
-    if content is not None:
-        _feed_cache, _feed_ts = parse_feed(content), now
-    elif _feed_cache is None:
-        _feed_cache = []
-    return _feed_cache
 
 
 # ── Backup helpers (used by the scraper on METI failure) ─────────────────────

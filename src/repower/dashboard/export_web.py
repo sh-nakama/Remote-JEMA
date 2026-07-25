@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 # Silence Streamlit's "No runtime found" cache warnings when the cached loaders
@@ -41,6 +42,7 @@ from repower.db import (  # noqa: E402
     get_session,
     init_db,
 )
+from repower.timeutil import today_jst  # noqa: E402
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
 AREAS: list[str] = [
@@ -94,10 +96,23 @@ def _norm_pair(pair: str) -> str:
     return pair.replace(" ", "").replace("→", "->")
 
 
+def _jsonable(obj: object) -> object:
+    """Replace NaN/Inf floats with None, recursively. Python's json module would
+    otherwise emit literal ``NaN`` — invalid strict JSON that makes the browser's
+    ``res.json()`` throw, silently dropping that area/dataset to fixture fallback."""
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+        return None
+    return obj
+
+
 def _write_json(path: Path, obj: object) -> int:
     """Write *obj* as compact UTF-8 JSON; return byte length written."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+    text = json.dumps(_jsonable(obj), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     path.write_text(text, encoding="utf-8")
     return len(text.encode("utf-8"))
 
@@ -126,7 +141,7 @@ def source_max_dates(db_path: str | None = None) -> dict[str, str | None]:
 
 def _anchor_date(maxes: dict[str, str | None]) -> date:
     vals = [date.fromisoformat(v) for v in maxes.values() if v]
-    return max(vals) if vals else date.today()
+    return max(vals) if vals else today_jst()
 
 
 def export_wholesale(out: Path, anchor: date) -> dict:
@@ -192,6 +207,8 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
         "tokyo_today": [None] * 48,
         "now": {"system": None, "tokyo": None, "slot": None},
         "areas_now": {},
+        "areas_today": {},
+        "areas_yday": {},
     }
     with eng.connect() as con:
         spot = pd.read_sql_query(
@@ -236,15 +253,34 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
 
         area_df = pd.read_sql_query(
             text(
-                "SELECT area, time, price FROM jepx_area_price_30m "
-                "WHERE date = (SELECT MAX(date) FROM jepx_area_price_30m WHERE date <= :a)"
+                "SELECT date, area, time, price FROM jepx_area_price_30m "
+                "WHERE date IN ("
+                "  SELECT date FROM ("
+                "    SELECT DISTINCT date FROM jepx_area_price_30m WHERE date <= :a "
+                "    ORDER BY date DESC LIMIT 2"
+                "  )"
+                ")"
             ),
             con,
             params={"a": anchor.isoformat()},
         )
     if not area_df.empty:
-        latest = area_df.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
+        area_df["date"] = area_df["date"].astype(str)
+        adays = sorted(area_df["date"].unique())
+        aday = adays[-1]
+        aprev = adays[-2] if len(adays) > 1 else None
+        today_rows = area_df[area_df["date"] == aday]
+        # Per-area intraday on the 48-slot grid (feeds the Market Pulse sparklines).
+        apiv = today_rows.pivot_table(index="time", columns="area", values="price", aggfunc="last")
+        payload["areas_today"] = {str(area): _slot_col(apiv, area) for area in apiv.columns}
+        # Latest (last non-null) per area, today — the price shown in each tile.
+        latest = today_rows.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
         payload["areas_now"] = {a: round(float(p), 3) for a, p in latest.items()}
+        # Latest per area, yesterday — the day-over-day baseline for the ▲/▼ delta.
+        if aprev is not None:
+            prev_rows = area_df[area_df["date"] == aprev]
+            yl = prev_rows.dropna(subset=["price"]).sort_values("time").groupby("area")["price"].last()
+            payload["areas_yday"] = {a: round(float(p), 3) for a, p in yl.items()}
 
     n = _write_json(out / "system.json", payload)
     return {"files": 1, "bytes": n}
@@ -869,7 +905,7 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
 
     manifest: dict = {
         "schema": SCHEMA_VERSION,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "anchor": anchor.isoformat(),
         "areas": AREAS,
         "levels": LEVELS,
