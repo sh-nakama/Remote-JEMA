@@ -609,7 +609,7 @@ function WatchlistPanel() {
 // Committees — manage the tracked set + browse the full energy catalog
 // ---------------------------------------------------------------------------
 const PANEL_WIDE =
-  'width:720px;max-width:95vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
+  'width:1120px;max-width:96vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
 const I_LIST =
   '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>'
 const I_STAR_O =
@@ -961,40 +961,47 @@ function CommitteesManage() {
           </div>
         )}
 
-        <div style={s('max-height:52vh;overflow-y:auto;padding:4px 12px 14px')}>
+        <div style={s('max-height:64vh;overflow-y:auto;padding:4px 16px 16px')}>
           {loading && (
             <div style={s('padding:26px;text-align:center;color:var(--mut);font-size:13px')}>{pick('Loading…', '読み込み中…')}</div>
           )}
-          {!loading &&
-            ORGS.map((org) => {
+          {!loading && (
+            <div style={s('display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start')}>
+            {ORGS.map((org) => {
+              // Tracked first, then by queue priority (lower = summarised first) so the
+              // column live-reorders as priorities are edited, then source_count / key.
               const items = rows
                 .filter((c) => c.org === org && match(c))
                 .sort(
                   (a, b) =>
                     Number(b.tracked) - Number(a.tracked) ||
+                    (a.priority ?? 100) - (b.priority ?? 100) ||
                     (b.source_count || 0) - (a.source_count || 0) ||
                     a.key.localeCompare(b.key),
                 )
-              if (!items.length) return null
               const inOrg = rows.filter((c) => c.org === org)
               const nTracked = inOrg.filter((c) => c.tracked).length
               return (
-                <div key={org} style={s('margin-top:12px')}>
-                  <div style={s('display:flex;align-items:center;gap:7px;margin:0 4px 6px')}>
+                <div key={org} style={s('min-width:0')}>
+                  <div style={s('display:flex;align-items:center;gap:7px;margin:0 2px 8px;position:sticky;top:0;z-index:2;background:var(--bg1);padding:4px 0')}>
                     <span style={s(`width:8px;height:8px;border-radius:999px;background:${orgColor(org)};flex-shrink:0`)}></span>
                     <span style={s('font-size:12px;font-weight:700;letter-spacing:.05em;color:var(--tx2)')}>{org}</span>
-                    <span style={s("font-size:11px;color:var(--mut);margin-left:2px;font-feature-settings:'tnum' 1")}>
-                      · {pick(`tracking ${nTracked} of ${inOrg.length}`, `${inOrg.length}件中${nTracked}件を追跡`)}
+                    <span style={s("font-size:11px;color:var(--mut);margin-left:auto;white-space:nowrap;font-feature-settings:'tnum' 1")}>
+                      {pick(`${nTracked}/${inOrg.length} tracked`, `${nTracked}/${inOrg.length} 追跡`)}
                     </span>
                   </div>
-                  <div style={s('display:flex;flex-direction:column;gap:2px')}>
+                  {!items.length ? (
+                    <div style={s('font-size:11.5px;color:var(--mut);padding:10px 4px')}>{pick('No matches', '該当なし')}</div>
+                  ) : (
+                  <div style={s('display:flex;flex-direction:column;gap:6px')}>
                     {items.map((c) => {
                       const following = app.isFollowing(c.key)
                       return (
                         <div
                           key={c.key}
-                          style={s('display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:11px;border-bottom:1px solid var(--dv)')}
+                          style={s('display:flex;flex-direction:column;gap:6px;padding:8px 9px;border-radius:11px;border:1px solid var(--dv);background:var(--bg0)')}
                         >
+                          <div style={s('display:flex;align-items:center;gap:8px;min-width:0')}>
                           <Hoverable
                             as="span"
                             base={`display:flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;cursor:pointer;flex-shrink:0;color:${following ? 'var(--ac)' : 'var(--fnt3)'}`}
@@ -1007,7 +1014,7 @@ function CommitteesManage() {
                           </Hoverable>
                           <div style={s('min-width:0;flex:1')}>
                             <div style={s('display:flex;align-items:center;gap:7px')}>
-                              <span style={s('font-size:13px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>
+                              <span style={s('font-size:12.5px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>
                                 {L === 'ja' ? c.ja : c.en}
                               </span>
                               {c.discovered && (
@@ -1016,10 +1023,12 @@ function CommitteesManage() {
                                 </span>
                               )}
                             </div>
-                            <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis")}>
                               {c.tier} · {c.last}
                             </div>
                           </div>
+                          </div>
+                          <div style={s('display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding-left:34px')}>
                           {c.tracked &&
                             (app.interactive ? (
                               <span
@@ -1096,13 +1105,17 @@ function CommitteesManage() {
                               </Hoverable>
                             </>
                           )}
+                          </div>
                         </div>
                       )
                     })}
                   </div>
+                  )}
                 </div>
               )
             })}
+            </div>
+          )}
         </div>
 
         {job && job.state !== 'idle' && (
