@@ -448,11 +448,13 @@ def policy_materials(
 def policy_run(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     max_per_run: int = typer.Option(5, help="Max meetings to summarise this run (rate/cost guard)"),
-    breadth: bool = typer.Option(
-        False, "--breadth",
+    breadth: bool | None = typer.Option(
+        None, "--breadth/--depth-first",
         help="Breadth-first: summarise the newest pending meeting of each committee "
              "(in priority order) before going deeper — spreads a small daily quota "
-             "across committees instead of draining one committee's backlog.",
+             "across committees instead of draining one committee's backlog. Defaults "
+             "to breadth-first for '--committee all' and depth-first for a single "
+             "committee; pass --breadth/--depth-first to override.",
     ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
@@ -460,7 +462,10 @@ def policy_run(
 
     _require_auth_or_exit()
     keys = None if committee == "all" else [committee]
-    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth)
+    # Default: breadth-first across the whole tracked set (get the latest meeting of
+    # each committee current first), depth-first when draining a single committee.
+    breadth_first = (committee == "all") if breadth is None else breadth
+    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth_first)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} synthesized={summary['synthesized']}"
