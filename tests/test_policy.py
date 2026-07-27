@@ -227,6 +227,75 @@ def test_detect_unchanged_short_circuits(monkeypatch, tmp_path):
     assert results[0]["new"] == 0
 
 
+# ── Material backfill (self-heal meetings detected during a source outage) ────
+def test_meetings_missing_materials_lists_hidden_meetings(tmp_path):
+    """meetings_missing_materials returns detected meetings with no materials
+    (newest first), excluding done meetings and meetings that already have docs."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    store.record_meeting(key, 1, None, db_path=db)  # material-less
+    store.record_meeting(key, 2, None, db_path=db)  # material-less
+    store.record_meeting(  # already has a material → not hidden
+        key, 3,
+        [Material(3, "003_min", "https://x/3_gijiroku.pdf", "議事録", "minutes")],
+        db_path=db,
+    )
+    store.record_meeting(key, 4, None, db_path=db)  # will be marked done
+    mid4 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                if m["meeting_num"] == 4)
+    store.update_meeting(mid4, db_path=db, state="done", briefing_md="x")
+
+    assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
+
+
+def test_backfill_materials_populates_detected_meetings(monkeypatch, tmp_path):
+    """backfill_materials fetches materials for material-less detected meetings so
+    they stop being hidden — the 'tracked committee shows no meetings' fix."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    store.record_meeting(key, 1, None, db_path=db)
+    store.record_meeting(key, 2, None, db_path=db)
+    assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
+
+    def fake_list(c, n, **kw):
+        return [Material(n, f"{n:03d}_01", f"https://x/{n}_agenda.pdf", "議事次第", "agenda")]
+
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["materialised"] == 2 and row["checked"] == 2
+    # Both meetings now carry a material, so none remain hidden.
+    assert store.meetings_missing_materials(key, db_path=db) == []
+    assert len(store.meeting_materials(key, 2, db_path=db)) == 1
+
+
+def test_backfill_materials_respects_per_committee_limit(monkeypatch, tmp_path):
+    """The catch-up path caps work per committee so a full self-heal spreads across
+    runs instead of hammering the source in one pass."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    for n in range(1, 6):
+        store.record_meeting(key, n, None, db_path=db)
+
+    monkeypatch.setattr(detect_mod, "list_materials",
+                        lambda c, n, **kw: [Material(n, f"{n:03d}_01",
+                                                     f"https://x/{n}.pdf", "議事次第", "agenda")])
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db, limit_per_committee=2)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["checked"] == 2 and row["materialised"] == 2  # newest two only
+    # Meetings 4 and 5 healed; 1–3 still pending for the next run.
+    assert store.meetings_missing_materials(key, db_path=db) == [3, 2, 1]
+
+
 # ── Running document regeneration ────────────────────────────────────────────
 def test_regenerate_running_doc(monkeypatch, tmp_path):
     db = str(tmp_path / "t.db")
@@ -640,22 +709,37 @@ def test_sync_preserves_ui_edits(tmp_path):
     assert row["priority"] == 7
 
 
-def test_disabled_committee_excluded_from_detection(monkeypatch, tmp_path):
+def test_disabled_committee_detected_but_not_summarised(monkeypatch, tmp_path):
+    """Detection is decoupled from tracking: detect() scans *every* committee — so
+    discovered/untracked ones get their meetings recorded as pending — while the
+    ``enabled`` flag only gates summarisation (the daily worklist)."""
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
     store.set_committee_enabled("santeii", False, db_path=db)
 
     tracked_keys = {c.key for c in store.tracked_committees(db_path=db)}
-    assert "santeii" not in tracked_keys
+    assert "santeii" not in tracked_keys  # enabled-only helper still excludes it
     assert "system_review" in tracked_keys
 
-    # detect() over the whole (enabled) registry must skip the disabled committee.
+    # detect() now scans the whole catalog — including the disabled committee — and
+    # records a new (pending) meeting for it.
     seen: list[str] = []
-    monkeypatch.setattr(detect_mod, "discover_meetings",
-                        lambda c, **kw: seen.append(c.key) or Discovery("unchanged", []))
+
+    def fake_discover(c, **kw):
+        seen.append(c.key)
+        return Discovery("ok", [1]) if c.key == "santeii" else Discovery("unchanged", [])
+
+    monkeypatch.setattr(detect_mod, "discover_meetings", fake_discover)
     monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
     detect_mod.detect(db_path=db)
-    assert "santeii" not in seen and "system_review" in seen
+    assert "santeii" in seen and "system_review" in seen
+
+    # …but the disabled committee is kept out of the summarisation worklist, while
+    # it still shows up when the enabled filter is off (e.g. the deep-dive feed).
+    q_enabled = {w["committee_key"] for w in store.pending_meetings(db_path=db, only_enabled=True)}
+    q_all = {w["committee_key"] for w in store.pending_meetings(db_path=db, only_enabled=False)}
+    assert "santeii" not in q_enabled
+    assert "santeii" in q_all
 
 
 def test_add_user_committee_tracked_and_resolved(tmp_path):

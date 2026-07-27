@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from './app'
-import type { Screen, WatchEntry } from './app'
-import { getSnapshot, useManifest } from './data'
+import type { JobRun, JobStage, Screen, WatchEntry } from './app'
+import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s } from './style'
 
@@ -389,6 +389,149 @@ function SettingsPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// Guide panel — the in-app "i" user guide
+// ---------------------------------------------------------------------------
+// A SIMPLIFIED mirror of the "Policy Deep Dive" section of docs/USER-GUIDE.md.
+// Keep the two in sync: update the doc first, then mirror the short copy here.
+const I_INFO =
+  '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>'
+const GUIDE_PANEL =
+  'width:760px;max-width:94vw;max-height:80vh;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden;display:flex;flex-direction:column'
+
+interface GuideItem { en: string; ja: string }
+interface GuideSection { hEn: string; hJa: string; items: GuideItem[] }
+
+const GUIDE: GuideSection[] = [
+  {
+    hEn: 'What this screen is', hJa: 'この画面について',
+    items: [
+      { en: 'Tracks Japanese energy-policy committees (METI/OCCTO/EGC): their meetings, the documents published for each, and AI briefings & bilingual digests of what was discussed.',
+        ja: '日本のエネルギー政策委員会（METI/OCCTO/EGC）の会合、公開資料、AIによる要約・バイリンガルのダイジェストを追跡します。' },
+    ],
+  },
+  {
+    hEn: 'The three panes', hJa: '3つのペイン',
+    items: [
+      { en: 'Explorer (left): the full committee catalog — tracked ones and ones the tool discovered (tagged UNTRACKED). Search and follow committees here.',
+        ja: 'エクスプローラー（左）: 委員会カタログ全体。追跡中と、発見済みで未追跡（UNTRACKED）の委員会。検索・フォローができます。' },
+      { en: 'Feed (center): meetings as cards, newest first, with a search box, date filters, and a Tracked/All toggle.',
+        ja: 'フィード（中央）: 会合をカード表示（新しい順）。検索、日付フィルタ、追跡/全体トグルがあります。' },
+      { en: 'Detail (right): pick a committee to see its rolling synthesis, or a meeting to see that session’s digest and source PDFs.',
+        ja: '詳細（右）: 委員会を選ぶと総括、会合を選ぶとその回のダイジェストと元資料PDFを表示します。' },
+    ],
+  },
+  {
+    hEn: 'Follow vs. Track (they differ)', hJa: 'フォローと追跡の違い',
+    items: [
+      { en: 'Follow is a personal filter saved in your browser — it highlights committees and drives the Followed filter only.',
+        ja: 'フォローはブラウザに保存される個人設定。ハイライトと「フォロー中」フィルタにのみ影響します。' },
+      { en: 'Track is a backend setting (in Manage committees). Only tracked committees get AI summaries generated.',
+        ja: '追跡はバックエンド設定（「委員会の管理」内）。追跡中の委員会のみがAI要約されます。' },
+    ],
+  },
+  {
+    hEn: 'Meeting status', hJa: '会合のステータス',
+    items: [
+      { en: 'Pending: known and has materials, waiting for its AI digest.',
+        ja: 'ペンディング: 資料あり、AIダイジェスト待ち。' },
+      { en: 'Done: summarised — has a digest and feeds the committee synthesis.',
+        ja: '完了: 要約済み。ダイジェストがあり、委員会の総括に反映されます。' },
+      { en: 'Error: summarisation failed; retried a few times, then dropped.',
+        ja: 'エラー: 要約に失敗。数回再試行後に除外されます。' },
+      { en: 'A meeting with no materials yet is hidden — materials are what make it appear.',
+        ja: '資料がまだ無い会合は非表示です。資料が揃うと表示されます。' },
+    ],
+  },
+  {
+    hEn: 'Check for updates (catch-up)', hJa: '更新の確認（差分取得）',
+    items: [
+      { en: 'Runs five stages, shown live in the progress panel (bottom-left):',
+        ja: '5つのステージを実行し、進捗パネル（左下）にライブ表示します:' },
+      { en: '1. detect — find new meetings across every committee.',
+        ja: '1. detect — 全委員会の新規会合を検出。' },
+      { en: '2. materials — fetch documents for meetings that had none yet (self-heal).',
+        ja: '2. materials — 資料が無かった会合の資料を取得（自動修復）。' },
+      { en: '3. dates — fill in missing meeting dates.',
+        ja: '3. dates — 欠けている会合日を補完。' },
+      { en: '4. schedule — refresh upcoming meetings (skipped if the METI feed is down).',
+        ja: '4. schedule — 今後の会合を更新（METIのフィード停止時はスキップ）。' },
+      { en: '5. discover — find new committees you don’t track yet.',
+        ja: '5. discover — 未追跡の新しい委員会を発見。' },
+      { en: 'The button needs a local backend running; the public site is read-only.',
+        ja: 'このボタンはローカルのバックエンドが必要です。公開サイトは閲覧専用です。' },
+    ],
+  },
+  {
+    hEn: 'Summaries', hJa: '要約',
+    items: [
+      { en: 'For tracked committees, pending meetings are summarised into a bilingual digest, then folded into the committee synthesis.',
+        ja: '追跡中の委員会では、ペンディングの会合がバイリンガルのダイジェストに要約され、委員会の総括に統合されます。' },
+      { en: 'Use Generate summary on a meeting to push it to the front of the queue.',
+        ja: '会合の「要約を生成」で、その会合をキューの先頭に移動できます。' },
+    ],
+  },
+  {
+    hEn: 'Search & filters', hJa: '検索とフィルタ',
+    items: [
+      { en: 'Feed search covers titles, committees, and digests — including untracked committees.',
+        ja: 'フィード検索は、未追跡の委員会を含め、タイトル・委員会・ダイジェストを対象とします。' },
+      { en: 'Combine the Tracked/All toggle, the date filter, and Followed-only to narrow the feed.',
+        ja: '追跡/全体トグル、日付フィルタ、フォロー中のみを組み合わせて絞り込めます。' },
+    ],
+  },
+  {
+    hEn: 'Good to know', hJa: '補足',
+    items: [
+      { en: 'The Upcoming list is empty whenever the METI calendar feed is unavailable.',
+        ja: 'METIのカレンダーフィードが利用できない間、「今後の会合」は空になります。' },
+      { en: 'The source site throttles bursts, so material backfill heals gradually over several runs.',
+        ja: '配信元はアクセス集中を制限するため、資料の補完は複数回の実行で徐々に進みます。' },
+    ],
+  },
+]
+
+function GuidePanel() {
+  const app = useApp()
+  const L = app.lang
+  const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
+  return (
+    <Modal onClose={app.closeOverlay} top>
+      <div style={s(GUIDE_PANEL)}>
+        <div style={s('display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--bd);flex-shrink:0')}>
+          {icon(I_INFO, 18, 'var(--ac)')}
+          <span style={s('font-size:16px;font-weight:700;color:var(--tx)')}>{pick('Policy Deep Dive — Guide', '政策ディープダイブ — ガイド')}</span>
+          <span style={s('font-size:12px;color:var(--mut)')}>· {pick('how it works', '使い方')}</span>
+          <Hoverable
+            base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
+            hover="background:var(--bg2);color:var(--tx)"
+            onClick={app.closeOverlay}
+            aria-label="Close"
+          >
+            {icon(I_X, 16)}
+          </Hoverable>
+        </div>
+        <div style={s('padding:4px 20px 18px;overflow-y:auto')}>
+          {GUIDE.map((sec) => (
+            <div key={sec.hEn} style={s('padding:12px 0;border-bottom:1px solid var(--bd)')}>
+              <div style={s('font-size:13px;font-weight:700;color:var(--tx);margin-bottom:7px')}>{pick(sec.hEn, sec.hJa)}</div>
+              <div style={s('display:flex;flex-direction:column;gap:6px')}>
+                {sec.items.map((it, i) => (
+                  <div key={i} style={s('font-size:12.5px;color:var(--tx2);line-height:1.55')}>{pick(it.en, it.ja)}</div>
+                ))}
+              </div>
+            </div>
+          ))}
+          <div style={s('font-size:11px;color:var(--mut);margin-top:14px;line-height:1.5')}>
+            {pick('Full reference for developers:', '開発者向けの詳細:')}{' '}
+            <span style={s('font-weight:600;color:var(--tx2)')}>docs/USER-GUIDE.md</span>
+          </div>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Watchlist panel
 // ---------------------------------------------------------------------------
 function WatchlistPanel() {
@@ -504,8 +647,9 @@ function CommitteesManage() {
   const [adding, setAdding] = useState(false)
 
   // Load the catalog: the live DB (interactive) or the static snapshot (read-only).
-  // Reused after a job finishes, since detect/discover/crosscheck can add or change
-  // rows (e.g. crosscheck accumulates newly-found committees as discovered).
+  // Reused after a job finishes (Check for updates / catch-up, or a Summarise run),
+  // since discovery can add or change rows (the energy-board backup accumulates
+  // newly-found committees as discovered).
   const loadCatalog = () => {
     const p = app.interactive
       ? fetch('/api/policy/catalog').then((r) => r.json())
@@ -536,13 +680,16 @@ function CommitteesManage() {
       body: JSON.stringify({ key, enabled }),
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
-      .then(() =>
+      .then(() => {
         app.toast(
           enabled
             ? pick('Now tracking — included in the next catch-up', '追跡開始 — 次回の差分取得に含まれます')
             : pick('Untracked — skipped by the catch-up', '追跡解除 — 差分取得の対象外'),
-        ),
-      )
+        )
+        // The Policy Deep Dive screen behind this modal shows only tracked
+        // committees — refetch so a track/untrack here is reflected there too.
+        refreshSnapshots()
+      })
       .catch(() => {
         setRows((rs) => rs.map((r) => (r.key === key ? { ...r, tracked: !enabled } : r))) // revert
         app.toast(pick('Could not update tracking', '追跡を更新できませんでした'))
@@ -573,6 +720,9 @@ function CommitteesManage() {
             : pick('Added & tracking — included in the next catch-up', '追加して追跡開始 — 次回の差分取得に含まれます'),
         )
         setQ(j.key || '')
+        // A newly-added committee is auto-tracked, so refetch the Policy Deep
+        // Dive screen behind the modal to surface it in the tracked list.
+        refreshSnapshots()
         return loadCatalog()
       })
       .catch(() => app.toast(pick('Could not add committee', '委員会を追加できませんでした')))
@@ -602,6 +752,9 @@ function CommitteesManage() {
   // ---- policy CLI jobs (local master only): run the same commands as the cron/skill ----
   const [job, setJob] = useState<PolicyJob | null>(null)
   const jobTimer = useRef<number | null>(null)
+  // Catch-up ("Check for updates") runs through the global progress panel rather
+  // than the modal-local `job` poller, so it needs its own in-flight flag.
+  const [checking, setChecking] = useState(false)
 
   const pollJob = () => {
     fetch('/api/policy/job')
@@ -614,6 +767,10 @@ function CommitteesManage() {
           // Job finished: refresh the catalog so any rows it added/changed show up
           // (crosscheck/discover add discovered committees; detect updates latest).
           loadCatalog()
+          // …and refetch the Policy Deep Dive screen behind this modal: the same
+          // job wrote new meetings/dates/summaries to the DB that the screen's
+          // usePolicyLive must pick up (it subscribes to this refresh signal).
+          refreshSnapshots()
         }
       })
       .catch(() => {})
@@ -677,6 +834,36 @@ function CommitteesManage() {
   }, [app.interactive])
 
   const running = !!job && job.state === 'running'
+  // Command jobs (Summarise/backfill) are polled locally via `job`; catch-up runs
+  // through the global tracker (`checking`). Either one busies every action button.
+  const actionBusy = running || checking
+
+  // "Check for updates" — the single consolidated discovery pathway. Kicks the
+  // in-process catch-up (detect new meetings → backfill dates → refresh schedule →
+  // discover new committees across every source) and hands it to the global
+  // progress panel; refreshes this modal's catalog when it finishes.
+  const checkForUpdates = () => {
+    if (!app.interactive || actionBusy) return
+    setChecking(true)
+    fetch('/api/policy/catchup', { method: 'POST' })
+      .then(() => {
+        app.trackJob({
+          kind: 'catchup',
+          title: 'Catch-up',
+          titleJa: '差分取得',
+          endpoint: '/api/policy/catchup',
+          onDone: () => {
+            setChecking(false)
+            loadCatalog()
+          },
+        })
+        app.toast(pick('Checking for updates…', '更新を確認中…'))
+      })
+      .catch(() => {
+        setChecking(false)
+        app.toast(pick('Could not start catch-up', '差分取得を開始できませんでした'))
+      })
+  }
 
   const needle = q.trim().toLowerCase()
   const match = (c: CatalogCommittee) =>
@@ -745,26 +932,27 @@ function CommitteesManage() {
         {app.interactive && (
           <div style={s('display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 20px 4px')}>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>{pick('REFRESH', '取得')}</span>
-            {([['detect', 'Detect'], ['discover', 'Discover'], ['crosscheck', 'Cross-check']] as const).map(([cmd, label]) => (
-              <Hoverable
-                as="span"
-                key={cmd}
-                base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 11px;white-space:nowrap;border:1px solid var(--bd2);background:var(--bg1);color:${running ? 'var(--fnt3)' : 'var(--acT)'};cursor:${running ? 'default' : 'pointer'}`}
-                hover={running ? '' : 'border-color:var(--ac);background:var(--acTint)'}
-                onClick={() => !running && postJob(cmd)}
-              >
-                {label}
-              </Hoverable>
-            ))}
+            <Hoverable
+              as="span"
+              base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 13px;white-space:nowrap;border:1px solid var(--bd2);background:var(--bg1);color:${actionBusy ? 'var(--fnt3)' : 'var(--acT)'};cursor:${actionBusy ? 'default' : 'pointer'}`}
+              hover={actionBusy ? '' : 'border-color:var(--ac);background:var(--acTint)'}
+              onClick={() => !actionBusy && checkForUpdates()}
+              title={pick(
+                'Detect new meetings + discover new committees (all sources) — progress shows in the panel',
+                '新規会合を検出し、新規委員会を発見（全ソース） — 進捗はパネルに表示',
+              )}
+            >
+              {checking ? pick('Checking…', '確認中…') : pick('Check for updates', '更新を確認')}
+            </Hoverable>
             <span style={s('width:1px;height:18px;background:var(--dv);margin:0 2px')}></span>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')} title={pick('Needs `notebooklm login`', '`notebooklm login`が必要')}>{pick('SUMMARISE ⚿', '要約 ⚿')}</span>
             {([['run', pick('Summarise all', '全件要約'), { breadth: true, max_per_run: 8 }, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
               <Hoverable
                 as="span"
                 key={cmd}
-                base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 11px;white-space:nowrap;border:1px solid var(--bd2);background:var(--bg1);color:${running ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${running ? 'default' : 'pointer'}`}
-                hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
-                onClick={() => !running && postJob(cmd, params, lbl)}
+                base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 11px;white-space:nowrap;border:1px solid var(--bd2);background:var(--bg1);color:${actionBusy ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${actionBusy ? 'default' : 'pointer'}`}
+                hover={actionBusy ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
+                onClick={() => !actionBusy && postJob(cmd, params, lbl)}
                 title={pick('NotebookLM — needs `notebooklm login`', 'NotebookLM — `notebooklm login`が必要')}
               >
                 {label}
@@ -1000,6 +1188,7 @@ export function Overlays() {
   if (overlay === 'settings') return <SettingsPanel />
   if (overlay === 'watchlist') return <WatchlistPanel />
   if (overlay === 'committees') return <CommitteesManage />
+  if (overlay === 'guide') return <GuidePanel />
   return null
 }
 
@@ -1018,5 +1207,228 @@ export function SidebarExpander() {
       {icon(I_CHEV_RR, 16, 'currentColor')}
       <span style={s('font-size:12.5px;font-weight:600')}>JEMA</span>
     </Hoverable>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Progress panel — a persistent, minimisable feed of background jobs
+// ---------------------------------------------------------------------------
+// Toasts are ephemeral (single-slot, auto-dismiss), so they're a poor fit for a
+// multi-stage catch-up that runs for a while. This panel is the durable
+// alternative: it shows the active job's live per-stage (and per-committee)
+// progress plus a short history of recent runs, and it can collapse to a pill.
+const I_CHEVDOWN = '<polyline points="6 9 12 15 18 9"></polyline>'
+const I_CHEVUP = '<polyline points="18 15 12 9 6 15"></polyline>'
+const I_ALERT =
+  '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>'
+
+function jobStateColor(state: string): string {
+  return state === 'error' ? 'var(--dn)' : state === 'done' ? 'var(--up)' : 'var(--warnTx)'
+}
+
+/** Status glyph: check (done), alert (error), or a soft-glowing dot (running). */
+function StatusDot({ state }: { state: string }) {
+  const c = jobStateColor(state)
+  if (state === 'done') return icon(I_CHECK, 13, c)
+  if (state === 'error') return icon(I_ALERT, 13, c)
+  return (
+    <span
+      style={s(
+        `width:8px;height:8px;border-radius:999px;background:${c};box-shadow:0 0 0 3px color-mix(in srgb, ${c} 22%, transparent);flex-shrink:0`,
+      )}
+    />
+  )
+}
+
+/** Compact relative time ("just now", "3m ago", "2h ago", "1d ago"). */
+function relTime(ts: number, ja: boolean): string {
+  const secs = Math.max(0, Math.round((Date.now() - ts) / 1000))
+  if (secs < 45) return ja ? 'たった今' : 'just now'
+  const mins = Math.round(secs / 60)
+  if (mins < 60) return ja ? `${mins}分前` : `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return ja ? `${hrs}時間前` : `${hrs}h ago`
+  const days = Math.round(hrs / 24)
+  return ja ? `${days}日前` : `${days}d ago`
+}
+
+export function ProgressPanel() {
+  const { jobRuns, panelMin, setPanelMinimized, dismissRun, clearRuns, interactive, lang } = useApp()
+  const L = lang
+  // Keep relative timestamps fresh while the panel is open.
+  const [, tick] = useState(0)
+  useEffect(() => {
+    if (!jobRuns.length) return
+    const t = window.setInterval(() => tick((n) => n + 1), 15000)
+    return () => window.clearInterval(t)
+  }, [jobRuns.length])
+
+  if (!interactive || jobRuns.length === 0) return null
+
+  const active = jobRuns.find((r) => r.state === 'running') || null
+  const finished = jobRuns.filter((r) => r.state !== 'running')
+  const title = (r: JobRun) => (L === 'ja' ? r.titleJa : r.title)
+
+  // Minimised → a compact pill summarising the newest/active run; click to open.
+  if (panelMin) {
+    const head = active || jobRuns[0]
+    const done = head.stages.filter((sg) => sg.state !== 'running').length
+    const label = active
+      ? `${title(head)} · ${head.stages.length ? `${done}/${head.stages.length}` : L === 'ja' ? '実行中' : 'running'}`
+      : L === 'ja'
+        ? 'アクティビティ'
+        : 'Activity'
+    return (
+      <Hoverable
+        base="position:fixed;left:16px;bottom:16px;z-index:150;display:flex;align-items:center;gap:9px;background:var(--bg1);border:1px solid var(--bd);box-shadow:var(--sh1);border-radius:999px;padding:8px 14px;cursor:pointer;color:var(--tx2)"
+        hover="background:var(--bg2);color:var(--tx)"
+        onClick={() => setPanelMinimized(false)}
+        title={L === 'ja' ? 'パネルを開く' : 'Expand activity panel'}
+        aria-label={L === 'ja' ? 'アクティビティパネルを開く' : 'Expand activity panel'}
+      >
+        <StatusDot state={active ? 'running' : jobRuns[0].state} />
+        <span style={s('font-size:12px;font-weight:600;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')}>
+          {label}
+        </span>
+        {icon(I_CHEVUP, 14, 'currentColor')}
+      </Hoverable>
+    )
+  }
+
+  const stageLine = (sg: JobStage) => {
+    const lab = L === 'ja' ? sg.label_ja : sg.label
+    const det = L === 'ja' ? sg.detail_ja : sg.detail
+    const running = sg.state === 'running'
+    return (
+      <div key={sg.key} style={s('display:flex;align-items:center;gap:8px;padding:3px 0')}>
+        <StatusDot state={sg.state} />
+        <span style={s(`font-size:11.5px;color:${running ? 'var(--tx)' : 'var(--tx2)'};font-weight:${running ? 600 : 500}`)}>
+          {lab}
+        </span>
+        {det ? (
+          <span style={s('font-size:11px;color:var(--mut);margin-left:auto;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')}>
+            {det}
+          </span>
+        ) : null}
+      </div>
+    )
+  }
+
+  const resultLine = (r: JobRun): string | null => {
+    if (r.state === 'error') return r.error || (L === 'ja' ? '失敗しました' : 'failed')
+    if (r.kind === 'catchup' && r.result) {
+      const x = r.result
+      if (!x.new_meetings && !x.discovered && !x.dated) {
+        return x.pending
+          ? L === 'ja'
+            ? `新規なし · 要約待ち ${x.pending}`
+            : `no new · ${x.pending} pending`
+          : L === 'ja'
+            ? '新規の更新なし'
+            : 'no new updates'
+      }
+      return L === 'ja'
+        ? `新規 ${x.new_meetings ?? 0} · 発見 ${x.discovered ?? 0} · 要約待ち ${x.pending ?? 0}`
+        : `${x.new_meetings ?? 0} new · ${x.discovered ?? 0} discovered · ${x.pending ?? 0} pending`
+    }
+    if (r.state === 'done') return L === 'ja' ? '完了' : 'done'
+    return null
+  }
+
+  return (
+    <div style={s('position:fixed;left:16px;bottom:16px;z-index:150;width:340px;max-width:calc(100vw - 32px);background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);overflow:hidden')}>
+      {/* header */}
+      <div style={s('display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dv)')}>
+        <StatusDot state={active ? 'running' : jobRuns[0].state} />
+        <span style={s('font-size:12.5px;font-weight:700;color:var(--tx)')}>
+          {active ? title(active) : L === 'ja' ? 'アクティビティ' : 'Activity'}
+        </span>
+        {active && active.stages.length ? (
+          <span style={s('font-size:10px;font-weight:600;color:var(--warnTx);background:var(--warnBg);border-radius:6px;padding:1px 6px')}>
+            {active.stages.filter((sg) => sg.state !== 'running').length}/{active.stages.length}
+          </span>
+        ) : null}
+        <div style={s('margin-left:auto;display:flex;align-items:center;gap:2px')}>
+          {finished.length ? (
+            <Hoverable
+              base="padding:4px 6px;border-radius:7px;cursor:pointer;color:var(--mut);font-size:10.5px;font-weight:600"
+              hover="background:var(--bg2);color:var(--tx)"
+              onClick={clearRuns}
+              title={L === 'ja' ? '履歴を消去' : 'Clear history'}
+            >
+              {L === 'ja' ? '消去' : 'Clear'}
+            </Hoverable>
+          ) : null}
+          <Hoverable
+            base="display:flex;padding:4px;border-radius:7px;cursor:pointer;color:var(--mut)"
+            hover="background:var(--bg2);color:var(--tx)"
+            onClick={() => setPanelMinimized(true)}
+            title={L === 'ja' ? '最小化' : 'Minimise'}
+            aria-label={L === 'ja' ? 'パネルを最小化' : 'Minimise panel'}
+          >
+            {icon(I_CHEVDOWN, 15, 'currentColor')}
+          </Hoverable>
+        </div>
+      </div>
+
+      {/* active run detail */}
+      {active ? (
+        <div style={s('padding:8px 12px;border-bottom:1px solid var(--dv)')}>
+          {active.stages.length ? (
+            active.stages.map(stageLine)
+          ) : (
+            <div style={s('display:flex;align-items:center;gap:8px;padding:3px 0')}>
+              <StatusDot state="running" />
+              <span style={s('font-size:11.5px;color:var(--tx);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')}>
+                {active.output.length ? active.output[active.output.length - 1] : L === 'ja' ? '処理中…' : 'Working…'}
+              </span>
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {/* history */}
+      {finished.length ? (
+        <div style={s('max-height:230px;overflow:auto')}>
+          <div style={s('padding:7px 12px 3px')}>
+            <span style={s('font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut)')}>
+              {L === 'ja' ? '履歴' : 'Recent'}
+            </span>
+          </div>
+          {finished.map((r) => {
+            const res = resultLine(r)
+            return (
+              <Hoverable key={r.id} base="display:flex;align-items:flex-start;gap:8px;padding:6px 12px" hover="background:var(--bg2)">
+                <div style={s('margin-top:1px')}>
+                  <StatusDot state={r.state} />
+                </div>
+                <div style={s('min-width:0;flex:1')}>
+                  <div style={s('display:flex;align-items:baseline;gap:6px')}>
+                    <span style={s('font-size:11.5px;font-weight:600;color:var(--tx)')}>{title(r)}</span>
+                    <span style={s('font-size:10px;color:var(--mut);margin-left:auto;flex-shrink:0')}>
+                      {r.finishedAt ? relTime(r.finishedAt, L === 'ja') : ''}
+                    </span>
+                  </div>
+                  {res ? (
+                    <div style={s(`font-size:10.5px;color:${r.state === 'error' ? 'var(--dn)' : 'var(--tx2)'};margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`)}>
+                      {res}
+                    </div>
+                  ) : null}
+                </div>
+                <Hoverable
+                  base="display:flex;padding:2px;border-radius:6px;cursor:pointer;color:var(--mut);opacity:.6"
+                  hover="background:var(--bd2);color:var(--tx);opacity:1"
+                  onClick={() => dismissRun(r.id)}
+                  title={L === 'ja' ? '削除' : 'Dismiss'}
+                  aria-label={L === 'ja' ? '履歴から削除' : 'Dismiss from history'}
+                >
+                  {icon(I_X, 12, 'currentColor')}
+                </Hoverable>
+              </Hoverable>
+            )
+          })}
+        </div>
+      ) : null}
+    </div>
   )
 }

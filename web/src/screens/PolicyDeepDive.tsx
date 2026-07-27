@@ -4,14 +4,7 @@ import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
 import { FreshnessChip, fmtStamp, policyCounts } from '../lib/freshness'
-import {
-  committees as fxCommittees,
-  meetings as fxMeetings,
-  untracked as fxUntracked,
-  upcoming as fxUpcoming,
-  type Meeting,
-  type Upcoming,
-} from './PolicyDeepDive.data'
+import { type Meeting, type Upcoming } from './PolicyDeepDive.data'
 import { usePolicyLive } from './PolicyDeepDive.live'
 import { downloadIcs } from '../lib/download'
 
@@ -19,13 +12,18 @@ type AnyMeeting = Meeting | Upcoming
 
 const MONTHS = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-// dUntil: days between a date string and the given "today" anchor. Live data
-// counts down from the real today; the fixtures are a frozen snapshot authored
-// around 2026-07-02, so fixture mode keeps that anchor to match its baked-in dates.
+// Neutral placeholder for the detail pane when there is no meeting to show yet —
+// e.g. while the live/snapshot data is still loading (`!pol.ready`) or the feed is
+// empty. The detail pane reads many `d.*` fields, so `d` must never be undefined;
+// this renders an empty state instead of crashing (we no longer seed fixtures for it).
+const EMPTY_MEETING: Meeting = {
+  key: '', en: '', ja: '', date: '', status: '', title: '', titleJa: '', sub: '', docs: [],
+}
+
+// dUntil: days between a date string and the given "today" anchor (real today).
 function dUntil(ds: string, anchor: Date): number {
   return Math.round((new Date(ds).getTime() - anchor.getTime()) / 864e5)
 }
-const FX_TODAY = new Date(2026, 6, 2)
 
 // Minimal markdown → React for the committee-level synthesis (raw markdown from
 // NotebookLM). Handles `#`/`##`/`###` headings, `-`/`•`/`*` bullets, and blank-line
@@ -79,7 +77,7 @@ function renderMd(md: string): ReactNode[] {
 }
 
 export function PolicyDeepDiveScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, interactive } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, interactive, trackJob } = useApp()
   const dark = theme === 'dark'
   const L: 'en' | 'ja' = lang
 
@@ -100,6 +98,9 @@ export function PolicyDeepDiveScreen() {
   const [comOpen, setComOpen] = useState(false)
   const [dateOpen, setDateOpen] = useState(false)
   const [dateFilter, setDateFilter] = useState<'all' | '30d' | '90d' | 'year' | 'upcoming'>('all')
+  // Committee explorer sort: default (priority) order, or reorder by the most
+  // recently updated committee (max meeting updatedAt).
+  const [comSort, setComSort] = useState<'priority' | 'recent'>('priority')
 
   // showAudioCard default prop = true
   const showAudioCard = true
@@ -118,18 +119,22 @@ export function PolicyDeepDiveScreen() {
         ? `最終書き出し ${fmtStamp(manifest.data.generated_at)} — 追跡委員会 ${polC.committees} · 会合 ${polC.meetings} · 要約済 ${polC.summarised}`
         : `Last export ${fmtStamp(manifest.data.generated_at)} — Committees ${polC.committees} · Meetings ${polC.meetings} · Summarised ${polC.summarised}`
       : 'Last run 2026-07-02 06:10 JST — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no'
-  // The catalog (committees.json) now carries the full energy catalog — the
-  // explorer/feed show only the *tracked* set; the full catalog (incl. discovered
-  // committees) lives in the Manage modal. Fixtures are the loading fallback.
-  const committees = pol.ready ? pol.committees.filter((c) => c.tracked) : fxCommittees
-  const discoveredCount = pol.ready ? pol.committees.filter((c) => c.discovered).length : 6
-  const meetings = pol.ready ? pol.meetings : fxMeetings
-  const untracked: Meeting[] = pol.ready ? [] : fxUntracked
-  const upcoming: Upcoming[] = pol.ready ? pol.upcoming : fxUpcoming
-  // Countdown anchor: real today (midnight) for live data, the fixtures' frozen
-  // "today" while they are still the fallback — flips together with the arrays above.
+  // The catalog (committees.json) carries the full energy catalog. The explorer
+  // shows every committee — tracked *and* discovered (the latter marked "untracked")
+  // — because detect now scans the whole catalog; `tracked` only gates whether a
+  // committee is summarised. Until the real data loads we render an *empty* state,
+  // NOT demo fixtures: flashing baked-in fixtures for the split second before the
+  // live/snapshot data arrives made real content look like it "reverted" — most
+  // visibly the upcoming list, which is empty whenever the METI schedule feed is
+  // unavailable — so fixtures are no longer used as a loading placeholder.
+  const committees = pol.ready ? pol.committees : []
+  const discoveredCount = pol.ready ? pol.committees.filter((c) => c.discovered).length : 0
+  const meetings = pol.ready ? pol.meetings : []
+  const untracked: Meeting[] = []
+  const upcoming: Upcoming[] = pol.ready ? pol.upcoming : []
+  // Countdown anchor: real today (midnight), used by the upcoming/next-meeting math.
   const now = new Date()
-  const dayAnchor = pol.ready ? new Date(now.getFullYear(), now.getMonth(), now.getDate()) : FX_TODAY
+  const dayAnchor = new Date(now.getFullYear(), now.getMonth(), now.getDate())
 
   // ---- handlers ----
   const selAll = () => {
@@ -159,34 +164,47 @@ export function PolicyDeepDiveScreen() {
   }
 
   // Run catch-up (interactive/local only): kick the auth-free refresh on the local
-  // API, then poll the job to completion and report the result. Hidden on the
+  // API, then hand off to the global job tracker — it drives the progress panel
+  // (live per-stage + per-committee progress), refetches this screen as new
+  // meetings land, and reports a single closing summary toast here. Hidden on the
   // read-only GitHub Pages deployment (no /api).
   const runCatchup = () => {
     if (!interactive) return
-    toast(L === 'ja' ? '差分取得を開始しました…' : 'Catch-up started…')
-    const poll = () => {
-      fetch('/api/policy/catchup')
-        .then((r) => r.json())
-        .then((j) => {
-          if (j.state === 'running') {
-            window.setTimeout(poll, 1500)
-            return
-          }
-          if (j.state === 'done' && j.result) {
-            const r = j.result
-            toast(
-              L === 'ja'
-                ? `差分取得完了 — 新規会合 ${r.new_meetings} · 日付 ${r.dated} · 発見 ${r.discovered} · 要約待ち ${r.pending}`
-                : `Catch-up done — ${r.new_meetings} new · ${r.dated} dated · ${r.discovered} discovered · ${r.pending} pending`,
-            )
-          } else {
-            toast(L === 'ja' ? '差分取得に失敗しました' : 'Catch-up failed')
-          }
-        })
-        .catch(() => toast(L === 'ja' ? '差分取得の状態を取得できません' : 'Could not read catch-up status'))
-    }
+    toast(L === 'ja' ? '差分取得を開始 — 更新を確認中…' : 'Catch-up started — checking for updates…')
     fetch('/api/policy/catchup', { method: 'POST' })
-      .then(() => window.setTimeout(poll, 1500))
+      .then(() => {
+        trackJob({
+          kind: 'catchup',
+          title: 'Catch-up',
+          titleJa: '差分取得',
+          endpoint: '/api/policy/catchup',
+          onDone: (run) => {
+            if (run.state === 'error') {
+              const failed = run.stages.find((st) => st.state === 'error')
+              toast(
+                L === 'ja'
+                  ? `差分取得に失敗しました${failed ? '（' + failed.label_ja + '）' : ''}`
+                  : `Catch-up failed${failed ? ' at: ' + failed.label : ''}`,
+              )
+              return
+            }
+            const r = run.result
+            if (r && !r.new_meetings && !r.discovered && !r.dated) {
+              toast(
+                r.pending
+                  ? (L === 'ja' ? `新規の更新なし — 要約待ち ${r.pending} 件` : `No new updates — ${r.pending} awaiting summary`)
+                  : (L === 'ja' ? '新規の更新なし — 最新の状態です' : 'No new updates — everything is current'),
+              )
+            } else if (r) {
+              toast(
+                L === 'ja'
+                  ? `差分取得完了 — 新規会合 ${r.new_meetings} · 日付 ${r.dated} · 発見 ${r.discovered} · 要約待ち ${r.pending}`
+                  : `Catch-up done — ${r.new_meetings} new · ${r.dated} dated · ${r.discovered} discovered · ${r.pending} pending`,
+              )
+            }
+          },
+        })
+      })
       .catch(() => toast(L === 'ja' ? '差分取得を開始できませんでした' : 'Could not start catch-up'))
   }
   const tManage = () => openOverlay('committees')
@@ -238,55 +256,95 @@ export function PolicyDeepDiveScreen() {
   const recommended = !pol.ready
     ? []
     : committees
-        .filter((c) => !isFollowing(c.key) && matchComQ(c))
+        // Only recommend *tracked* committees to follow — a discovered/untracked one
+        // has no summaries yet, so following it wouldn't surface anything.
+        .filter((c) => c.tracked !== false && !isFollowing(c.key) && matchComQ(c))
         .sort((a, b) => recScore(b) - recScore(a))
         .slice(0, 3)
         .map((c) => ({ key: c.key, n1: L === 'ja' ? c.ja : c.en, org: c.org, last: c.last }))
 
   // ---- explorer ----
+  // Recency: a meeting's `updatedAt` is bumped on every row change (incl. reaching
+  // `done` = summarised). A committee's recency = the newest updatedAt across its
+  // meetings currently in the snapshot; drives the "recently updated" dot + sort.
+  const RECENT_DAYS = 7
+  const RECENT_MS = RECENT_DAYS * 24 * 60 * 60 * 1000
+  // Parse a DB timestamp to epoch ms. The backend stores `updated_at` as a UTC
+  // wall-clock string with no offset ("2026-07-26 13:12:39.123456"); pin it to UTC
+  // (append Z) so the 7-day window + day labels don't drift by the local timezone.
+  const tsOf = (v?: string | null): number => {
+    if (!v) return NaN
+    let s = v.replace(' ', 'T')
+    if (!/[zZ]|[+-]\d\d:?\d\d$/.test(s)) s += 'Z'
+    return Date.parse(s)
+  }
+  const comRecency: Record<string, number> = {}
+  for (const m of meetings) {
+    if (!m.com) continue
+    const t = tsOf(m.updatedAt)
+    if (!Number.isNaN(t) && (!(m.com in comRecency) || t > comRecency[m.com])) comRecency[m.com] = t
+  }
+  const isRecentCom = (key: string): boolean => key in comRecency && nowMs - comRecency[key] <= RECENT_MS
   const orgs: Array<'METI' | 'OCCTO' | 'EGC'> = ['METI', 'OCCTO', 'EGC']
-  const explorerGroups = orgs.map((org) => {
-    const items = committees
-      .filter((c) => c.org === org && (!fOnly || isFol(c)) && matchComQ(c))
-      .map((c) => {
-        const on = selCom === c.key
-        const following = isFol(c)
-        let nx = ''
-        if (c.nextDate) {
-          const dd = dUntil(c.nextDate, dayAnchor)
-          const mo = parseInt(c.nextDate.slice(5, 7), 10)
-          const dy = parseInt(c.nextDate.slice(8, 10), 10)
-          nx = L === 'ja'
-            ? '次回 第' + c.nextNo + '回 · ' + mo + '月' + dy + '日 · あと' + dd + '日'
-            : 'Next No. ' + c.nextNo + ' · ' + MONTHS[mo] + ' ' + dy + ' · in ' + dd + 'd'
-        }
-        return {
-          key: c.key,
-          n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
-          next: nx, hasNext: !!c.nextDate,
-          following,
-          s: {
-            padding: '7px 9px', borderRadius: 10, cursor: 'pointer',
-            background: on ? 'var(--acTint)' : 'transparent',
-            borderLeft: on ? '3px solid var(--ac)' : '3px solid transparent', minWidth: 0,
-          } as CSS,
-          click: () => selectCommittee(c.key),
-          folClick: pol.ready ? () => toggleFollow(c.key) : () => {},
-          folTxt: following ? (L === 'ja' ? 'フォロー中' : 'Following') : (L === 'ja' ? '＋ フォロー' : '+ Follow'),
-          folS: (following
-            ? { fontSize: 9.5, fontWeight: 600, background: 'var(--acBadge)', color: '#FFFFFF', borderRadius: 999, padding: '1px 8px', cursor: 'pointer' }
-            : { fontSize: 9.5, fontWeight: 600, border: '1px solid var(--bd2)', color: 'var(--acT)', borderRadius: 999, padding: '0 8px', cursor: 'pointer' }) as CSS,
-        }
-      })
-    const total = committees.filter((c) => c.org === org).length
-    return {
-      // With an active search, show how many of the group's committees match
-      // ("METI · 1/12") instead of the unfiltered total.
-      name: org + ' · ' + (items.length < total ? items.length + '/' + total : total),
-      dot: { width: 7, height: 7, borderRadius: 999, background: orgColors[org], display: 'inline-block' } as CSS,
-      items,
+  const mapCom = (c: (typeof committees)[number]) => {
+    const on = selCom === c.key
+    const following = isFol(c)
+    let nx = ''
+    if (c.nextDate) {
+      const dd = dUntil(c.nextDate, dayAnchor)
+      const mo = parseInt(c.nextDate.slice(5, 7), 10)
+      const dy = parseInt(c.nextDate.slice(8, 10), 10)
+      nx = L === 'ja'
+        ? '次回 第' + c.nextNo + '回 · ' + mo + '月' + dy + '日 · あと' + dd + '日'
+        : 'Next No. ' + c.nextNo + ' · ' + MONTHS[mo] + ' ' + dy + ' · in ' + dd + 'd'
     }
-  }).filter((g) => g.items.length)
+    return {
+      key: c.key,
+      n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
+      next: nx, hasNext: !!c.nextDate,
+      following, tracked: c.tracked !== false, isRecent: isRecentCom(c.key),
+      s: {
+        padding: '7px 9px', borderRadius: 10, cursor: 'pointer',
+        background: on ? 'var(--acTint)' : 'transparent',
+        borderLeft: on ? '3px solid var(--ac)' : '3px solid transparent', minWidth: 0,
+      } as CSS,
+      click: () => selectCommittee(c.key),
+      folClick: pol.ready ? () => toggleFollow(c.key) : () => {},
+      folTxt: following ? (L === 'ja' ? 'フォロー中' : 'Following') : (L === 'ja' ? '＋ フォロー' : '+ Follow'),
+      folS: (following
+        ? { fontSize: 9.5, fontWeight: 600, background: 'var(--acBadge)', color: '#FFFFFF', borderRadius: 999, padding: '1px 8px', cursor: 'pointer' }
+        : { fontSize: 9.5, fontWeight: 600, border: '1px solid var(--bd2)', color: 'var(--acT)', borderRadius: 999, padding: '0 8px', cursor: 'pointer' }) as CSS,
+    }
+  }
+  const explorerGroups = comSort === 'recent'
+    ? (() => {
+        // Flat, cross-org list newest-first so the most recently updated
+        // committees surface at the top regardless of source.
+        const items = committees
+          .filter((c) => (!fOnly || isFol(c)) && matchComQ(c))
+          .sort((a, b) => (comRecency[b.key] ?? -Infinity) - (comRecency[a.key] ?? -Infinity))
+          .map(mapCom)
+        return items.length
+          ? [{
+              name: (L === 'ja' ? '更新順' : 'Recently updated') + ' · ' + items.length,
+              dot: { width: 7, height: 7, borderRadius: 999, background: 'var(--ac)', display: 'inline-block' } as CSS,
+              items,
+            }]
+          : []
+      })()
+    : orgs.map((org) => {
+        const items = committees
+          .filter((c) => c.org === org && (!fOnly || isFol(c)) && matchComQ(c))
+          .map(mapCom)
+        const total = committees.filter((c) => c.org === org).length
+        return {
+          // With an active search, show how many of the group's committees match
+          // ("METI · 1/12") instead of the unfiltered total.
+          name: org + ' · ' + (items.length < total ? items.length + '/' + total : total),
+          dot: { width: 7, height: 7, borderRadius: 999, background: orgColors[org], display: 'inline-block' } as CSS,
+          items,
+        }
+      }).filter((g) => g.items.length)
 
   const allOn = selCom === 'all'
   const allRowS: CSS = {
@@ -307,6 +365,9 @@ export function PolicyDeepDiveScreen() {
   }
   const followedSet: Record<string, boolean> = {}
   committees.forEach((c) => { followedSet[c.key] = isFol(c) })
+  // `tracked` = summarised by the pipeline (undefined on fixtures → treat as tracked).
+  const trackedSet: Record<string, boolean> = {}
+  committees.forEach((c) => { trackedSet[c.key] = c.tracked !== false })
   const comOrg: Record<string, string> = {}
   committees.forEach((c) => { comOrg[c.key] = c.org })
 
@@ -342,7 +403,11 @@ export function PolicyDeepDiveScreen() {
     } else {
       if (!(selCom === 'all' || m.com === selCom)) return false
       if (fOnly && m.com && !followedSet[m.com]) return false
-      if (coverage === 'tracked' && !qNorm && (m.status === 'pending' || m.status === 'error')) return false
+      // Every status (done/pending/error) is shown, so detected-but-unsummarised
+      // meetings surface as "Pending" cards. The Tracked/All toggle now filters by
+      // committee: "Tracked" hides untracked committees' meetings from the "all
+      // committees" feed; selecting a specific committee still shows its meetings.
+      if (coverage === 'tracked' && selCom === 'all' && !qNorm && m.com && !trackedSet[m.com]) return false
     }
     if (!dateOkRecent(m.date)) return false
     if (qNorm) {
@@ -415,7 +480,7 @@ export function PolicyDeepDiveScreen() {
   // ---- detail ----
   const allMeetings: AnyMeeting[] = (meetings as AnyMeeting[]).concat(untracked as AnyMeeting[]).concat(upcoming as AnyMeeting[])
   let d = allMeetings.find((m) => m.key === selMtg)
-  if (!d) d = feedList[0] || meetings[0]
+  if (!d) d = feedList[0] || meetings[0] || EMPTY_MEETING
   const dQueued = !!queued[d.key]
   const dEffSt = dQueued ? 'pending' : d.status
   const dStObj = stChip(dEffSt)
@@ -472,19 +537,23 @@ export function PolicyDeepDiveScreen() {
     ? 'Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')
     : feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
 
-  const doneList = meetings.filter((m) => m.status === 'done')
-  const newCards = pol.ready
-    ? doneList.slice(0, 3).map((m) => ({
-        title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
-        meta: m.date + ' · ' + (L === 'ja' ? '要約済み' : 'summarised'),
-        preview: (L === 'ja' ? m.prevJa : m.prevEn) || '',
-        click: () => selectMeeting(m.key),
-      }))
-    : [
-        { title: 'EGMSC · 第58回 🏁', meta: '2026-06-24 · summarised 06-26', preview: L === 'ja' ? '託送料金制度見直しの中間とりまとめを採択。' : 'Adopted the interim report on the wheeling-charge review.', click: () => selectMeeting('egmsc58') },
-        { title: 'Basic Policy · 第84回', meta: '2026-06-27 · summarised 06-29', preview: L === 'ja' ? '長期蓄電池の容量市場連携を審議。' : 'Debated capacity-market linkage for long-duration storage.', click: () => selectMeeting('basic84') },
-        { title: 'Renewable Integration · 第63回', meta: '2026-06-05 · summarised 06-08', preview: L === 'ja' ? 'ノンファーム接続の全国展開方針を確認。' : 'Confirmed nationwide non-firm connection rollout from FY2027.', click: () => selectMeeting('renew63') },
-      ]
+  // "Newly summarised": meetings that reached `done` within the last RECENT_DAYS,
+  // newest first — keyed off updatedAt (the summarisation timestamp), NOT the
+  // meeting date. Empty when nothing was summarised recently.
+  const fmtDay = (v?: string | null): string => {
+    const t = tsOf(v)
+    return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(0, 10)
+  }
+  const newlyDone = meetings
+    .filter((m) => m.status === 'done' && !Number.isNaN(tsOf(m.updatedAt)) && nowMs - tsOf(m.updatedAt) <= RECENT_MS)
+    .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))
+  const newCount = newlyDone.length
+  const newCards = newlyDone.slice(0, 3).map((m) => ({
+    title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
+    meta: fmtDay(m.updatedAt) + ' · ' + (L === 'ja' ? '要約済み' : 'summarised'),
+    preview: (L === 'ja' ? m.prevJa : m.prevEn) || '',
+    click: () => selectMeeting(m.key),
+  }))
 
   const langJaS = segBase(L === 'ja')
   const langEnS = segBase(L === 'en')
@@ -493,6 +562,7 @@ export function PolicyDeepDiveScreen() {
   const chipFollowed = chipBase(fOnly)
   const covTS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'tracked' ? 'var(--ac)' : 'transparent', color: coverage === 'tracked' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
   const covAS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'all' ? 'var(--ac)' : 'transparent', color: coverage === 'all' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
+  const comSortS = (on: boolean): CSS => ({ padding: '2px 10px', borderRadius: 999, fontSize: 10.5, fontWeight: 600, cursor: 'pointer', background: on ? 'var(--ac)' : 'transparent', color: on ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' })
 
   return (
     <>
@@ -544,6 +614,9 @@ export function PolicyDeepDiveScreen() {
             {!dark && (
               <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />
             )}
+          </Hoverable>
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={() => openOverlay('guide')} title="User guide · 使い方" aria-label="User guide">
+            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`} />
           </Hoverable>
           <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
@@ -663,19 +736,23 @@ export function PolicyDeepDiveScreen() {
             <div style={s('background:var(--acTint);border:1px solid var(--acTint);border-radius:16px;padding:14px 16px')}>
               <div style={s('display:flex;justify-content:space-between;align-items:center')}>
                 <span style={s("display:inline-flex;align-items:center;gap:7px;font-size:13.5px;font-weight:600;color:var(--acT)")}>
-                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"></path></svg>`} />Newly summarised · last 7 days (3) 新着要約
+                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"></path></svg>`} />{L === 'ja' ? `新着要約 · 過去${RECENT_DAYS}日 (${newCount}件)` : `Newly summarised · last ${RECENT_DAYS} days (${newCount})`}
                 </span>
                 <Hoverable as="span" base="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer" hover="color:var(--ac)" onClick={tViewAll}>View all →</Hoverable>
               </div>
-              <div style={s('display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px')}>
-                {newCards.map((nc, i) => (
-                  <Hoverable key={i} base="background:var(--bg1);border-radius:12px;padding:10px 12px;cursor:pointer;box-shadow:var(--sh1)" hover="box-shadow:var(--sh2)" onClick={nc.click}>
-                    <div style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{nc.title}</div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:1px;font-feature-settings:'tnum' 1")}>{nc.meta}</div>
-                    <div style={s('font-size:11.5px;color:var(--tx2);margin-top:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical')}>{nc.preview}</div>
-                  </Hoverable>
-                ))}
-              </div>
+              {newCards.length > 0 ? (
+                <div style={s('display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px')}>
+                  {newCards.map((nc, i) => (
+                    <Hoverable key={i} base="background:var(--bg1);border-radius:12px;padding:10px 12px;cursor:pointer;box-shadow:var(--sh1)" hover="box-shadow:var(--sh2)" onClick={nc.click}>
+                      <div style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{nc.title}</div>
+                      <div style={s("font-size:11px;color:var(--mut);margin-top:1px;font-feature-settings:'tnum' 1")}>{nc.meta}</div>
+                      <div style={s('font-size:11.5px;color:var(--tx2);margin-top:4px;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical')}>{nc.preview}</div>
+                    </Hoverable>
+                  ))}
+                </div>
+              ) : (
+                <div style={s('font-size:12px;color:var(--mut);margin-top:10px')}>{L === 'ja' ? '過去7日間に新しく要約された会合はありません。要約は差分取得のあと NotebookLM 実行（repower policy run）で生成されます。' : 'No meetings summarised in the last 7 days. Summaries are generated by the NotebookLM run (repower policy run) after a catch-up.'}</div>
+              )}
               <div style={s("font-size:11px;color:var(--mut);margin-top:9px;font-feature-settings:'tnum' 1")}>{pipelineLine}</div>
             </div>
 
@@ -691,6 +768,11 @@ export function PolicyDeepDiveScreen() {
                       ? explorerGroups.reduce((n, g) => n + g.items.length, 0) + '/' + committees.length + ' tracked'
                       : committees.length + ' tracked'}
                   </span>
+                </div>
+                {/* sort: priority (default) vs most recently updated */}
+                <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;margin-top:9px;width:fit-content')}>
+                  <span style={comSortS(comSort === 'priority')} onClick={() => setComSort('priority')} title={L === 'ja' ? '既定の優先順' : 'Default priority order'}>{L === 'ja' ? '優先順' : 'Priority'}</span>
+                  <span style={comSortS(comSort === 'recent')} onClick={() => setComSort('recent')} title={L === 'ja' ? '最近更新された委員会を上に' : 'Most recently updated first'}>{L === 'ja' ? '更新順' : 'Recently updated'}</span>
                 </div>
                 {/* committee search */}
                 <div style={s('display:flex;align-items:center;gap:7px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;padding:6px 10px;margin-top:9px')}>
@@ -736,12 +818,22 @@ export function PolicyDeepDiveScreen() {
                     <div style={s('display:flex;flex-direction:column;gap:3px')}>
                       {g.items.map((c) => (
                         <div key={c.key} style={c.s} onClick={c.click}>
-                          <div style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</div>
+                          <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
+                            {c.isRecent && (
+                              <span title={L === 'ja' ? '最近更新（過去7日以内に要約・更新）' : 'Recently updated (summarised/updated in the last 7 days)'} style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);flex-shrink:0;box-shadow:0 0 0 3px var(--acTint)')}></span>
+                            )}
+                            <span style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</span>
+                          </div>
                           <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
                           <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
-                            <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
+                            <span style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
+                              <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
   ? (L === 'ja' ? 'クリックでフォロー解除（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to unfollow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')
   : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
+                              {!c.tracked && (
+                                <span style={s('font-size:9px;font-weight:700;letter-spacing:.04em;border:1px dashed var(--fnt2);color:var(--mut);border-radius:999px;padding:0 6px;white-space:nowrap;flex-shrink:0')} title={L === 'ja' ? '未追跡 — 会合は「保留」で表示。要約するには「管理」で追跡' : 'Untracked — its meetings show as Pending; Track it in Manage to summarise'}>{L === 'ja' ? '未追跡' : 'UNTRACKED'}</span>
+                              )}
+                            </span>
                             <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
                           </div>
                           {c.hasNext && (

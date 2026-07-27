@@ -742,6 +742,10 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             "ja": name_ja + " · 第" + str(num) + "回",
             "date": upd,
             "dateReal": bool(mdate),
+            # Raw last-updated timestamp — bumped on every state change, including
+            # when the meeting reaches `done` (= summarised). Lets the frontend show
+            # "newly summarised · last N days" and sort committees by recency.
+            "updatedAt": str(m["updated_at"]) if m["updated_at"] else None,
             "status": "done" if has_digest else "error" if is_error else "pending",
             "tori": bool(m["has_torimatome"]),
             "title": name_en + " — No. " + str(num),

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import datetime
 
+import pytest
+
 from repower.policy import detect as detect_mod
 from repower.policy import schedule as sched
 from repower.policy import store
@@ -166,6 +168,35 @@ def test_replace_and_list_upcoming(tmp_path):
     assert got[1]["committee_key"] == "chousei_jukyu"
     # replace is a full rewrite, not an append
     assert store.replace_upcoming(rows[:1], db_path=db) == 1
+    assert len(store.list_upcoming(db_path=db)) == 1
+
+
+# The METI site's HTTP-200 overload/failover holding page (no calendar). It must be
+# detected and treated as "feed unavailable", never parsed as "zero upcoming".
+METI_OVERLOAD_PAGE = (
+    '<!DOCTYPE html><html lang="ja"><head><title>経済産業省</title></head>'
+    "<body><p>ただいまアクセスが集中しております。</p>"
+    "<p>しばらくしてから再度アクセスをお願いします。</p></body></html>"
+).encode("utf-8")
+
+
+def test_schedule_detects_overload_page():
+    assert sched._looks_unavailable(METI_OVERLOAD_PAGE) is True
+    # A real calendar page (energy entries present) is not flagged.
+    assert sched._looks_unavailable(METI_CALENDAR.encode("utf-8")) is False
+
+
+def test_refresh_upcoming_overload_does_not_wipe(tmp_path, monkeypatch):
+    """A transient METI overload page must not empty the existing snapshot: refresh
+    raises ScheduleUnavailable and leaves the previous upcoming rows intact."""
+    db = str(tmp_path / "u.db")
+    seed = [sched.Upcoming(datetime.date(2099, 1, 1), "既存の会合", "METI", "meti", "http://x", 1, None)]
+    assert store.replace_upcoming(seed, db_path=db) == 1
+    # METI returns its overload page (HTTP "ok") instead of the calendar.
+    monkeypatch.setattr(sched, "conditional_get", lambda *a, **k: ("ok", METI_OVERLOAD_PAGE))
+    with pytest.raises(sched.ScheduleUnavailable):
+        sched.refresh_upcoming(db_path=db)
+    # The previous snapshot is preserved, not wiped to empty.
     assert len(store.list_upcoming(db_path=db)) == 1
 
 
