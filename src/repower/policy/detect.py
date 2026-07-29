@@ -18,6 +18,7 @@ from repower.policy.scraper import (
     POLITE_DELAY,
     discover_meetings,
     fetch_committee_dates,
+    fetch_meti_url_map,
     fetch_occto_meeting_date,
     list_materials,
 )
@@ -209,9 +210,22 @@ def backfill_materials(
         nums = meetings_missing_materials(c.key, db_path=db_path)
         if limit_per_committee is not None:
             nums = nums[:limit_per_committee]
+        # METI: resolve every meeting's subpage URL from ONE index fetch, so we
+        # don't re-hit the (WAF-challenged) index once per meeting. If the index is
+        # unreachable this run, defer the whole committee rather than hammering it.
+        meti_urls = None
+        if nums and not c.is_occto and not c.is_egc:
+            meti_urls = fetch_meti_url_map(c, db_path=db_path)
+            if not meti_urls:
+                logger.info("policy materials %-26s index unreachable; deferring", c.key)
+                results.append(
+                    {"key": c.key, "source": c.source, "materialised": 0, "checked": 0}
+                )
+                continue
         materialised = 0
         for n in nums:
-            mats = list_materials(c, n, db_path=db_path)
+            page_url = meti_urls.get(n) if meti_urls is not None else None
+            mats = list_materials(c, n, db_path=db_path, page_url=page_url)
             if mats:
                 record_meeting(c.key, n, mats, db_path=db_path)
                 materialised += 1

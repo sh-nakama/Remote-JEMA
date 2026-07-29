@@ -59,7 +59,7 @@ EGC_DATE_TABLE = """
 
 
 def test_parse_meti_meeting_dates():
-    d = parse_meti_meeting_dates(METI_DATE_INDEX, "https://www.meti.go.jp/x/")
+    d = parse_meti_meeting_dates(METI_DATE_INDEX, "https://www.meti.go.jp/shingikai/x/")
     assert d == {114: datetime.date(2026, 5, 8), 113: datetime.date(2026, 4, 3)}
 
 
@@ -177,7 +177,7 @@ METI_OVERLOAD_PAGE = (
     '<!DOCTYPE html><html lang="ja"><head><title>経済産業省</title></head>'
     "<body><p>ただいまアクセスが集中しております。</p>"
     "<p>しばらくしてから再度アクセスをお願いします。</p></body></html>"
-).encode("utf-8")
+).encode()
 
 
 def test_schedule_detects_overload_page():

@@ -13,8 +13,10 @@ optional ``curl_cffi`` fallback impersonates a real Chrome TLS fingerprint.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import UTC, datetime
 from typing import Literal
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -23,6 +25,43 @@ from repower.db import HttpCache, get_session, init_db
 logger = logging.getLogger(__name__)
 
 Status = Literal["ok", "not_modified", "not_found"]
+
+# Politeness: keep at least this many seconds between consecutive requests to the
+# same host so a multi-file scrape (version-probing months, EPRX product ZIPs,
+# JEPX year files) drips out at a human pace instead of machine-gunning a single
+# server. Keyed per host, so unrelated hosts aren't needlessly serialised and a
+# host's first hit never waits.
+_MIN_HOST_INTERVAL: float = 1.0
+_last_request_at: dict[str, float] = {}
+
+
+def _pace_host(url: str) -> None:
+    """Sleep just long enough that consecutive requests to *url*'s host are at
+    least ``_MIN_HOST_INTERVAL`` seconds apart. A host's first request never
+    waits; distinct hosts don't block each other."""
+    host = urlsplit(url).netloc
+    if not host:
+        return
+    prev = _last_request_at.get(host)
+    if prev is not None:
+        wait = _MIN_HOST_INTERVAL - (time.monotonic() - prev)
+        if wait > 0:
+            time.sleep(wait)
+    _last_request_at[host] = time.monotonic()
+
+
+# 202 = WAF/Akamai JavaScript challenge (meti.go.jp / egc.meti.go.jp sit behind
+# CloudFront + WAF). The edge serves the challenge first and only arms the
+# clearance cookie a moment later, so a single retry often still sees 202. We
+# retry a few times with a lengthening, deliberately un-aggressive backoff
+# (seconds, not milliseconds) to stay a polite client while giving the WAF time
+# to arm the cookie on our persistent curl_cffi session.
+_CHALLENGE_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
+# Firing the impersonating fallback in the same instant as the plain-httpx 202
+# just trips the challenge again — the edge reads the back-to-back hit as bot
+# traffic. Pause briefly first so the initial fallback request lands at a human
+# pace instead of milliseconds after the block.
+_CHALLENGE_INITIAL_DELAY: float = 2.0
 
 _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -124,6 +163,7 @@ def _store(session, url: str, etag, last_modified, status: int) -> None:
 def _do_get(url: str, headers: dict, allow_curl_fallback: bool, timeout: float):
     """Return ``(status_code, content|None, etag, last_modified)``. Raises on
     unexpected HTTP/network errors (after trying the curl fallback if allowed)."""
+    _pace_host(url)  # space consecutive same-host requests to a human pace
     try:
         resp = httpx.get(url, timeout=timeout, follow_redirects=True, headers=headers)
     except Exception:
@@ -153,18 +193,45 @@ def _do_get(url: str, headers: dict, allow_curl_fallback: bool, timeout: float):
 def _curl_get(url: str, headers: dict, timeout: float):
     """curl_cffi Chrome-impersonation fallback. Returns the same 4-tuple, or
     None if curl_cffi is unavailable or the request did not yield a usable
-    status. Conditional headers are forwarded so 304s still work for Kyuden."""
+    status. Conditional headers are forwarded so 304s still work for Kyuden.
+
+    A persistent ``Session`` is used so a WAF/Akamai 202 challenge cookie set on
+    the first attempt is replayed on the next; a 202 is retried with the
+    lengthening ``_CHALLENGE_RETRY_DELAYS`` backoff before giving up."""
     try:
         from curl_cffi import requests as cr  # type: ignore
     except Exception:
         return None
     try:
-        r = cr.get(url, impersonate="chrome", timeout=timeout, headers=headers or {})
+        session = cr.Session()
     except Exception as e:  # noqa: BLE001
-        logger.debug("curl_cffi fallback failed for %s: %s", url, e)
+        logger.debug("curl_cffi session init failed for %s: %s", url, e)
         return None
-    if r.status_code in (200, 304, 404):
-        logger.info("curl_cffi %s -> %s", url, r.status_code)
-        body = r.content if r.status_code == 200 else None
-        return (r.status_code, body, r.headers.get("ETag"), r.headers.get("Last-Modified"))
+    # Don't slam the fallback request in the same instant as the httpx 202 — a
+    # short warm-up gap keeps the initial fallback from re-tripping the challenge.
+    time.sleep(_CHALLENGE_INITIAL_DELAY)
+    for attempt in range(len(_CHALLENGE_RETRY_DELAYS) + 1):
+        try:
+            r = session.get(url, impersonate="chrome", timeout=timeout, headers=headers or {})
+        except Exception as e:  # noqa: BLE001
+            logger.debug("curl_cffi fallback failed for %s: %s", url, e)
+            return None
+        if r.status_code in (200, 304, 404):
+            logger.info("curl_cffi %s -> %s", url, r.status_code)
+            body = r.content if r.status_code == 200 else None
+            return (r.status_code, body, r.headers.get("ETag"), r.headers.get("Last-Modified"))
+        # 202 = WAF challenge not yet cleared. Wait (respectfully) for the cookie
+        # to arm on this session, then retry — unless we've exhausted the budget.
+        if r.status_code == 202 and attempt < len(_CHALLENGE_RETRY_DELAYS):
+            delay = _CHALLENGE_RETRY_DELAYS[attempt]
+            logger.info(
+                "curl_cffi %s -> 202 challenge; backing off %.0fs then retrying (%d/%d)",
+                url,
+                delay,
+                attempt + 1,
+                len(_CHALLENGE_RETRY_DELAYS),
+            )
+            time.sleep(delay)
+            continue
+        return None
     return None

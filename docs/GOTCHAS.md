@@ -129,6 +129,18 @@ fixed.
   fabricate summaries.
 - `energy_board.py`'s module-level feed cache (`_feed_cache`/`_feed_ts`) is unlocked — fine
   under today's single-flight usage, unsafe if you add threads.
+- EGC index tables list **non-public meetings** (`※非公開開催` / `※書面開催`) with an *empty
+  materials column* — the main-commission page (`index_emsc.html`) is full of them. `parse_egc_index`
+  keeps a row when it has materials **or** a parseable date, so these still register and don't leave a
+  hole in the meeting-number frontier (a dropped `第613回` would make `known_latest` stall at 612 and
+  hide the next public meeting). Archive-navigation rows list meeting *ranges* (`第1回～第25回`) and are
+  skipped by the `第\d+回\s*[〜～~]` guard — don't relax it or those become phantom "meeting 1" rows.
+- METI index pages carry footer/nav links like `/main/31.html` that match the `NNN.html`
+  meeting-subpage shape. `parse_meti_meeting_urls`/`parse_meti_meeting_dates` only keep links whose
+  path is under `/shingikai/`, or a stray `/main/31.html` registers as phantom **meeting 31** and
+  hijacks `known_latest` (all real committee pages, incl. cross-dir joint meetings under a sibling
+  `/shingikai/.../` committee, stay under `/shingikai/`). Meeting numbers use the *URL* file number,
+  so a joint `第15回` linking to `.../suiso_seisaku/014.html` is recorded as 14 — expected, not a bug.
 
 ## Streamlit dashboard
 
