@@ -147,6 +147,12 @@ export interface AppState {
   requestArea: (a: AreaKey) => void
   clearFocusArea: () => void
 
+  /** Transient: a committee (and meeting number, when known) that another screen
+   * asked Policy Deep Dive to open — e.g. a row of the Overview radar. */
+  focusCommittee: { com: string; num: number | null } | null
+  requestCommittee: (com: string, num?: number | null) => void
+  clearFocusCommittee: () => void
+
   /** True when a local backend API (`repower web-api`) is reachable — enables the
    * write controls (track committees) and the Run catch-up button. False on the
    * static GitHub Pages deployment, which is read-only. */
@@ -246,6 +252,7 @@ export function AppProvider({
     return g && LEVELS.includes(g) ? g : 'Daily'
   })
   const [focusArea, setFocusArea] = useState<AreaKey | null>(null)
+  const [focusCommittee, setFocusCommittee] = useState<{ com: string; num: number | null } | null>(null)
   const [interactive, setInteractive] = useState(false)
 
   // Interactive mode = a local backend (`repower web-api`) is reachable, which
@@ -355,6 +362,11 @@ export function AppProvider({
 
   const requestArea = useCallback((a: AreaKey) => setFocusArea(a), [])
   const clearFocusArea = useCallback(() => setFocusArea(null), [])
+  const requestCommittee = useCallback(
+    (com: string, num?: number | null) => setFocusCommittee({ com, num: num ?? null }),
+    [],
+  )
+  const clearFocusCommittee = useCallback(() => setFocusCommittee(null), [])
   const [refreshing, setRefreshing] = useState(false)
   const refreshTimer = useRef<number | null>(null)
   const jobPollRef = useRef<number | null>(null)
@@ -537,6 +549,9 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      focusCommittee,
+      requestCommittee,
+      clearFocusCommittee,
       interactive,
       refreshData,
       refreshing,
@@ -578,6 +593,9 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      focusCommittee,
+      requestCommittee,
+      clearFocusCommittee,
       interactive,
       refreshData,
       refreshing,

@@ -1,5 +1,5 @@
 // Ported from screens/policy-deep-dive.html
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
@@ -77,7 +77,7 @@ function renderMd(md: string): ReactNode[] {
 }
 
 export function PolicyDeepDiveScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, archiveOverrides, setArchived, interactive, trackJob } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, archiveOverrides, setArchived, interactive, trackJob, focusCommittee, clearFocusCommittee } = useApp()
   const dark = theme === 'dark'
   const L: 'en' | 'ja' = lang
 
@@ -142,6 +142,26 @@ export function PolicyDeepDiveScreen() {
   // Countdown anchor: real today (midnight), used by the upcoming/next-meeting math.
   const now = new Date()
   const dayAnchor = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+
+  // Another screen (the Overview radar/timeline/bell) asked for a specific
+  // committee session. Resolve it once the data is in — a meeting number only
+  // becomes a row key here — and fall back to the committee overview when the
+  // session isn't in the snapshot (e.g. a scheduled meeting).
+  useEffect(() => {
+    if (!focusCommittee || !pol.ready) return
+    const { com, num } = focusCommittee
+    const hit = num == null ? undefined : pol.meetings.find((m) => m.com === com && m.num === num)
+    setCommittee(com)
+    if (hit) {
+      setMeeting(hit.key)
+      setJpOpen(false)
+      setDetailMode('meeting')
+    } else {
+      setDetailMode('committee')
+      setSynthJpOpen(false)
+    }
+    clearFocusCommittee()
+  }, [focusCommittee, pol.ready, pol.meetings, clearFocusCommittee])
 
   // ---- handlers ----
   const selAll = () => {

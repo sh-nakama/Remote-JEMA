@@ -54,7 +54,7 @@ const shortLabel = (m: Meeting, ja: boolean): string => {
 }
 
 export function MarketOverviewScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow, refreshData, refreshing } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow, requestCommittee, refreshData, refreshing } = useApp()
   const dark = theme === 'dark'
   const L = lang
 
@@ -95,6 +95,12 @@ export function MarketOverviewScreen() {
   const tMarket = () => setScreen('market')
   const tPolicy = () => setScreen('policy')
   const tCapacity = () => setScreen('capacity')
+  // Open one committee's session on the Policy screen rather than dumping the
+  // reader on whatever that screen happened to have selected.
+  const openPolicy = (com: string | null, num?: number | null) => {
+    if (com) requestCommittee(com, num)
+    setScreen('policy')
+  }
   const tRefresh = () => {
     refreshData()
     toast('Reloaded latest data · 最新データを再取得しました')
@@ -136,7 +142,7 @@ export function MarketOverviewScreen() {
     ts: m.ts,
     onClick: () => {
       setShowNotif(false)
-      tPolicy()
+      openPolicy(m.com, m.num)
     },
   })
 
@@ -374,6 +380,7 @@ export function MarketOverviewScreen() {
     key: (m.key || m.tier) + '-' + m.no + '-' + (m.date || i),
     rank: i + 1,
     comKey: m.key ?? null,
+    num: m.no || null,
     following,
     n1: L === 'ja' ? m.ja : m.en,
     n2: L === 'ja' ? m.en : m.ja,
@@ -468,6 +475,8 @@ export function MarketOverviewScreen() {
     const metaTxt = dateTxt + ' · ' + rel
     return {
       key: 'cal-' + (m.key || m.tier) + '-' + (m.date || i),
+      comKey: m.key ?? null,
+      num: m.no || null,
       name: shortLabel(m, L === 'ja'),
       meta: metaTxt,
       tip: (L === 'ja' ? m.ja : m.en) + ' · ' + metaTxt,
@@ -922,7 +931,7 @@ export function MarketOverviewScreen() {
                     <React.Fragment key={cm.key}>
                       <div style={cm.lineS}></div>
                       <div style={cm.dotS}></div>
-                      <div style={cm.cardS} onClick={tPolicy} title={cm.tip}>
+                      <div style={cm.cardS} onClick={() => openPolicy(cm.comKey, cm.num)} title={cm.tip}>
                         <div style={s('font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{cm.name}</div>
                         <div style={s("font-size:10px;color:var(--mut);white-space:nowrap;font-feature-settings:'tnum' 1")}>{cm.meta}</div>
                       </div>
@@ -1028,7 +1037,7 @@ export function MarketOverviewScreen() {
                           <div style={s('width:64px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden')}><div style={m.barStyle}></div></div>
                           <span style={s("font-size:11px;font-weight:600;color:var(--mut);font-feature-settings:'tnum' 1;width:18px;text-align:right")}>{m.score}</span>
                         </div>
-                        <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={tPolicy}>{m.cta}</Hoverable>
+                        <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={() => openPolicy(m.comKey, m.num)}>{m.cta}</Hoverable>
                       </div>
                     </div>
                   ))}
