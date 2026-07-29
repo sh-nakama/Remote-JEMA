@@ -101,6 +101,9 @@ export function PolicyDeepDiveScreen() {
   // Committee explorer sort: default (priority) order, or reorder by the most
   // recently updated committee (max meeting updatedAt).
   const [comSort, setComSort] = useState<'priority' | 'recent'>('priority')
+  // "Newly summarised" banner: collapsed shows the 3 most-recent cards; "View all"
+  // expands to the full list (most-recent-first).
+  const [showAllNew, setShowAllNew] = useState(false)
 
   // showAudioCard default prop = true
   const showAudioCard = true
@@ -208,7 +211,7 @@ export function PolicyDeepDiveScreen() {
       .catch(() => toast(L === 'ja' ? '差分取得を開始できませんでした' : 'Could not start catch-up'))
   }
   const tManage = () => openOverlay('committees')
-  const tViewAll = () => toast('Full “newly summarised” list — not in this prototype · 一覧表示は対象外')
+  const tViewAll = () => setShowAllNew((v) => !v)
   const tAdd = () => openOverlay('committees')
   const tSource = () => toast('Opens the committee’s official METI/OCCTO page in a new tab · 公式ページを開きます')
   const tRef = () => toast('Citation deep-link: opens the source PDF at the cited page · 引用元PDFの該当ページを開きます')
@@ -537,18 +540,21 @@ export function PolicyDeepDiveScreen() {
     ? 'Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')
     : feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
 
-  // "Newly summarised": meetings that reached `done` within the last RECENT_DAYS,
-  // newest first — keyed off updatedAt (the summarisation timestamp), NOT the
-  // meeting date. Empty when nothing was summarised recently.
+  // "Newly summarised": meetings that reached `done`, newest first — keyed off
+  // updatedAt (the summarisation timestamp), NOT the meeting date. `newlyDone` is
+  // the last-RECENT_DAYS window (the collapsed banner + its count); `allDone` is
+  // every summarised meeting, which "View all" expands to (most-recent-first).
   const fmtDay = (v?: string | null): string => {
     const t = tsOf(v)
     return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(0, 10)
   }
-  const newlyDone = meetings
-    .filter((m) => m.status === 'done' && !Number.isNaN(tsOf(m.updatedAt)) && nowMs - tsOf(m.updatedAt) <= RECENT_MS)
+  const allDone = meetings
+    .filter((m) => m.status === 'done' && !Number.isNaN(tsOf(m.updatedAt)))
     .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))
+  const newlyDone = allDone.filter((m) => nowMs - tsOf(m.updatedAt) <= RECENT_MS)
   const newCount = newlyDone.length
-  const newCards = newlyDone.slice(0, 3).map((m) => ({
+  const allCount = allDone.length
+  const newCards = (showAllNew ? allDone : newlyDone.slice(0, 3)).map((m) => ({
     title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
     meta: fmtDay(m.updatedAt) + ' · ' + (L === 'ja' ? '要約済み' : 'summarised'),
     preview: (L === 'ja' ? m.prevJa : m.prevEn) || '',
@@ -736,9 +742,13 @@ export function PolicyDeepDiveScreen() {
             <div style={s('background:var(--acTint);border:1px solid var(--acTint);border-radius:16px;padding:14px 16px')}>
               <div style={s('display:flex;justify-content:space-between;align-items:center')}>
                 <span style={s("display:inline-flex;align-items:center;gap:7px;font-size:13.5px;font-weight:600;color:var(--acT)")}>
-                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"></path></svg>`} />{L === 'ja' ? `新着要約 · 過去${RECENT_DAYS}日 (${newCount}件)` : `Newly summarised · last ${RECENT_DAYS} days (${newCount})`}
+                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3z"></path></svg>`} />{showAllNew ? (L === 'ja' ? `要約済みの会合 (${allCount}件)` : `All summarised meetings (${allCount})`) : (L === 'ja' ? `新着要約 · 過去${RECENT_DAYS}日 (${newCount}件)` : `Newly summarised · last ${RECENT_DAYS} days (${newCount})`)}
                 </span>
-                <Hoverable as="span" base="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer" hover="color:var(--ac)" onClick={tViewAll}>View all →</Hoverable>
+                {allCount > 3 && (
+                  <Hoverable as="span" base="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer" hover="color:var(--ac)" onClick={tViewAll}>
+                    {showAllNew ? (L === 'ja' ? '折りたたむ ↑' : 'Show less ↑') : (L === 'ja' ? `すべての要約を表示 (${allCount}) →` : `View all summarised (${allCount}) →`)}
+                  </Hoverable>
+                )}
               </div>
               {newCards.length > 0 ? (
                 <div style={s('display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px')}>

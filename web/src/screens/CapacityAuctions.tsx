@@ -42,7 +42,12 @@ export function CapacityAuctionsScreen() {
     downloadCsv('jema-capacity-main-auction.csv', rows)
     toast('Downloaded main-auction results (CSV) · 約定結果をCSVで保存しました')
   }
-  const tRow = () => toast('Full OCCTO publication (per-project detail) — not in this prototype · 公表資料の詳細は対象外')
+  const tRow = () => {
+    // No per-project detail is published in-app; open OCCTO's official capacity-market
+    // section (the auction-results publications live under market-board/market/).
+    window.open('https://www.occto.or.jp/market-board/market/index.html', '_blank', 'noopener,noreferrer')
+    toast(L === 'ja' ? 'OCCTO 容量市場の公式ページを開きました' : 'Opened OCCTO’s official capacity-market page')
+  }
 
   // Live curated capacity data (fixtures as loading fallback).
   const cap = useCapacityLive()
