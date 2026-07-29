@@ -1,5 +1,5 @@
 // Ported from screens/market-data.html — the Market Data screen.
-import { Fragment, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
@@ -9,6 +9,7 @@ import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../li
 import type { NotifItem, NotifSection } from '../lib/notifications'
 import { PolicyNavBadge } from '../lib/policyActivity'
 import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate } from '../lib/chartkit'
+import { ChartFrame, gapSegments, segPoints, bandPoints, PLOT_X0, PLOT_W } from '../lib/chart'
 import { downloadCsv } from '../lib/download'
 import {
   areas,
@@ -23,18 +24,27 @@ import {
 import {
   useWholesaleLive,
   windowLive,
-  windowLivePrev,
   windowSupply,
   useDriversLive,
   useBalancingLive,
   BAL_CODES,
   useTielineLive,
+  DAY_MS,
+  effectiveRangeDays,
+  rangeClampNote,
+  latestT,
+  latestPriceT,
+  latestSupplyT,
+  parseISO,
 } from './MarketData.live'
 
 type View = 'wholesale' | 'balancing' | 'interco' | 'drivers'
 type Range = '7D' | '30D' | '60D' | '1Y'
 type Gran = 'Native' | 'Daily' | 'Weekly' | 'Monthly'
 type DrRange = '30D' | '90D' | '1Y'
+
+/** Inclusive epoch-ms window a chart is plotted over. */
+type Domain = [number, number]
 
 // makeChip / segBase / filterChipBase / slotLabel / fmtDate now live in
 // lib/chartkit (shared with the other screens).
@@ -59,87 +69,19 @@ function fmtDT(v: string): string {
   return m[4] && !(m[4] === '00' && m[5] === '00') ? lbl + ' ' + m[4] + ':' + m[5] : lbl
 }
 
-/**
- * Shared hover layer for the static price / generation-mix SVGs. Renders the given
- * chart `children` inside the SVG and, on mouse-move, a dashed crosshair + an
- * anchored value tooltip (with the exact datetime) for the nearest data point.
- * Point `i` maps to x = 8 + i/(n-1)·464 in the 480-wide viewBox — identical to the
- * polyline geometry. When `n < 2` (e.g. fixtures) the chart renders but is inert.
- */
-function ChartHover({
-  n,
-  dt,
-  xs,
-  dotY,
-  tip,
-  children,
-}: {
-  n: number
-  dt: string[]
-  xs?: number[]
-  dotY?: (i: number) => number
-  tip: (i: number) => ReactNode
-  children: ReactNode
-}) {
-  const [i, setI] = useState<number | null>(null)
-  // When `xs` (per-point viewBox x-positions) is supplied the chart is plotted on a
-  // shared time axis, so map/invert through it; otherwise fall back to the even
-  // index spacing (x = 8 + k/(n-1)·464).
-  const useXs = !!xs && xs.length === n
-  const xOf = (k: number) => (useXs ? xs![k] : 8 + (k / Math.max(1, n - 1)) * 464)
-  const onMove = (e: ReactMouseEvent<SVGSVGElement>) => {
-    if (n < 2) return
-    const r = e.currentTarget.getBoundingClientRect()
-    const px = ((e.clientX - r.left) / r.width) * 480
-    let k: number
-    if (useXs) {
-      k = 0
-      let best = Infinity
-      for (let j = 0; j < n; j++) {
-        const d = Math.abs(xs![j] - px)
-        if (d < best) {
-          best = d
-          k = j
-        }
-      }
-    } else {
-      k = Math.round(((px - 8) / 464) * (n - 1))
-    }
-    k = Math.max(0, Math.min(n - 1, k))
-    if (k !== i) setI(k)
-  }
-  const onLeave = () => setI(null)
-  const x = i != null ? xOf(i) : 0
-  const leftPct = i != null ? Math.max(10, Math.min(90, (x / 480) * 100)) : 0
-  return (
-    <div style={s('position:relative')}>
-      <svg
-        viewBox="0 0 480 160"
-        style={s('width:100%;height:auto;display:block;margin-top:10px')}
-        preserveAspectRatio="none"
-        onMouseMove={onMove}
-        onMouseLeave={onLeave}
-      >
-        {children}
-        {i != null && (
-          <g>
-            <line x1={x} y1="6" x2={x} y2="152" stroke="var(--mut)" strokeWidth="0.8" strokeDasharray="3 3"></line>
-            {dotY ? <circle cx={x} cy={dotY(i)} r="2.6" fill="var(--tx)"></circle> : null}
-          </g>
-        )}
-      </svg>
-      {i != null && (
-        <div
-          style={s(
-            `position:absolute;top:2px;left:${leftPct}%;transform:translateX(-50%);background:var(--bg2);border:1px solid var(--bd);border-radius:8px;padding:4px 9px;font-size:11px;white-space:nowrap;pointer-events:none;color:var(--tx);box-shadow:var(--sh1);z-index:5;font-feature-settings:'tnum' 1`,
-          )}
-        >
-          <span style={s('color:var(--mut);margin-right:6px')}>{fmtDT(dt[i] ?? '')}</span>
-          {tip(i)}
-        </div>
-      )}
-    </div>
-  )
+/** Epoch ms → "Jul 11" / "Jul 11 22:30" (UTC — snapshot datetimes are wall-clock JST). */
+function fmtEpoch(t: number): string {
+  if (!Number.isFinite(t)) return ''
+  const d = new Date(t)
+  const lbl = MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate()
+  const hh = d.getUTCHours()
+  const mm = d.getUTCMinutes()
+  return hh || mm ? lbl + ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0') : lbl
+}
+
+/** Start / middle / end tick labels for an epoch-ms domain. */
+function axisLabels(d: Domain): [string, string, string] {
+  return [fmtEpoch(d[0]), fmtEpoch((d[0] + d[1]) / 2), fmtEpoch(d[1])]
 }
 
 export function MarketDataScreen() {
@@ -152,6 +94,12 @@ export function MarketDataScreen() {
   const [gran, setGran] = useState<Gran>(defaultGran)
   const [sel, setSel] = useState<Record<string, boolean>>({ hokkaido: true, tohoku: true, tepco: true })
   const [closed, setClosed] = useState<Record<string, boolean>>({})
+  // Per-area expanded view: adds a full-width combined generation-mix + price chart
+  // underneath the side-by-side pair.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  // Per-area drag-selected zoom window (epoch ms). Each area zooms independently;
+  // unzoomed areas keep the range-derived window.
+  const [zoom, setZoom] = useState<Record<string, Domain>>({})
   const [drRange, setDrRange] = useState<DrRange>('90D')
   const [drOn, setDrOn] = useState<{ jkm: boolean; ncl: boolean; fx: boolean }>({ jkm: true, ncl: true, fx: true })
   // Compare overlay (period-over-period) + inline drill-down accordions.
@@ -171,12 +119,30 @@ export function MarketDataScreen() {
       return next
     })
   const toggleSec = (key: string) => setClosed((prev) => ({ ...prev, [key]: !prev[key] }))
+  const toggleExpand = (key: string) => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))
+  const setAreaZoom = (key: string, d: Domain) => setZoom((prev) => ({ ...prev, [key]: d }))
+  const clearZoom = (key: string) =>
+    setZoom((prev) => {
+      if (!prev[key]) return prev
+      const next = { ...prev }
+      delete next[key]
+      return next
+    })
   const resetAll = () => {
     setRange('60D')
     setGran('Daily')
     setSel({ hokkaido: true, tohoku: true, tepco: true })
     setClosed({})
+    setExpanded({})
+    setZoom({})
   }
+
+  // A zoom window is expressed in absolute time, so it stops describing anything
+  // the controls say once the range or granularity changes — drop it instead of
+  // leaving charts on a window the chips contradict.
+  useEffect(() => {
+    setZoom({})
+  }, [range, gran])
 
   // The ⌘K palette / Watchlist can ask us to focus a specific area: switch to
   // the wholesale view and ensure that area is selected, then clear the request.
@@ -357,6 +323,7 @@ export function MarketDataScreen() {
         max: b.max,
         min: b.min,
         dt: b.days.map((d) => dateLabel(d)),
+        t: b.days.map(() => NaN),
         labels: [dateLabel(b.days[0]), dateLabel(b.days[m]), dateLabel(b.days[b.days.length - 1])] as [
           string,
           string,
@@ -447,92 +414,131 @@ export function MarketDataScreen() {
 
     // ---- per-area sections ----
     const X = (i: number, n: number) => 8 + (i / (n - 1)) * 464
-    const pts = (arr: number[], y: (val: number) => number) =>
-      arr.map((val, i) => X(i, arr.length).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
 
-    // Shared x time-domain across every selected live area (price + supply windows),
-    // so all area charts map the same x-pixel to the same calendar time ("align the
-    // x-axis"). Fixtures (no live data) keep the even index spacing.
-    const parseT = (iso: string): number => {
-      const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(iso)
-      return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) : NaN
-    }
-    let gMin = Infinity
-    let gMax = -Infinity
-    const accT = (iso: string) => {
-      const t = parseT(iso)
-      if (Number.isFinite(t)) {
-        if (t < gMin) gMin = t
-        if (t > gMax) gMax = t
-      }
-    }
+    // ---- plotted time window ----
+    // Issue #22: the window is now derived from the *selected range*, anchored at
+    // the newest datetime in the data — not from the union of whatever each area
+    // happens to carry. Coverage differs wildly per area (one TSO's supply feed can
+    // lag a month), and taking the union let a single stale series stretch the axis
+    // so every chart drew its data as a sliver at one edge, regardless of the range
+    // chip. A 7D chip now always draws exactly 7 days; a short series simply stops
+    // early and leaves honest whitespace.
+    const rangeDays = effectiveRangeDays(gran, range)
+    let anchorMs = NaN
     for (const a of selAreas) {
       const la = live.ready ? live.areas[a.key] ?? null : null
       if (!la) continue
-      windowLive(la, gran, range).dt.forEach(accT)
-      windowSupply(la, gran, range).dt.forEach(accT)
+      const t = latestT(la)
+      if (Number.isFinite(t) && !(t <= anchorMs)) anchorMs = t
     }
-    const haveDomain = Number.isFinite(gMin) && Number.isFinite(gMax) && gMax > gMin
-    const xAtTime = (iso: string): number => {
-      const t = parseT(iso)
-      if (!Number.isFinite(t) || !haveDomain) return 8
-      return 8 + ((t - gMin) / (gMax - gMin)) * 464
+    const haveDomain = Number.isFinite(anchorMs)
+    const baseDomain: Domain = haveDomain ? [anchorMs - rangeDays * DAY_MS, anchorMs] : [0, 1]
+
+    /** For each ascending time in `from`, the index of the nearest time in `to`,
+     *  or −1 when there is no sample within `tol` ms. Both inputs are ascending,
+     *  so one pass suffices.
+     *
+     *  The tolerance matters: without it, a supply feed that lags the price feed by
+     *  weeks still resolves to *some* index, and the combined chart's tooltip would
+     *  report a month-old generation mix under today's timestamp — re-fabricating
+     *  exactly the data the gap-segmented polygons deliberately leave blank. */
+    const nearestMap = (from: number[], to: number[], tol: number): number[] => {
+      if (!to.length) return from.map(() => -1)
+      const out: number[] = []
+      let j = 0
+      for (const t of from) {
+        while (j + 1 < to.length && Math.abs(to[j + 1] - t) <= Math.abs(to[j] - t)) j++
+        out.push(Math.abs(to[j] - t) <= tol ? j : -1)
+      }
+      return out
     }
-    const fmtEpoch = (t: number): string => {
-      const d = new Date(t)
-      const lbl = MONTHS[d.getUTCMonth()] + ' ' + d.getUTCDate()
-      const hh = d.getUTCHours()
-      const mm = d.getUTCMinutes()
-      return hh || mm ? lbl + ' ' + String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0') : lbl
+
+    /** Median sample spacing of an ascending series, or NaN when undeterminable. */
+    const cadence = (t: number[]): number => {
+      const d: number[] = []
+      for (let i = 1; i < t.length; i++) {
+        const g = t[i] - t[i - 1]
+        if (Number.isFinite(g) && g > 0) d.push(g)
+      }
+      if (!d.length) return NaN
+      d.sort((a, b) => a - b)
+      return d[Math.floor(d.length / 2)]
     }
-    const sharedAx: [string, string, string] = haveDomain
-      ? [fmtEpoch(gMin), fmtEpoch((gMin + gMax) / 2), fmtEpoch(gMax)]
-      : ['', '', '']
+
+    // Expanded (combined mix + price) chart geometry: same 480-wide viewBox, taller.
+    const EXP_H = 320
 
     const sections = selAreas.map((a) => {
       // Per-area live/fixture: each chart uses its own snapshot when loaded, so a
       // single missing/corrupt area falls back alone instead of dragging every
       // area to fixtures (the KPI block above still gates on the stricter useLive).
       const la = live.ready ? (live.areas[a.key] ?? null) : null
-      const w = la ? windowLive(la, gran, range) : winLabeled(a)
+      const useTime = !!la && haveDomain
+      // Drag-selected zoom is per area, so one area can be inspected closely while
+      // the others stay on the range window.
+      const zoomDom = zoom[a.key] ?? null
+      const dom: Domain = useTime ? zoomDom ?? baseDomain : [0, 1]
+      const xOfT = (t: number) => PLOT_X0 + ((t - dom[0]) / (dom[1] - dom[0])) * PLOT_W
+      /** viewBox x → epoch ms (brush selections come back in viewBox units). */
+      const tOfX = (x: number) => dom[0] + ((x - PLOT_X0) / PLOT_W) * (dom[1] - dom[0])
+
+      const w = la ? windowLive(la, dom[0], dom[1]) : winLabeled(a)
       const n = w.avg.length
-      const lo = Math.min(...w.min) * 0.92
-      const hi = Math.max(...w.max) * 1.05
-      const py = (val: number) => 150 - ((val - lo) / (hi - lo)) * 135
-      // Plot each price point at its real time position on the shared domain (live),
-      // so the same x-pixel is the same calendar time across every area chart.
-      const pxAt = (i: number) => (la && haveDomain ? xAtTime(w.dt[i]) : 8 + (i / Math.max(1, n - 1)) * 464)
-      const ptsP = (arr: number[], y: (val: number) => number) =>
-        arr.map((val, i) => pxAt(i).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
-      const pxs = w.avg.map((_v, i) => pxAt(i))
-      // Compare overlay: previous equal-length window's avg, aligned slot-for-slot
-      // to this window by index. Clamped to the plot box so an outlier prior period
-      // can't escape the chart. Always computed; JSX only draws it when `compare`.
+      const lo = n ? Math.min(...w.min) * 0.92 : 0
+      const hi = n ? Math.max(...w.max) * 1.05 : 1
+      const span = hi - lo || 1
+      const py = (val: number) => 150 - ((val - lo) / span) * 135
+      const pyE = (val: number) => EXP_H - 14 - ((val - lo) / span) * (EXP_H - 32)
+      const pxs = useTime
+        ? w.t.map(xOfT)
+        : w.avg.map((_v, i) => PLOT_X0 + (i / Math.max(1, n - 1)) * PLOT_W)
+      // Break the line wherever the series has a hole: a single polyline would
+      // bridge a multi-week gap with a straight segment that reads as real data.
+      const pSegs = (useTime ? gapSegments(w.t) : n ? ([[0, n - 1]] as [number, number][]) : []).filter(
+        ([s0, s1]) => s1 > s0,
+      )
+      const lineOf = (arr: number[], y: (val: number) => number) =>
+        pSegs.map((sg) => segPoints(sg, (i) => pxs[i], (i) => y(arr[i])))
+      const bandOf = (y: (val: number) => number) =>
+        pSegs.map((sg) => bandPoints(sg, (i) => pxs[i], (i) => y(w.max[i]), (i) => y(w.min[i])))
+
+      // Compare overlay: the equal-length window immediately before this one, drawn
+      // at its own timestamps shifted forward by the window span so it shares this
+      // chart's axis. Shifted by time rather than aligned by slot index — the series
+      // have holes, so slot-for-slot would pair unrelated timestamps. Clamped to the
+      // plot box so an outlier prior period can't escape the chart. Always computed;
+      // JSX only draws it when `compare`.
+      const cmpSpan = dom[1] - dom[0]
+      const wPrev = la && useTime ? windowLive(la, dom[0] - cmpSpan, dom[0]) : null
       const pyC = (val: number) => Math.max(12, Math.min(150, py(val)))
-      const prevAvg = la ? windowLivePrev(la, gran, range) : []
-      const cmpN = Math.min(w.avg.length, prevAvg.length)
       const pCmp =
-        cmpN > 1
-          ? prevAvg.slice(0, cmpN).map((val, i) => pxAt(i).toFixed(1) + ',' + pyC(val).toFixed(1)).join(' ')
-          : ''
-      const band =
-        ptsP(w.max, py) +
-        ' ' +
-        w.min.map((_val, i) => pxAt(n - 1 - i).toFixed(1) + ',' + py(w.min[n - 1 - i]).toFixed(1)).join(' ')
+        wPrev && wPrev.avg.length > 1
+          ? gapSegments(wPrev.t)
+              .filter(([s0, s1]) => s1 > s0)
+              .map((sg) =>
+                segPoints(sg, (i) => xOfT(wPrev.t[i] + cmpSpan), (i) => pyC(wPrev.avg[i])),
+              )
+          : []
 
       // generation mix — real windowed supply when live (gran-responsive), else synthetic "today"
-      const supW = la ? windowSupply(la, gran, range) : null
-      let mix1: string
-      let mix2: string
-      let mix3: string
-      let mix4: string
-      let demandLine: string
+      const supW = la ? windowSupply(la, dom[0], dom[1]) : null
+      let mix1: string[]
+      let mix2: string[]
+      let mix3: string[]
+      let mix4: string[]
+      let demandLine: string[]
+      let expMix1: string[] = []
+      let expMix2: string[] = []
+      let expMix3: string[] = []
+      let expMix4: string[] = []
+      let expDemand: string[] = []
       let peakMWStr: string
       let mixMeta: string
-      // Raw windowed mix arrays + geometry for the hover layer (live only).
+      // Raw windowed mix arrays + geometry for the hover layer.
       let supN = 0
       let supYmax = 1
       let supDtA: string[] = []
+      let supTA: number[] = []
       let supDemandA: number[] = []
       let supBaseA: number[] = []
       let supThermA: number[] = []
@@ -544,22 +550,38 @@ export function MarketDataScreen() {
         const c2 = c1.map((b, i) => b + supW.thermal[i])
         const c3 = c2.map((val, i) => val + supW.solar[i])
         const c4 = c3.map((val, i) => val + supW.other[i])
-        const nS = Math.max(2, c1.length)
-        const Xs = (i: number) => (haveDomain ? xAtTime(supW.dt[i]) : 8 + (i / (nS - 1)) * 464)
+        const nS = supW.demand.length
+        const Xs = (i: number) => (useTime ? xOfT(supW.t[i]) : PLOT_X0 + (i / Math.max(1, nS - 1)) * PLOT_W)
         const my = (val: number) => 152 - (val / supW.ymax) * 140
-        const fwd = (arr: number[]) => arr.map((v, i) => Xs(i).toFixed(1) + ',' + my(v).toFixed(1)).join(' ')
-        const rev = (arr: number[]) =>
-          arr.map((_v, i) => Xs(nS - 1 - i).toFixed(1) + ',' + my(arr[nS - 1 - i]).toFixed(1)).join(' ')
-        mix1 = fwd(c1) + ' ' + Xs(nS - 1).toFixed(1) + ',152 ' + Xs(0).toFixed(1) + ',152'
-        mix2 = fwd(c2) + ' ' + rev(c1)
-        mix3 = fwd(c3) + ' ' + rev(c2)
-        mix4 = fwd(c4) + ' ' + rev(c3)
-        demandLine = fwd(supW.demand)
+        const myE = (val: number) => EXP_H - 12 - (val / supW.ymax) * (EXP_H - 28)
+        const sSegs = (useTime ? gapSegments(supW.t) : nS ? ([[0, nS - 1]] as [number, number][]) : []).filter(
+          ([s0, s1]) => s1 > s0,
+        )
+        const bands = (y: (val: number) => number) => ({
+          b1: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c1[i]), () => y(0))),
+          b2: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c2[i]), (i) => y(c1[i]))),
+          b3: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c3[i]), (i) => y(c2[i]))),
+          b4: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c4[i]), (i) => y(c3[i]))),
+          dem: sSegs.map((sg) => segPoints(sg, Xs, (i) => y(supW.demand[i]))),
+        })
+        const std = bands(my)
+        mix1 = std.b1
+        mix2 = std.b2
+        mix3 = std.b3
+        mix4 = std.b4
+        demandLine = std.dem
+        const exp = bands(myE)
+        expMix1 = exp.b1
+        expMix2 = exp.b2
+        expMix3 = exp.b3
+        expMix4 = exp.b4
+        expDemand = exp.dem
         peakMWStr = Math.round(Math.max(1, ...supW.demand)).toLocaleString('en-US')
         mixMeta = range + ' · ' + gran + ' · grouped MW'
-        supN = supW.demand.length
+        supN = nS
         supYmax = supW.ymax
         supDtA = supW.dt
+        supTA = supW.t
         supDemandA = supW.demand
         supBaseA = supW.baseload
         supThermA = supW.thermal
@@ -582,40 +604,90 @@ export function MarketDataScreen() {
         const c2 = dem.map((val, i) => Math.max(base[i], val - solar[i]))
         const ymax = P * 1.12
         const my = (val: number) => 152 - (val / ymax) * 140
-        const fwd = (arr: number[]) => pts(arr, my)
-        const rev = (arr: number[]) =>
-          arr.map((_val, i) => X(47 - i, 48).toFixed(1) + ',' + my(arr[47 - i]).toFixed(1)).join(' ')
+        const myE = (val: number) => EXP_H - 12 - (val / ymax) * (EXP_H - 28)
         const demLine = dem.map((val) => val * 1.018)
-        mix1 = fwd(c1) + ' 472,152 8,152'
-        mix2 = fwd(c2) + ' ' + rev(c1)
-        mix3 = fwd(c3) + ' ' + rev(c2)
-        mix4 = ''
-        demandLine = pts(demLine, my)
+        const fx = (i: number) => X(i, 48)
+        const seg: [number, number] = [0, 47]
+        const bands = (y: (val: number) => number) => ({
+          b1: [bandPoints(seg, fx, (i) => y(c1[i]), () => y(0))],
+          b2: [bandPoints(seg, fx, (i) => y(c2[i]), (i) => y(c1[i]))],
+          b3: [bandPoints(seg, fx, (i) => y(c3[i]), (i) => y(c2[i]))],
+          dem: [segPoints(seg, fx, (i) => y(demLine[i]))],
+        })
+        const std = bands(my)
+        mix1 = std.b1
+        mix2 = std.b2
+        mix3 = std.b3
+        mix4 = []
+        demandLine = std.dem
+        const exp = bands(myE)
+        expMix1 = exp.b1
+        expMix2 = exp.b2
+        expMix3 = exp.b3
+        expMix4 = []
+        expDemand = exp.dem
         peakMWStr = P.toLocaleString('en-US')
         mixMeta = 'today · 14 fuels grouped · MW'
         // hover arrays for the synthetic "today" mix (half-hourly, oldest→newest)
         supN = 48
         supYmax = ymax
         supDtA = Array.from({ length: 48 }, (_, i) => String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 === 0 ? '00' : '30'))
+        supTA = Array.from({ length: 48 }, () => NaN)
         supDemandA = demLine
         supBaseA = c1
         supThermA = c2.map((val, i) => Math.max(0, val - c1[i]))
         supSolarA = c3.map((val, i) => Math.max(0, val - c2[i]))
-        supXs = Array.from({ length: 48 }, (_v, i) => 8 + (i / 47) * 464)
+        supXs = Array.from({ length: 48 }, (_v, i) => X(i, 48))
       }
 
       const open = !closed[a.key]
-      // x-axis tick labels (start / mid / end). Shared domain when live so every area
-      // chart reads alike; else the window's own labels (price) / slot times (mix).
-      const priceAx: [string, string, string] = la && haveDomain ? sharedAx : w.labels
-      const mixAx: [string, string, string] =
-        supW && haveDomain
-          ? sharedAx
-          : [
-              supN ? fmtDT(supDtA[0]) : '',
-              supN ? fmtDT(supDtA[Math.floor((supN - 1) / 2)]) : '',
-              supN ? fmtDT(supDtA[supN - 1]) : '',
-            ]
+      // x-axis tick labels (start / mid / end) come from the *requested* window, so
+      // they can never contradict the range chip — even when the series is short.
+      const domAx: [string, string, string] = useTime ? axisLabels(dom) : ['', '', '']
+      const priceAx: [string, string, string] = useTime ? domAx : w.labels
+      const mixAx: [string, string, string] = useTime
+        ? domAx
+        : [
+            supN ? fmtDT(supDtA[0]) : '',
+            supN ? fmtDT(supDtA[Math.floor((supN - 1) / 2)]) : '',
+            supN ? fmtDT(supDtA[supN - 1]) : '',
+          ]
+
+      // Coverage honesty: a series whose newest point predates the window's right
+      // edge stops early and leaves whitespace — say so instead of letting it read
+      // as "no data today". Measured from the newest row that actually carries a
+      // value, since exports pad the tail with all-null rows.
+      const staleNote = (t: number): string => {
+        if (!useTime || !Number.isFinite(t)) return ''
+        const behind = Math.floor((dom[1] - t) / DAY_MS)
+        if (behind < 2) return ''
+        return `through ${fmtEpoch(t)} · ${behind}d behind`
+      }
+      const priceStale = la ? staleNote(latestPriceT(la)) : ''
+      const supStale = la ? staleNote(latestSupplyT(la)) : ''
+
+      // Combined chart hover walks the denser of the two series and maps across.
+      // A match is only accepted within ~1.5 samples of the target series' own
+      // cadence, so the tooltip stays silent over a gap instead of inventing values.
+      const priceTol = (cadence(w.t) || 30 * 60_000) * 1.5
+      const supTol = (cadence(supTA) || 30 * 60_000) * 1.5
+      const cmbOnPrice = n >= supN
+      const cmbXs = cmbOnPrice ? pxs : supXs
+      const cmbN = cmbOnPrice ? n : supN
+      const cmbDt = cmbOnPrice ? w.dt : supDtA
+      const cmbPriceIdx = cmbOnPrice
+        ? w.avg.map((_v, i) => i)
+        : useTime
+          ? nearestMap(supTA, w.t, priceTol)
+          : supDemandA.map(() => -1)
+      const cmbSupIdx = cmbOnPrice
+        ? useTime
+          ? nearestMap(w.t, supTA, supTol)
+          : w.avg.map(() => -1)
+        : supDemandA.map((_v, i) => i)
+
+      const zoomLabel = zoomDom ? `Zoomed ${fmtEpoch(zoomDom[0])} → ${fmtEpoch(zoomDom[1])}` : ''
+
       return {
         key: a.key,
         title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
@@ -629,6 +701,10 @@ export function MarketDataScreen() {
           gran,
         open,
         closed: !open,
+        expanded: !!expanded[a.key],
+        zoomLabel,
+        canZoom: useTime,
+        tOfX,
         mix1,
         mix2,
         mix3,
@@ -636,24 +712,26 @@ export function MarketDataScreen() {
         mixMeta,
         demand: demandLine,
         peakMW: peakMWStr,
-        band,
-        pMax: ptsP(w.max, py),
-        pAvg: ptsP(w.avg, py),
-        pMin: ptsP(w.min, py),
+        band: bandOf(py),
+        pMax: lineOf(w.max, py),
+        pAvg: lineOf(w.avg, py),
+        pMin: lineOf(w.min, py),
         pCmp,
-        vMax: Math.max(...w.max).toFixed(1),
-        vAvg: mean(w.avg).toFixed(1),
-        vMin: Math.min(...w.min).toFixed(1),
+        vMax: n ? Math.max(...w.max).toFixed(1) : '—',
+        vAvg: n ? mean(w.avg).toFixed(1) : '—',
+        vMin: n ? Math.min(...w.min).toFixed(1) : '—',
         rangeLabel: range,
         granLabel: gran,
-        // shared x-axis tick labels (start / mid / end) — identical across all area
-        // charts when live, so the aligned time domain is legible.
         priceAx,
         mixAx,
+        priceStale,
+        supStale,
         // hover geometry — price chart
         n,
-        plo: lo,
-        phi: hi,
+        // Exposed so the hover dot uses the same guarded scale as the polylines;
+        // computing it inline in JSX divided by an unguarded `hi - lo`, which is 0
+        // when a (zoomed) window holds only identical prices — e.g. all ¥0.00.
+        pDotY: (i: number) => (Number.isFinite(w.avg[i]) ? py(w.avg[i]) : 150),
         pdt: w.dt,
         pxs,
         pavg: w.avg,
@@ -669,6 +747,30 @@ export function MarketDataScreen() {
         supThermA,
         supSolarA,
         supOtherA,
+        // combined (expanded) chart
+        expH: EXP_H,
+        expMix1,
+        expMix2,
+        expMix3,
+        expMix4,
+        expDemand,
+        expBand: bandOf(pyE),
+        expPMax: lineOf(w.max, pyE),
+        expPAvg: lineOf(w.avg, pyE),
+        expPMin: lineOf(w.min, pyE),
+        expDotY: (i: number) => {
+          const k = cmbPriceIdx[i]
+          // NaN suppresses the dot in ChartFrame; a fallback position would plant a
+          // marker where the price series has no sample.
+          return k >= 0 && Number.isFinite(w.avg[k]) ? pyE(w.avg[k]) : NaN
+        },
+        cmbN,
+        cmbXs,
+        cmbDt,
+        cmbPriceIdx,
+        cmbSupIdx,
+        mwTicks: [supYmax, supYmax / 2, 0].map((val) => Math.round(val).toLocaleString('en-US')),
+        yenTicks: [hi, (hi + lo) / 2, lo].map((val) => val.toFixed(1)),
       }
     })
 
@@ -968,13 +1070,16 @@ export function MarketDataScreen() {
       heatRows,
       sections,
       hiddenNote,
+      // The plotted window can differ from the range chip: `Native` is capped by
+      // the export window, `Weekly`/`Monthly` are floored so a line can be drawn.
+      rangeClampNote: rangeClampNote(gran, range),
       balRows,
       balProcTot: balLive.ready ? Math.round(balLive.procTot).toLocaleString('en-US') : '9,321',
       balAvgPrice: balLive.ready && balLive.avgPrice != null ? balLive.avgPrice.toFixed(2) : '4.87',
       balD1S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
       balD2S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
     }
-  }, [view, range, gran, sel, closed, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive])
+  }, [view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive])
 
   const isDarkB = dark
   const isLightB = !dark
@@ -1159,6 +1264,9 @@ export function MarketDataScreen() {
                   <span style={v.gWS} onClick={granW}>Weekly</span>
                   <span style={v.gMS} onClick={granM}>Monthly</span>
                 </div>
+                {v.rangeClampNote ? (
+                  <span style={s("font-size:10.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:999px;padding:2px 10px;white-space:nowrap;font-feature-settings:'tnum' 1")}>{v.rangeClampNote}</span>
+                ) : null}
                 <span style={s('margin-left:auto;display:flex;gap:8px;align-items:center')}>
                   <Hoverable as="span" base={compare ? 'font-size:12px;font-weight:600;color:var(--ac);cursor:pointer;white-space:nowrap' : 'font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap'} hover="color:var(--ac)" onClick={tCompare} title={L === 'ja' ? '前期間を重ねて比較' : 'Overlay the previous equal-length period'}>{compare ? '✓ ' : ''}Compare 比較</Hoverable>
                   <span style={s('color:var(--fnt3)')}>·</span>
@@ -1252,6 +1360,29 @@ export function MarketDataScreen() {
                       </Hoverable>
                       <Hoverable as="span" base={`width:26px;height:26px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:${isWatched('area:' + sec.key) ? 'var(--ac)' : 'var(--fnt)'}`} hover="background:var(--bg2)" onClick={() => { const am = areas.find((x) => x.key === sec.key); toggleWatch({ id: 'area:' + sec.key, kind: 'area', en: am?.en || sec.key, ja: am?.ja || sec.key, screen: 'market' }) }} title={isWatched('area:' + sec.key) ? 'Remove from watchlist · ウォッチリストから削除' : 'Add to watchlist · ウォッチリストに追加'} aria-label={isWatched('area:' + sec.key) ? 'Remove from watchlist' : 'Add to watchlist'}><RawSvg html={`<svg viewBox="0 0 24 24" fill="${isWatched('area:' + sec.key) ? 'currentColor' : 'none'}" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /></Hoverable>
                       <span style={s("font-size:11.5px;color:var(--mut);margin-left:auto;font-feature-settings:'tnum' 1")}>{sec.meta}</span>
+                      {sec.zoomLabel ? (
+                        <Hoverable
+                          as="span"
+                          base="display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;background:var(--acTint);color:var(--acT);border:1px solid var(--ac);border-radius:999px;padding:2px 10px;cursor:pointer;white-space:nowrap"
+                          hover="background:var(--acTint2)"
+                          onClick={() => clearZoom(sec.key)}
+                          title="Clear zoom · ズーム解除"
+                          aria-label={`Clear zoom ${sec.zoomLabel}`}
+                        >
+                          <span style={s("font-feature-settings:'tnum' 1")}>{sec.zoomLabel}</span>
+                          <span aria-hidden="true">✕</span>
+                        </Hoverable>
+                      ) : null}
+                      <Hoverable
+                        as="span"
+                        base={`font-size:11px;font-weight:600;border:1px solid ${sec.expanded ? 'var(--ac)' : 'var(--bd2)'};background:${sec.expanded ? 'var(--acTint)' : 'var(--bg1)'};color:${sec.expanded ? 'var(--acT)' : 'var(--mut)'};border-radius:999px;padding:2px 11px;cursor:pointer;white-space:nowrap`}
+                        hover="background:var(--hov)"
+                        onClick={() => toggleExpand(sec.key)}
+                        title="Combined generation mix + price chart · 電源構成と価格の重ね合わせ"
+                        aria-label={sec.expanded ? 'Collapse combined chart' : 'Expand combined chart'}
+                      >
+                        {sec.expanded ? 'Collapse 縮小' : 'Expand 拡大'}
+                      </Hoverable>
                     </div>
                     {sec.open && (
                       <div style={s('display:grid;grid-template-columns:1fr 1fr;gap:20px')}>
@@ -1260,11 +1391,14 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Generation mix <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>電源構成</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.mixMeta}</span>
                           </div>
-                          <ChartHover
+                          <ChartFrame
                             n={sec.supN}
-                            dt={sec.supDt}
+                            label={(i) => fmtDT(sec.supDt[i] ?? '')}
                             xs={sec.supXs}
                             dotY={(i) => 152 - (sec.supDemandA[i] / sec.supYmax) * 140}
+                            onBrush={sec.canZoom ? (x0, x1) => setAreaZoom(sec.key, [sec.tOfX(x0), sec.tOfX(x1)]) : undefined}
+                            brushLabel={(x0, x1) => `${fmtEpoch(sec.tOfX(x0))} → ${fmtEpoch(sec.tOfX(x1))}`}
+                            onReset={() => clearZoom(sec.key)}
                             tip={(i) => (
                               <>
                                 <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[i]).toLocaleString('en-US')}</span>
@@ -1277,20 +1411,23 @@ export function MarketDataScreen() {
                               </>
                             )}
                           >
-                            <polygon points={sec.mix1} fill="#2A9D8F" fillOpacity="0.78"></polygon>
-                            <polygon points={sec.mix2} fill="#4A6FA5" fillOpacity="0.72"></polygon>
-                            <polygon points={sec.mix3} fill="#E9C46A" fillOpacity="0.82"></polygon>
-                            {sec.mix4 ? <polygon points={sec.mix4} fill="#9AA5B5" fillOpacity="0.6"></polygon> : null}
-                            <g style={s('color:var(--tx)')}><polyline points={sec.demand} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline></g>
-                          </ChartHover>
+                            {sec.mix1.map((p, pi) => (<polygon key={'m1' + pi} points={p} fill="#2A9D8F" fillOpacity="0.78"></polygon>))}
+                            {sec.mix2.map((p, pi) => (<polygon key={'m2' + pi} points={p} fill="#4A6FA5" fillOpacity="0.72"></polygon>))}
+                            {sec.mix3.map((p, pi) => (<polygon key={'m3' + pi} points={p} fill="#E9C46A" fillOpacity="0.82"></polygon>))}
+                            {sec.mix4.map((p, pi) => (<polygon key={'m4' + pi} points={p} fill="#9AA5B5" fillOpacity="0.6"></polygon>))}
+                            <g style={s('color:var(--tx)')}>{sec.demand.map((p, pi) => (<polyline key={'d' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline>))}</g>
+                          </ChartFrame>
                           <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
                             <span>{sec.mixAx[0]}</span><span>{sec.mixAx[1]}</span><span>{sec.mixAx[2]}</span>
                           </div>
+                          {sec.supStale ? (
+                            <div style={s("font-size:10.5px;color:var(--warnTx);background:var(--warnBg);border-radius:6px;padding:2px 8px;margin-top:6px;display:inline-block;font-feature-settings:'tnum' 1")}>Supply data {sec.supStale} · 供給データ遅延</div>
+                          ) : null}
                           <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar/Wind 太陽光・風力</span>
-                            {sec.mix4 ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
+                            {sec.mix4.length ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Demand 需要</span>
                             <span style={s("margin-left:auto;font-feature-settings:'tnum' 1;color:var(--mut)")}>peak {sec.peakMW} MW</span>
                           </div>
@@ -1300,11 +1437,14 @@ export function MarketDataScreen() {
                             <span style={s('font-size:14px;font-weight:600')}>Price <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>価格</span></span>
                             <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · {sec.granLabel} · max / avg / min · ¥/kWh</span>
                           </div>
-                          <ChartHover
+                          <ChartFrame
                             n={sec.n}
-                            dt={sec.pdt}
+                            label={(i) => fmtDT(sec.pdt[i] ?? '')}
                             xs={sec.pxs}
-                            dotY={(i) => 150 - ((sec.pavg[i] - sec.plo) / (sec.phi - sec.plo)) * 135}
+                            dotY={sec.pDotY}
+                            onBrush={sec.canZoom ? (x0, x1) => setAreaZoom(sec.key, [sec.tOfX(x0), sec.tOfX(x1)]) : undefined}
+                            brushLabel={(x0, x1) => `${fmtEpoch(sec.tOfX(x0))} → ${fmtEpoch(sec.tOfX(x1))}`}
+                            onReset={() => clearZoom(sec.key)}
                             tip={(i) => (
                               <>
                                 <span style={s('color:#E24B4A')}>max ¥{sec.pmax[i].toFixed(2)}</span>
@@ -1315,25 +1455,109 @@ export function MarketDataScreen() {
                               </>
                             )}
                           >
-                            <polygon points={sec.band} fill="#00A5CF" fillOpacity="0.10"></polygon>
-                            <polyline points={sec.pMax} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>
-                            <g style={s('color:var(--tx)')}><polyline points={sec.pAvg} fill="none" stroke="currentColor" strokeWidth="1.8"></polyline></g>
-                            <polyline points={sec.pMin} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>
-                            {compare && sec.pCmp ? (
-                              <polyline points={sec.pCmp} fill="none" stroke="var(--mut)" strokeWidth="1.5" strokeDasharray="4 3" strokeOpacity="0.85"></polyline>
-                            ) : null}
-                          </ChartHover>
+                            {sec.band.map((p, pi) => (<polygon key={'b' + pi} points={p} fill="#00A5CF" fillOpacity="0.10"></polygon>))}
+                            {sec.pMax.map((p, pi) => (<polyline key={'x' + pi} points={p} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>))}
+                            <g style={s('color:var(--tx)')}>{sec.pAvg.map((p, pi) => (<polyline key={'a' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="1.8"></polyline>))}</g>
+                            {sec.pMin.map((p, pi) => (<polyline key={'i' + pi} points={p} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>))}
+                            {compare
+                              ? sec.pCmp.map((p, pi) => (<polyline key={'c' + pi} points={p} fill="none" stroke="var(--mut)" strokeWidth="1.5" strokeDasharray="4 3" strokeOpacity="0.85"></polyline>))
+                              : null}
+                          </ChartFrame>
                           <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
                             <span>{sec.priceAx[0]}</span><span>{sec.priceAx[1]}</span><span>{sec.priceAx[2]}</span>
                           </div>
+                          {sec.priceStale ? (
+                            <div style={s("font-size:10.5px;color:var(--warnTx);background:var(--warnBg);border-radius:6px;padding:2px 8px;margin-top:6px;display:inline-block;font-feature-settings:'tnum' 1")}>Price data {sec.priceStale} · 価格データ遅延</div>
+                          ) : null}
                           <div style={s("display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap;font-feature-settings:'tnum' 1")}>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #00A5CF')}></span>Min ¥{sec.vMin}</span>
-                            {compare && sec.pCmp ? (
+                            {compare && sec.pCmp.length ? (
                               <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px dashed var(--mut)')}></span>{L === 'ja' ? '前期間 avg' : 'Prev period avg'}</span>
                             ) : null}
                           </div>
+                        </div>
+                      </div>
+                    )}
+                    {sec.open && sec.expanded && (
+                      <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px;box-shadow:var(--sh1)')}>
+                        <div style={s('display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap')}>
+                          <span style={s('font-size:14px;font-weight:600')}>Generation mix &amp; price <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>電源構成と価格</span></span>
+                          <span style={s('font-size:11px;color:var(--mut)')}>{sec.rangeLabel} · {sec.granLabel} · MW (left) · ¥/kWh (right) · drag to zoom · ドラッグで範囲選択</span>
+                        </div>
+                        <div style={s('display:flex;align-items:stretch;gap:8px;margin-top:2px')}>
+                          <div style={s("display:flex;flex-direction:column;justify-content:space-between;width:52px;flex-shrink:0;padding:12px 0 14px;text-align:right;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            {sec.mwTicks.map((t, ti) => (<span key={ti}>{t}</span>))}
+                          </div>
+                          <div style={s('flex:1;min-width:0')}>
+                            <ChartFrame
+                              n={sec.cmbN}
+                              height={sec.expH}
+                              cssHeight={360}
+                              label={(i) => fmtDT(sec.cmbDt[i] ?? '')}
+                              xs={sec.cmbXs}
+                              dotY={sec.expDotY}
+                              onBrush={sec.canZoom ? (x0, x1) => setAreaZoom(sec.key, [sec.tOfX(x0), sec.tOfX(x1)]) : undefined}
+                              brushLabel={(x0, x1) => `${fmtEpoch(sec.tOfX(x0))} → ${fmtEpoch(sec.tOfX(x1))}`}
+                              onReset={() => clearZoom(sec.key)}
+                              tip={(i) => {
+                                const si = sec.cmbSupIdx[i]
+                                const pi2 = sec.cmbPriceIdx[i]
+                                return (
+                                  <>
+                                    {si >= 0 && sec.supDemandA[si] != null ? (
+                                      <>
+                                        <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[si]).toLocaleString('en-US')}</span>
+                                        {' · '}
+                                        <span style={s('color:#4A6FA5')}>therm {Math.round(sec.supThermA[si]).toLocaleString('en-US')}</span>
+                                        {' · '}
+                                        <span style={s('color:#C99A2E')}>sol/wnd {Math.round(sec.supSolarA[si]).toLocaleString('en-US')}</span>
+                                        {' · '}
+                                        <span>dem {Math.round(sec.supDemandA[si]).toLocaleString('en-US')} MW</span>
+                                      </>
+                                    ) : null}
+                                    {si >= 0 && pi2 >= 0 && sec.pavg[pi2] != null ? ' │ ' : null}
+                                    {pi2 >= 0 && sec.pavg[pi2] != null ? (
+                                      <>
+                                        <span style={s('color:#E24B4A')}>max ¥{sec.pmax[pi2].toFixed(2)}</span>
+                                        {' · '}
+                                        <span>avg ¥{sec.pavg[pi2].toFixed(2)}</span>
+                                        {' · '}
+                                        <span style={s('color:#00A5CF')}>min ¥{sec.pmin[pi2].toFixed(2)}</span>
+                                      </>
+                                    ) : null}
+                                  </>
+                                )
+                              }}
+                            >
+                              {sec.expMix1.map((p, pi) => (<polygon key={'em1' + pi} points={p} fill="#2A9D8F" fillOpacity="0.55"></polygon>))}
+                              {sec.expMix2.map((p, pi) => (<polygon key={'em2' + pi} points={p} fill="#4A6FA5" fillOpacity="0.5"></polygon>))}
+                              {sec.expMix3.map((p, pi) => (<polygon key={'em3' + pi} points={p} fill="#E9C46A" fillOpacity="0.6"></polygon>))}
+                              {sec.expMix4.map((p, pi) => (<polygon key={'em4' + pi} points={p} fill="#9AA5B5" fillOpacity="0.42"></polygon>))}
+                              <g style={s('color:var(--tx2)')}>{sec.expDemand.map((p, pi) => (<polyline key={'ed' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="1.4" strokeOpacity="0.75"></polyline>))}</g>
+                              {sec.expBand.map((p, pi) => (<polygon key={'eb' + pi} points={p} fill="#00A5CF" fillOpacity="0.10"></polygon>))}
+                              {sec.expPMax.map((p, pi) => (<polyline key={'ex' + pi} points={p} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>))}
+                              <g style={s('color:var(--tx)')}>{sec.expPAvg.map((p, pi) => (<polyline key={'ea' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="2"></polyline>))}</g>
+                              {sec.expPMin.map((p, pi) => (<polyline key={'ei' + pi} points={p} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>))}
+                            </ChartFrame>
+                            <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                              <span>{sec.priceAx[0]}</span><span>{sec.priceAx[1]}</span><span>{sec.priceAx[2]}</span>
+                            </div>
+                          </div>
+                          <div style={s("display:flex;flex-direction:column;justify-content:space-between;width:46px;flex-shrink:0;padding:12px 0 14px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
+                            {sec.yenTicks.map((t, ti) => (<span key={ti}>¥{t}</span>))}
+                          </div>
+                        </div>
+                        <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar/Wind 太陽光・風力</span>
+                          {sec.expMix4.length ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx2)')}></span>Demand 需要 (MW)</span>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
+                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #00A5CF')}></span>Min ¥{sec.vMin}</span>
                         </div>
                       </div>
                     )}

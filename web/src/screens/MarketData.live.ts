@@ -80,6 +80,10 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
           const price = snap.price
           const dsrc = (daily ?? snap).price
           const sup = snap.supply
+          // Individual fuel columns fall back to 0 so one missing fuel doesn't void
+          // a row, but `area_demand_mw` is read with `nn` below: exports pad the
+          // tail with all-null rows, and coercing those to 0 drew a demand line
+          // flat along the axis instead of ending the series.
           const g = (r: SupplyRecord, k: keyof SupplyRecord): number => {
             const v = r[k]
             return typeof v === 'number' && Number.isFinite(v) ? v : 0
@@ -99,7 +103,7 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
             supBase: rev(sup.map((r) => g(r, 'nuclear') + g(r, 'hydro') + g(r, 'geothermal') + g(r, 'biomass'))),
             supTherm: rev(sup.map((r) => g(r, 'coal') + g(r, 'lng') + g(r, 'oil') + g(r, 'thermal_other'))),
             supSolar: rev(sup.map((r) => g(r, 'solar_actual') + g(r, 'wind_actual'))),
-            supDemand: rev(sup.map((r) => g(r, 'area_demand_mw'))),
+            supDemand: rev(sup.map((r) => nn(r.area_demand_mw))),
             supDt: rev(sup.map((r) => r.datetime)),
           }
           return [key, la] as const
@@ -358,13 +362,80 @@ export function useDriversLive(): DriversLive {
   }
 }
 
-// Trailing periods to plot for a given (gran, range) window.
-const PERIODS: Record<Gran, Record<Range, number>> = {
-  Native: { '7D': 7 * 48, '30D': 30 * 48, '60D': 60 * 48, '1Y': 365 * 48 },
-  Daily: { '7D': 7, '30D': 30, '60D': 60, '1Y': 365 },
-  Weekly: { '7D': 2, '30D': 5, '60D': 9, '1Y': 53 },
-  Monthly: { '7D': 1, '30D': 2, '60D': 3, '1Y': 12 },
+// Calendar length of each range chip. This — not a record count — defines the
+// plotted window (see `windowLive`).
+export const RANGE_DAYS: Record<Range, number> = { '7D': 7, '30D': 30, '60D': 60, '1Y': 365 }
+export const DAY_MS = 86_400_000
+
+/** Native (30-min) snapshots are exported for a trailing window only, so a `1Y ·
+ *  Native` request can never be honoured — the charts clamp to this and say so.
+ *  Mirrors `LEVEL_WINDOW_DAYS["Native"]` in `dashboard/export_web.py`. */
+export const NATIVE_EXPORT_DAYS = 90
+
+/** Shortest window that yields enough aggregated buckets to draw a line at each
+ *  granularity (~4 buckets). Without this, `Monthly · 7D` selects at most one
+ *  monthly point and every chart renders blank. */
+const GRAN_MIN_DAYS: Record<Gran, number> = { Native: 0, Daily: 0, Weekly: 28, Monthly: 120 }
+
+/** Calendar days actually plottable for (gran, range): `RANGE_DAYS`, capped by the
+ *  Native export window and floored by the granularity's minimum useful span. */
+export function effectiveRangeDays(gran: Gran, range: Range): number {
+  const want = RANGE_DAYS[range]
+  if (gran === 'Native') return Math.min(want, NATIVE_EXPORT_DAYS)
+  return Math.max(want, GRAN_MIN_DAYS[gran])
 }
+
+/** Bilingual note explaining why the plotted window differs from the range chip,
+ *  or `''` when the request was honoured exactly. */
+export function rangeClampNote(gran: Gran, range: Range): string {
+  const want = RANGE_DAYS[range]
+  const got = effectiveRangeDays(gran, range)
+  if (got === want) return ''
+  if (got < want) return `Native limited to last ${got} days · 30分値は直近${got}日`
+  return `${gran} widened to ${got} days · ${gran}表示は${got}日に拡大`
+}
+
+/** Parse an ISO datetime ("2026-07-11" / "2026-07-11T22:30:00") to epoch ms (UTC).
+ *  Returns NaN for the fixtures' non-ISO day labels ("Jun 12"), which callers use
+ *  to fall back to index spacing. */
+export function parseISO(iso: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(iso)
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) : NaN
+}
+
+/** Newest datetime at which `values` actually has a number. Arrays are
+ *  newest-first, so this walks forward to the first populated row. Exports pad
+ *  both series with all-null rows, so the raw index 0 can be days ahead of the
+ *  real data and would otherwise anchor the chart window on nothing. */
+function newestWithData(dts: string[], values: number[]): number {
+  for (let i = 0; i < dts.length; i++) {
+    if (!Number.isFinite(values[i])) continue
+    const t = parseISO(dts[i])
+    if (Number.isFinite(t)) return t
+  }
+  return NaN
+}
+
+/** Newest datetime carrying data across an area's price and supply series, or
+ *  NaN when neither has any. */
+export function latestT(la: LiveArea): number {
+  const p = newestWithData(la.dt, la.avg)
+  const s = newestWithData(la.supDt, la.supDemand)
+  if (!Number.isFinite(p)) return s
+  if (!Number.isFinite(s)) return p
+  return Math.max(p, s)
+}
+
+/** Newest datetime with a price, for the staleness caption. */
+export function latestPriceT(la: LiveArea): number {
+  return newestWithData(la.dt, la.avg)
+}
+
+/** Newest datetime with a generation mix, for the staleness caption. */
+export function latestSupplyT(la: LiveArea): number {
+  return newestWithData(la.supDt, la.supDemand)
+}
+
 // Plot budget per price line. High enough that Native (30-min) renders a visibly
 // denser, oscillating line than the aggregated levels instead of aliasing into a
 // coarse daily-looking shape when a wide range is downsampled to a single line.
@@ -375,46 +446,57 @@ export interface Windowed {
   max: number[]
   min: number[]
   dt: string[] // raw ISO datetimes aligned to avg/max/min (for hover)
+  t: number[] // epoch ms aligned to dt
   labels: [string, string, string] // start, mid, end
 }
 
+/** Indices (newest-first arrays) whose datetime falls inside [t0, t1], returned
+ *  oldest -> newest and downsampled to <= MAX_POINTS.
+ *
+ *  Windowing by *time* rather than by record count is the fix for issue #22: the
+ *  real series have gaps, so "the newest 336 rows" spanned ~38 days for a 7D chip
+ *  and the chart drew its data as a sliver on a wildly oversized axis. */
+function indicesInWindow(dts: string[], t0: number, t1: number): number[] {
+  const hits: number[] = []
+  // Newest-first: walk from index 0 and stop once we fall out of the window.
+  for (let i = 0; i < dts.length; i++) {
+    const t = parseISO(dts[i])
+    if (!Number.isFinite(t)) continue
+    if (t > t1) continue
+    if (t < t0) break
+    hits.push(i)
+  }
+  hits.reverse() // oldest -> newest (plot order)
+  if (hits.length <= MAX_POINTS) return hits
+  const step = Math.ceil(hits.length / MAX_POINTS)
+  const out: number[] = []
+  for (let k = 0; k < hits.length; k += step) out.push(hits[k])
+  // Always keep the newest point so the line reaches the right edge of its data.
+  const last = hits[hits.length - 1]
+  if (out[out.length - 1] !== last) out.push(last)
+  return out
+}
+
 /**
- * Slice the newest K periods for (gran,range), downsample to <= MAX_POINTS, and
- * return in plot order (oldest -> newest). Rows with a non-finite avg are dropped
- * (real data has gaps; fixtures don't), keeping avg/max/min/dt aligned.
+ * Slice the price series to the time window `[t0, t1]` (epoch ms), downsample to
+ * <= MAX_POINTS and return in plot order (oldest -> newest). Rows with a
+ * non-finite avg are dropped (real data has gaps; fixtures don't), keeping
+ * avg/max/min/dt aligned.
  */
-export function windowLive(la: LiveArea, gran: Gran, range: Range): Windowed {
-  const want = Math.min(PERIODS[gran][range], la.avg.length)
-  const step = Math.max(1, Math.ceil(want / MAX_POINTS))
-  const order: number[] = []
-  for (let i = want - 1; i >= 0; i -= step) order.push(i) // oldest -> newest (arrays are newest-first)
-  const keep = order.filter((i) => Number.isFinite(la.avg[i]))
+export function windowLive(la: LiveArea, t0: number, t1: number): Windowed {
+  const keep = indicesInWindow(la.dt, t0, t1).filter((i) => Number.isFinite(la.avg[i]))
   const avg = keep.map((i) => la.avg[i])
   const max = keep.map((i) => (Number.isFinite(la.max[i]) ? la.max[i] : la.avg[i]))
   const min = keep.map((i) => (Number.isFinite(la.min[i]) ? la.min[i] : la.avg[i]))
   const dts = keep.map((i) => la.dt[i])
+  const t = keep.map((i) => parseISO(la.dt[i]))
   const n = dts.length
   const labels: [string, string, string] = [
     n ? fmtDate(dts[0]) : '',
     n ? fmtDate(dts[Math.floor((n - 1) / 2)]) : '',
     n ? fmtDate(dts[n - 1]) : '',
   ]
-  return { avg, max, min, dt: dts, labels }
-}
-
-/**
- * The window immediately *before* windowLive's (period-over-period), same length
- * and downsampling, returned as avg only (oldest -> newest) for the Compare
- * overlay. Empty when there is no prior data. The caller aligns it slot-for-slot
- * to the current window by index, so it reads as "same position, previous period".
- */
-export function windowLivePrev(la: LiveArea, gran: Gran, range: Range): number[] {
-  const want = Math.min(PERIODS[gran][range], la.avg.length)
-  const step = Math.max(1, Math.ceil(want / MAX_POINTS))
-  const order: number[] = []
-  for (let i = 2 * want - 1; i >= want; i -= step) order.push(i) // oldest -> newest of the prior block
-  const keep = order.filter((i) => i < la.avg.length && Number.isFinite(la.avg[i]))
-  return keep.map((i) => la.avg[i])
+  return { avg, max, min, dt: dts, t, labels }
 }
 
 export interface SupplyWindow {
@@ -424,28 +506,31 @@ export interface SupplyWindow {
   other: number[] // residual to demand (net imports + storage), >= 0
   demand: number[]
   dt: string[] // raw ISO datetimes aligned to the windowed arrays (for hover)
+  t: number[] // epoch ms aligned to dt
   ymax: number
 }
 
-/** Window the grouped generation mix for (gran, range), oldest→newest, on the same
- * budget as the price line. `other` fills the gap up to demand so the 4 bands stack
- * to area demand (imports/storage); 0 when domestic generation already exceeds it. */
-export function windowSupply(la: LiveArea, gran: Gran, range: Range): SupplyWindow {
-  const len = la.supDemand.length
-  const want = Math.min(PERIODS[gran][range], len)
-  const step = Math.max(1, Math.ceil(want / MAX_POINTS))
-  const order: number[] = []
-  for (let i = want - 1; i >= 0; i -= step) order.push(i)
+/** Window the grouped generation mix to `[t0, t1]` (epoch ms), oldest→newest, on
+ * the same budget as the price line. `other` fills the gap up to demand so the 4
+ * bands stack to area demand (imports/storage); 0 when domestic generation
+ * already exceeds it. */
+export function windowSupply(la: LiveArea, t0: number, t1: number): SupplyWindow {
+  // Exports pad the series with rows whose values are all null (the TSO feed lags
+  // behind the timestamp grid). Treating those as 0 drew a demand line flat along
+  // the axis — i.e. "demand fell to zero" — so drop them and let the gap
+  // segmentation leave honest whitespace instead.
+  const order = indicesInWindow(la.supDt, t0, t1).filter((i) => Number.isFinite(la.supDemand[i]))
   const pick = (arr: number[]) => order.map((i) => (Number.isFinite(arr[i]) ? arr[i] : 0))
   const baseload = pick(la.supBase)
   const thermal = pick(la.supTherm)
   const solar = pick(la.supSolar)
   const demand = pick(la.supDemand)
   const dt = order.map((i) => la.supDt[i])
+  const t = order.map((i) => parseISO(la.supDt[i]))
   const other = demand.map((d, i) => Math.max(0, d - baseload[i] - thermal[i] - solar[i]))
   let ymax = 1
   for (let i = 0; i < demand.length; i++) {
     ymax = Math.max(ymax, demand[i], baseload[i] + thermal[i] + solar[i] + other[i])
   }
-  return { baseload, thermal, solar, other, demand, dt, ymax: ymax * 1.08 }
+  return { baseload, thermal, solar, other, demand, dt, t, ymax: ymax * 1.08 }
 }
