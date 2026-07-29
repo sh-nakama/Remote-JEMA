@@ -130,6 +130,12 @@ export interface AppState {
   isFollowing: (key: string) => boolean
   toggleFollow: (key: string) => void
 
+  /** Archived committees (persisted overrides). Committees whose last meeting was
+   * in 2025 or earlier are archived out of the Explorer by default; an explicit
+   * entry here (true/false) wins over that default, so the user can restore an
+   * archived committee or re-archive an active one. */
+  archiveOverrides: Record<string, boolean>
+  setArchived: (key: string, archived: boolean) => void
   /** User settings (persisted). */
   homeScreen: Screen
   setHomeScreen: (s: Screen) => void
@@ -231,6 +237,9 @@ export function AppProvider({
       return DEFAULT_FOLLOW
     }
   })
+  const [archiveOverrides, setArchiveOverrides] = useState<Record<string, boolean>>(() =>
+    readJson<Record<string, boolean>>('jema-archive-committees', {}),
+  )
   const [homeScreen, setHomeScreenS] = useState<Screen>(homeInit)
   const [defaultGran, setDefaultGranS] = useState<Level>(() => {
     const g = read('jema-gran') as Level | null
@@ -323,6 +332,14 @@ export function AppProvider({
     setFollowed((prev) => {
       const next = prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
       write('jema-follow-committees', JSON.stringify(next))
+      return next
+    })
+  }, [])
+
+  const setArchived = useCallback((key: string, archived: boolean) => {
+    setArchiveOverrides((prev) => {
+      const next = { ...prev, [key]: archived }
+      write('jema-archive-committees', JSON.stringify(next))
       return next
     })
   }, [])
@@ -511,6 +528,8 @@ export function AppProvider({
       followed,
       isFollowing,
       toggleFollow,
+      archiveOverrides,
+      setArchived,
       homeScreen,
       setHomeScreen,
       defaultGran,
@@ -550,6 +569,8 @@ export function AppProvider({
       followed,
       isFollowing,
       toggleFollow,
+      archiveOverrides,
+      setArchived,
       homeScreen,
       setHomeScreen,
       defaultGran,

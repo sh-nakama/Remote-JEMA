@@ -160,6 +160,24 @@ hatch for committees the org indexes don't list.
 summary* action flags it so the summarisation pipeline processes it first on the
 next run (user-requested meetings jump the queue).
 
+**Summarise all vs. Resume.** The **Summarise ⚿** controls in Manage both run the
+summarisation pipeline and both need NotebookLM auth (`notebooklm login`), but they
+target different work:
+
+- **Summarise all** starts *new* work — it summarises **pending** (not-yet-done)
+  meetings **breadth-first** (the newest pending meeting of each tracked committee,
+  in priority order, rather than draining one committee's backlog), capped at **8
+  meetings** per run as a rate/cost guard, then refreshes each touched committee's
+  synthesis.
+- **Resume** only drains meetings left **mid-flight** — stuck in `downloading` /
+  `ingesting` / `generating` after a previous run crashed, was interrupted, or hit a
+  rate limit. Because the pipeline commits each state transition *before* the next
+  network call, Resume picks up exactly where it left off instead of restarting a
+  meeting. If nothing is stuck partway, Resume has nothing to do.
+
+Rule of thumb: **Summarise all** to make forward progress on the backlog; **Resume**
+to finish an interrupted or rate-limited run before starting more.
+
 **Search.** The feed search covers meeting titles, committees, briefings, and
 digests — including untracked committees. (Full-text search inside the source PDFs
 is proposed, not yet enabled.)

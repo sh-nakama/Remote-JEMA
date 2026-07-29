@@ -77,7 +77,7 @@ function renderMd(md: string): ReactNode[] {
 }
 
 export function PolicyDeepDiveScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, interactive, trackJob } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, isFollowing, toggleFollow, archiveOverrides, setArchived, interactive, trackJob } = useApp()
   const dark = theme === 'dark'
   const L: 'en' | 'ja' = lang
 
@@ -101,9 +101,13 @@ export function PolicyDeepDiveScreen() {
   // Committee explorer sort: default (priority) order, or reorder by the most
   // recently updated committee (max meeting updatedAt).
   const [comSort, setComSort] = useState<'priority' | 'recent'>('priority')
+  // "Archived" committees group in the Explorer — collapsed by default.
+  const [archivedExpanded, setArchivedExpanded] = useState(false)
   // "Newly summarised" banner: collapsed shows the 3 most-recent cards; "View all"
   // expands to the full list (most-recent-first).
   const [showAllNew, setShowAllNew] = useState(false)
+  // Notifications popover (bell): live recent policy activity, newest-first.
+  const [showNotif, setShowNotif] = useState(false)
 
   // showAudioCard default prop = true
   const showAudioCard = true
@@ -218,7 +222,7 @@ export function PolicyDeepDiveScreen() {
   const tDoc = () => toast('Opens the original PDF from METI · 元資料PDFを開きます')
   const tRetry = () => toast('Re-queued with high-accuracy OCR — will run on next catch-up · 高精度OCRで再実行キューに追加')
   const tExpand = () => toast('Nav rail auto-collapses on this screen to fit three panes · 3ペイン表示のためナビは自動折りたたみ')
-  const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
+  const toggleNotif = () => setShowNotif((v) => !v)
   const tNotifyMe = () => toast('Alert armed — you will be notified when the digest is ready · 要約完了時に通知します')
 
   // ---- computed (mirrors renderVals) ----
@@ -289,9 +293,29 @@ export function PolicyDeepDiveScreen() {
   }
   const isRecentCom = (key: string): boolean => key in comRecency && nowMs - comRecency[key] <= RECENT_MS
   const orgs: Array<'METI' | 'OCCTO' | 'EGC'> = ['METI', 'OCCTO', 'EGC']
+  // ---- archive ----
+  // Declutter the Explorer: committees whose last meeting was in 2025 or earlier
+  // (i.e. nothing so far in 2026) are archived into a collapsed section by
+  // default. A per-committee override in localStorage (archiveOverrides) wins over
+  // that default, so the user can restore an archived committee or archive an
+  // active one. `null` last-meeting year (unknown date) is treated as active.
+  const ARCHIVE_BEFORE_YEAR = 2026
+  const lastMeetingYear = (c: (typeof committees)[number]): number | null => {
+    const iso = c.lastDate
+    if (!iso) return null
+    const t = Date.parse(iso.length <= 10 ? iso + 'T00:00:00Z' : iso)
+    return Number.isNaN(t) ? null : new Date(t).getUTCFullYear()
+  }
+  const archivedByDefault = (c: (typeof committees)[number]): boolean => {
+    const y = lastMeetingYear(c)
+    return y != null && y < ARCHIVE_BEFORE_YEAR
+  }
+  const isArchived = (c: (typeof committees)[number]): boolean =>
+    archiveOverrides[c.key] ?? archivedByDefault(c)
   const mapCom = (c: (typeof committees)[number]) => {
     const on = selCom === c.key
     const following = isFol(c)
+    const archived = isArchived(c)
     let nx = ''
     if (c.nextDate) {
       const dd = dUntil(c.nextDate, dayAnchor)
@@ -306,6 +330,8 @@ export function PolicyDeepDiveScreen() {
       n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
       next: nx, hasNext: !!c.nextDate,
       following, tracked: c.tracked !== false, isRecent: isRecentCom(c.key),
+      archived,
+      archClick: () => setArchived(c.key, !archived),
       s: {
         padding: '7px 9px', borderRadius: 10, cursor: 'pointer',
         background: on ? 'var(--acTint)' : 'transparent',
@@ -324,7 +350,7 @@ export function PolicyDeepDiveScreen() {
         // Flat, cross-org list newest-first so the most recently updated
         // committees surface at the top regardless of source.
         const items = committees
-          .filter((c) => (!fOnly || isFol(c)) && matchComQ(c))
+          .filter((c) => !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c))
           .sort((a, b) => (comRecency[b.key] ?? -Infinity) - (comRecency[a.key] ?? -Infinity))
           .map(mapCom)
         return items.length
@@ -337,9 +363,9 @@ export function PolicyDeepDiveScreen() {
       })()
     : orgs.map((org) => {
         const items = committees
-          .filter((c) => c.org === org && (!fOnly || isFol(c)) && matchComQ(c))
+          .filter((c) => c.org === org && !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c))
           .map(mapCom)
-        const total = committees.filter((c) => c.org === org).length
+        const total = committees.filter((c) => c.org === org && !isArchived(c)).length
         return {
           // With an active search, show how many of the group's committees match
           // ("METI · 1/12") instead of the unfiltered total.
@@ -348,6 +374,14 @@ export function PolicyDeepDiveScreen() {
           items,
         }
       }).filter((g) => g.items.length)
+
+  // Archived committees (last met in 2025 or earlier, unless overridden). Kept in
+  // a separate collapsed section; searchable but not subject to the Followed-only
+  // filter so they can always be found and restored. Newest last-meeting first.
+  const archivedItems = committees
+    .filter((c) => isArchived(c) && matchComQ(c))
+    .sort((a, b) => (lastMeetingYear(b) ?? 0) - (lastMeetingYear(a) ?? 0))
+    .map(mapCom)
 
   const allOn = selCom === 'all'
   const allRowS: CSS = {
@@ -561,6 +595,35 @@ export function PolicyDeepDiveScreen() {
     click: () => selectMeeting(m.key),
   }))
 
+  // ---- live notifications (bell popover) ----
+  // Recent policy activity straight from the loaded snapshot: meetings newly
+  // summarised (reached `done`) and newly detected ones still awaiting a digest,
+  // each within the RECENT_DAYS window, newest-first. Clicking one opens it.
+  const orgOf = (m: Meeting): string => m.org || ''
+  const numTag = (m: Meeting): string =>
+    m.num ? (L === 'ja' ? `第${m.num}回 · ` : `No. ${m.num} · `) : ''
+  const notifDone = newlyDone.slice(0, 5).map((m) => ({
+    key: m.key,
+    title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
+    meta: numTag(m) + fmtDay(m.updatedAt) + (orgOf(m) ? ' · ' + orgOf(m) : ''),
+  }))
+  const notifNew = meetings
+    .filter(
+      (m) =>
+        m.status !== 'done' &&
+        m.status !== 'error' &&
+        m.status !== 'scheduled' &&
+        nowMs - tsOf(m.updatedAt) <= RECENT_MS,
+    )
+    .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))
+    .slice(0, 5)
+    .map((m) => ({
+      key: m.key,
+      title: L === 'ja' ? m.ja : m.en,
+      meta: numTag(m) + (m.dateReal && m.date ? m.date : fmtDay(m.updatedAt)) + (orgOf(m) ? ' · ' + orgOf(m) : ''),
+    }))
+  const notifCount = notifDone.length + notifNew.length
+
   const langJaS = segBase(L === 'ja')
   const langEnS = segBase(L === 'en')
   const chipCommittee = chipBase(selCom !== 'all')
@@ -569,6 +632,50 @@ export function PolicyDeepDiveScreen() {
   const covTS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'tracked' ? 'var(--ac)' : 'transparent', color: coverage === 'tracked' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
   const covAS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'all' ? 'var(--ac)' : 'transparent', color: coverage === 'all' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
   const comSortS = (on: boolean): CSS => ({ padding: '2px 10px', borderRadius: 999, fontSize: 10.5, fontWeight: 600, cursor: 'pointer', background: on ? 'var(--ac)' : 'transparent', color: on ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' })
+
+  // One committee row in the Explorer — shared by the org/recent groups and the
+  // Archived section (which renders the same rows with their archive box ticked).
+  const renderComRow = (c: ReturnType<typeof mapCom>) => (
+    <div key={c.key} style={c.s} onClick={c.click}>
+      <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
+        {c.isRecent && (
+          <span title={L === 'ja' ? '最近更新（過去7日以内に要約・更新）' : 'Recently updated (summarised/updated in the last 7 days)'} style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);flex-shrink:0;box-shadow:0 0 0 3px var(--acTint)')}></span>
+        )}
+        <span style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</span>
+      </div>
+      <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
+      <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
+        <span style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
+          <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
+  ? (L === 'ja' ? 'クリックでフォロー解除（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to unfollow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')
+  : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
+          {!c.tracked && (
+            <span style={s('font-size:9px;font-weight:700;letter-spacing:.04em;border:1px dashed var(--fnt2);color:var(--mut);border-radius:999px;padding:0 6px;white-space:nowrap;flex-shrink:0')} title={L === 'ja' ? '未追跡 — 会合は「保留」で表示。要約するには「管理」で追跡' : 'Untracked — its meetings show as Pending; Track it in Manage to summarise'}>{L === 'ja' ? '未追跡' : 'UNTRACKED'}</span>
+          )}
+        </span>
+        <span style={s('display:flex;align-items:center;gap:7px;flex-shrink:0')}>
+          <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
+          <span
+            role="checkbox"
+            aria-checked={c.archived}
+            onClick={(e) => { e.stopPropagation(); c.archClick() }}
+            title={c.archived
+              ? (L === 'ja' ? 'アーカイブ解除 — 一覧に戻す' : 'Restore — bring back into the committees list')
+              : (L === 'ja' ? 'アーカイブ — アーカイブ欄に移動' : 'Archive — move to the Archived section')}
+            style={c.archived
+              ? s('width:15px;height:15px;border-radius:4px;background:var(--ac);color:#FFFFFF;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:10px;font-weight:700;flex-shrink:0')
+              : s('width:15px;height:15px;border-radius:4px;border:1px solid var(--bd2);color:var(--mut);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0')}
+          >{c.archived ? '✓' : ''}</span>
+        </span>
+      </div>
+      {c.hasNext && (
+        <div style={s("display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--up);margin-top:4px;font-feature-settings:'tnum' 1")}>
+          <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`} />
+          <span style={s('white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.next}</span>
+        </div>
+      )}
+    </div>
+  )
 
   return (
     <>
@@ -624,9 +731,11 @@ export function PolicyDeepDiveScreen() {
           <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={() => openOverlay('guide')} title="User guide · 使い方" aria-label="User guide">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>`} />
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            {notifCount > 0 && (
+              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
             <span style={langJaS} onClick={() => setLang('ja')}>日本語</span>
@@ -639,6 +748,59 @@ export function PolicyDeepDiveScreen() {
               <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
             </div>
           </div>
+
+          {/* Notifications popover — live recent policy activity from the snapshot */}
+          {showNotif && (
+            <div style={s('position:absolute;right:24px;top:66px;width:360px;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);padding:16px;z-index:60')}>
+              <div style={s('display:flex;align-items:center;justify-content:space-between')}>
+                <div style={s('font-size:14px;font-weight:600')}>Notifications <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>通知</span></div>
+                <span style={s('font-size:11px;color:var(--mut)')}>{L === 'ja' ? `過去${RECENT_DAYS}日` : `last ${RECENT_DAYS}d`}</span>
+              </div>
+              {notifCount === 0 ? (
+                <div style={s('font-size:12.5px;color:var(--mut);padding:18px 4px;text-align:center')}>{L === 'ja' ? '新着はありません — 最新の状態です' : 'You’re all caught up · no recent activity'}</div>
+              ) : (
+                <>
+                  {notifNew.length > 0 && (
+                    <>
+                      <div style={s('font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--mut);margin:12px 0 6px')}>{L === 'ja' ? '新規の会合 · 要約待ち' : 'NEW MEETINGS · awaiting digest'}</div>
+                      <div style={s('display:flex;flex-direction:column;gap:2px')}>
+                        {notifNew.map((n) => (
+                          <Hoverable key={n.key} base="display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={() => { selectMeeting(n.key); setShowNotif(false) }}>
+                            <span style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);margin-top:6px;flex-shrink:0')}></span>
+                            <div style={s('flex:1;min-width:0')}>
+                              <div style={s('font-size:12.5px;font-weight:500')}>{n.title}</div>
+                              <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{n.meta}</div>
+                            </div>
+                            <span style={s('font-size:10px;font-weight:600;background:var(--acTint);color:var(--acT);border-radius:6px;padding:1px 6px;flex-shrink:0')}>{L === 'ja' ? '新規' : 'New'}</span>
+                          </Hoverable>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {notifDone.length > 0 && (
+                    <>
+                      <div style={s('font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--mut);margin:12px 0 6px')}>{L === 'ja' ? '新着要約' : 'NEWLY SUMMARISED'}</div>
+                      <div style={s('display:flex;flex-direction:column;gap:2px')}>
+                        {notifDone.map((n) => (
+                          <Hoverable key={n.key} base="display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={() => { selectMeeting(n.key); setShowNotif(false) }}>
+                            <span style={s('width:16px;height:16px;border-radius:999px;background:var(--acTint);color:var(--acT);display:flex;align-items:center;justify-content:center;margin-top:1px;flex-shrink:0;font-size:10px;font-weight:700')}>✓</span>
+                            <div style={s('flex:1;min-width:0')}>
+                              <div style={s('font-size:12.5px;font-weight:500')}>{n.title}</div>
+                              <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{n.meta}</div>
+                            </div>
+                          </Hoverable>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+              <div style={s('display:flex;justify-content:space-between;border-top:1px solid var(--dv);margin-top:12px;padding-top:10px')}>
+                <Hoverable as="span" base="font-size:12px;color:var(--tx2);cursor:pointer" hover="color:var(--acT)" onClick={() => setShowNotif(false)}>{L === 'ja' ? '閉じる' : 'Dismiss'}</Hoverable>
+                <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} onClick={() => { selAll(); setShowNotif(false) }}>{L === 'ja' ? 'すべて表示 →' : 'View all →'}</span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Scrollable content */}
@@ -826,37 +988,28 @@ export function PolicyDeepDiveScreen() {
                   <div key={gi}>
                     <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 5px;display:flex;align-items:center;gap:6px')}><span style={g.dot}></span>{g.name}</div>
                     <div style={s('display:flex;flex-direction:column;gap:3px')}>
-                      {g.items.map((c) => (
-                        <div key={c.key} style={c.s} onClick={c.click}>
-                          <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
-                            {c.isRecent && (
-                              <span title={L === 'ja' ? '最近更新（過去7日以内に要約・更新）' : 'Recently updated (summarised/updated in the last 7 days)'} style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);flex-shrink:0;box-shadow:0 0 0 3px var(--acTint)')}></span>
-                            )}
-                            <span style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n1}</span>
-                          </div>
-                          <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
-                          <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
-                            <span style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
-                              <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
-  ? (L === 'ja' ? 'クリックでフォロー解除（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to unfollow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')
-  : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
-                              {!c.tracked && (
-                                <span style={s('font-size:9px;font-weight:700;letter-spacing:.04em;border:1px dashed var(--fnt2);color:var(--mut);border-radius:999px;padding:0 6px;white-space:nowrap;flex-shrink:0')} title={L === 'ja' ? '未追跡 — 会合は「保留」で表示。要約するには「管理」で追跡' : 'Untracked — its meetings show as Pending; Track it in Manage to summarise'}>{L === 'ja' ? '未追跡' : 'UNTRACKED'}</span>
-                              )}
-                            </span>
-                            <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
-                          </div>
-                          {c.hasNext && (
-                            <div style={s("display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:600;color:var(--up);margin-top:4px;font-feature-settings:'tnum' 1")}>
-                              <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;flex-shrink:0"><rect x="3" y="4" width="18" height="18" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>`} />
-                              <span style={s('white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.next}</span>
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                      {g.items.map(renderComRow)}
                     </div>
                   </div>
                 ))}
+                {archivedItems.length > 0 && (
+                  <div style={s('margin-top:12px')}>
+                    <Hoverable
+                      base="display:flex;align-items:center;gap:7px;width:100%;padding:7px 2px;cursor:pointer;border-radius:8px"
+                      hover="background:var(--hov)"
+                      onClick={() => setArchivedExpanded((v) => !v)}
+                    >
+                      <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;color:var(--mut);flex-shrink:0;transition:transform .15s;transform:rotate(${archivedExpanded ? 90 : 0}deg)"><polyline points="9 18 15 12 9 6"></polyline></svg>`} />
+                      <span style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut)')}>{L === 'ja' ? 'アーカイブ' : 'ARCHIVED'} · {archivedItems.length}</span>
+                      <span style={s('font-size:10px;color:var(--fnt2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{L === 'ja' ? '最終開催 2025年以前' : 'last met in 2025 or earlier'}</span>
+                    </Hoverable>
+                    {archivedExpanded && (
+                      <div style={s('display:flex;flex-direction:column;gap:3px;margin-top:4px')}>
+                        {archivedItems.map(renderComRow)}
+                      </div>
+                    )}
+                  </div>
+                )}
                 <div style={s('border:1px dashed var(--fnt2);border-radius:12px;padding:9px 11px;margin-top:12px;display:flex;justify-content:space-between;align-items:center')}>
                   <span style={s('font-size:11px;color:var(--mut)')}>Discovered · {discoveredCount} committees<br />未追跡 — 「管理」で追跡</span>
                   <Hoverable as="span" base="font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1)" hover="border-color:var(--ac);color:var(--acT)" onClick={tAdd}>Manage 管理</Hoverable>

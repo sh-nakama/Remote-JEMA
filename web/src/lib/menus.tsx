@@ -468,6 +468,12 @@ const GUIDE: GuideSection[] = [
         ja: '追跡中の委員会では、ペンディングの会合がバイリンガルのダイジェストに要約され、委員会の総括に統合されます。' },
       { en: 'Use Generate summary on a meeting to push it to the front of the queue.',
         ja: '会合の「要約を生成」で、その会合をキューの先頭に移動できます。' },
+      { en: 'Summarise all ⚿: starts new work — summarises pending meetings breadth-first (the newest of each tracked committee, in priority order), up to 8 per run, then refreshes each committee synthesis.',
+        ja: '全件要約 ⚿: 新規分を開始 — ペンディングの会合を幅優先（各追跡委員会の最新会合を優先順に）で最大8件/回まで要約し、各委員会の総括を更新します。' },
+      { en: 'Resume ⚿: only drains meetings left mid-flight (stuck after an interrupted or rate-limited run) — it continues where it left off, and does nothing if none are stuck.',
+        ja: '再開 ⚿: 途中で止まった会合のみを処理（中断・レート制限後に残ったもの）。中断地点から再開し、対象が無ければ何もしません。' },
+      { en: 'Both Summarise buttons need `notebooklm login`.',
+        ja: 'いずれの要約ボタンも `notebooklm login` が必要です。' },
     ],
   },
   {
