@@ -2,7 +2,11 @@
 import { useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
-import { FreshnessChip } from '../lib/freshness'
+import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { useManifest } from '../lib/data'
+import { NotificationsPopover, useNotifSeen, unreadCount } from '../lib/notifications'
+import type { NotifItem, NotifSection } from '../lib/notifications'
+import { PolicyNavBadge } from '../lib/policyActivity'
 import { segBase } from '../lib/chartkit'
 import { maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
@@ -13,6 +17,7 @@ type View = 'main' | 'ltda'
 export function CapacityAuctionsScreen() {
   const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, refreshData, refreshing } = useApp()
   const [view, setView] = useState<View>('main')
+  const [showNotif, setShowNotif] = useState(false)
 
   const L = lang
   const dark = theme === 'dark'
@@ -27,7 +32,7 @@ export function CapacityAuctionsScreen() {
     refreshData()
     toast('Reloaded latest data · 最新データを再取得しました')
   }
-  const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
+  const tNotif = () => setShowNotif((n) => !n)
   const tExport = () => {
     const rows = maSrc.map((m) => ({
       'Delivery FY': m.fy,
@@ -151,6 +156,98 @@ export function CapacityAuctionsScreen() {
   const hokDelta = deltaChip(numOf(maLast?.hok), numOf(maPrev?.hok))
   const kyuDelta = deltaChip(numOf(maLast?.kyu), numOf(maPrev?.kyu))
 
+  // ---- notifications (bell popover) ----
+  // Capacity data is event-driven (OCCTO publishes once per auction), so the
+  // honest signals are: the newest published main-auction result, the running
+  // LTDA total, and how fresh the export itself is. Only the auction result and
+  // the export carry a real timestamp, so only those can count as unread.
+  const manifest = useManifest()
+  const { seenAt: notifSeenAt, markSeen: notifMarkSeen } = useNotifSeen('jema-notif-seen-capacity')
+
+  /** "Jan 2026" → ms (UTC, 1st of month), or NaN. */
+  const heldTs = (held: string | undefined): number => {
+    const m = /^([A-Za-z]{3})\s+(\d{4})$/.exec((held ?? '').trim())
+    const mi = m ? MONTHS.indexOf(m[1]) : -1
+    return m && mi > 0 ? Date.UTC(Number(m[2]), mi - 1, 1) : NaN
+  }
+
+  const auctionItems: NotifItem[] = []
+  if (maLast) {
+    const held = heldTs(maLast.held)
+    auctionItems.push({
+      key: 'ma:' + maLast.fy,
+      kind: 'done',
+      title:
+        L === 'ja'
+          ? `${maLast.fy} メインオークション約定`
+          : `${maLast.fy} main auction cleared`,
+      meta: [
+        (L === 'ja' ? '全国 ' : 'National ') + maLast.natl + '/kW',
+        maPrev ? hdDelta.txt : null,
+        maLast.proc + (L === 'ja' ? ' 約定' : ' procured'),
+        (L === 'ja' ? '目標達成 ' : '') + maLast.ach + '%' + (L === 'ja' ? '' : ' of target'),
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      badge: L === 'ja' ? '新規' : 'New',
+      ts: Number.isFinite(held) ? held : undefined,
+      onClick: () => {
+        setShowNotif(false)
+        if (maLast.source) window.open(maLast.source, '_blank', 'noopener,noreferrer')
+        else tRow()
+      },
+    })
+  }
+
+  // Running LTDA total across the published rounds — a standing fact, not an
+  // event, so it has no timestamp and never marks the bell unread.
+  const ltdaTotal = ltdaSrc.reduce((n, t) => {
+    const g = Number(String(t.cum).replace(/[^0-9.]/g, ''))
+    return n + (Number.isFinite(g) ? g : 0)
+  }, 0)
+  const ltdaItems: NotifItem[] =
+    ltdaTotal > 0
+      ? [
+          {
+            key: 'ltda:total',
+            kind: 'info',
+            title:
+              L === 'ja'
+                ? `長期脱炭素電源オークション 累計 ${ltdaTotal.toFixed(2)} GW`
+                : `Long-term decarbonisation auction · ${ltdaTotal.toFixed(2)} GW awarded`,
+            meta:
+              L === 'ja'
+                ? `${ltdaSrc.length}技術 · 3ラウンド累計`
+                : `${ltdaSrc.length} technologies · cumulative over 3 rounds`,
+            onClick: () => {
+              setView('ltda')
+              setShowNotif(false)
+            },
+          },
+        ]
+      : []
+
+  const dataItems: NotifItem[] = []
+  const mf = manifest.data
+  if (mf?.generated_at) {
+    const exported = Date.parse(mf.generated_at)
+    dataItems.push({
+      key: 'freshness',
+      kind: 'new',
+      title: L === 'ja' ? 'スナップショットを更新しました' : 'Snapshot refreshed',
+      meta: L === 'ja' ? `書出 ${fmtStamp(mf.generated_at)}` : `exported ${fmtStamp(mf.generated_at)}`,
+      ts: Number.isFinite(exported) ? exported : undefined,
+      onClick: tRefresh,
+    })
+  }
+
+  const notifSections: NotifSection[] = [
+    { key: 'auction', label: L === 'ja' ? '約定結果' : 'AUCTION RESULTS', items: auctionItems },
+    { key: 'ltda', label: L === 'ja' ? '長期脱炭素電源オークション' : 'LONG-TERM DECARBONISATION', items: ltdaItems },
+    { key: 'data', label: L === 'ja' ? 'データ更新' : 'DATA UPDATES', items: dataItems },
+  ]
+  const notifUnread = unreadCount(notifSections, notifSeenAt)
+
   const ltdaRows = ltdaSrc.map((t) => ({
     n1: L === 'ja' ? t.ja : t.en,
     n2: L === 'ja' ? t.en : t.ja,
@@ -237,7 +334,7 @@ export function CapacityAuctionsScreen() {
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={goPolicy}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} />
             <span>Policy Deep Dive</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>3</span>
+            <PolicyNavBadge />
           </Hoverable>
         </div>
 
@@ -253,7 +350,9 @@ export function CapacityAuctionsScreen() {
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNotif}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span>Notifications</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>2</span>
+            {notifUnread > 0 && (
+              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
+            )}
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} />
@@ -303,7 +402,9 @@ export function CapacityAuctionsScreen() {
           </Hoverable>
           <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            {notifUnread > 0 && (
+              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
             <span style={segBase(L === 'ja')} onClick={() => setLang('ja')}>日本語</span>
@@ -316,6 +417,23 @@ export function CapacityAuctionsScreen() {
               <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
             </div>
           </div>
+
+          {/* Notifications — newest auction result, LTDA total, snapshot freshness */}
+          <NotificationsPopover
+            open={showNotif}
+            lang={L}
+            sections={notifSections}
+            seenAt={notifSeenAt}
+            onClose={() => setShowNotif(false)}
+            onMarkRead={notifMarkSeen}
+            action={{
+              label: L === 'ja' ? 'OCCTO 公式ページ →' : 'OCCTO results →',
+              onClick: () => {
+                setShowNotif(false)
+                tRow()
+              },
+            }}
+          />
         </div>
 
         {/* Scrollable content */}

@@ -3,7 +3,11 @@ import { Fragment, useEffect, useMemo, useState, type MouseEvent as ReactMouseEv
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
-import { FreshnessChip } from '../lib/freshness'
+import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { useManifest } from '../lib/data'
+import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
+import type { NotifItem, NotifSection } from '../lib/notifications'
+import { PolicyNavBadge } from '../lib/policyActivity'
 import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate } from '../lib/chartkit'
 import { downloadCsv } from '../lib/download'
 import {
@@ -154,6 +158,8 @@ export function MarketDataScreen() {
   const [compare, setCompare] = useState(false)
   const [expandedLine, setExpandedLine] = useState<string | null>(null)
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null)
+  // Notifications popover (bell).
+  const [showNotif, setShowNotif] = useState(false)
 
   const showHeatmap = true
 
@@ -230,8 +236,7 @@ export function MarketDataScreen() {
   const tLine = (key: string) => setExpandedLine((prev) => (prev === key ? null : key))
   const tSystem = () => toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中')
   const tProduct = (code: string) => setExpandedProduct((prev) => (prev === code ? null : code))
-  const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
-  const tNav = () => toast('Placeholder destination in this prototype · 本プロトタイプ対象外')
+  const toggleNotif = () => setShowNotif((n) => !n)
   const tRefresh = () => {
     refreshData()
     toast('Reloaded latest data · 最新データを再取得しました')
@@ -245,6 +250,87 @@ export function MarketDataScreen() {
   const driversLive = useDriversLive()
   const balLive = useBalancingLive()
   const tielineLive = useTielineLive('DAM')
+
+  // ---- notifications (bell popover) ----
+  // Derived from what this screen already holds: the export manifest (how fresh
+  // the snapshot is) and the loaded area series (day-on-day moves). JEMA has no
+  // alert service, so anything not derivable from a snapshot is deliberately
+  // absent rather than faked.
+  const manifest = useManifest()
+  const { seenAt: notifSeenAt, markSeen: notifMarkSeen } = useNotifSeen('jema-notif-seen-market')
+  const STALE_MS = 48 * 60 * 60 * 1000
+  const MOVE_PCT = 10 // day-on-day threshold for "notable" (JEPX daily averages swing a few % routinely)
+
+  const dataItems: NotifItem[] = []
+  const mf = manifest.data
+  if (mf?.generated_at) {
+    const priceDate = mf.sources?.area_price || mf.sources?.system_price || null
+    const supplyDate = mf.sources?.supply || null
+    const priceTs = tsOfDate(priceDate || mf.generated_at)
+    const stale = Number.isFinite(priceTs) && Date.now() - priceTs > STALE_MS
+    dataItems.push({
+      key: 'freshness',
+      kind: stale ? 'warn' : 'new',
+      title: stale
+        ? L === 'ja' ? '価格データが48時間以上更新されていません' : 'Prices are more than 48 hours old'
+        : L === 'ja' ? `価格データ ${priceDate ?? '—'} まで` : `Prices through ${priceDate ?? '—'}`,
+      meta: [
+        supplyDate ? (L === 'ja' ? `需給 ${supplyDate} まで` : `supply through ${supplyDate}`) : null,
+        L === 'ja' ? `書出 ${fmtStamp(mf.generated_at)}` : `exported ${fmtStamp(mf.generated_at)}`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      ts: Date.parse(mf.generated_at),
+      onClick: tRefresh,
+    })
+  }
+
+  // Day-on-day move of each loaded area's daily average (index 0 = latest day).
+  // Only selected areas are fetched, so this covers exactly what's on screen.
+  type Move = { pct: number; item: NotifItem }
+  const moveItems: NotifItem[] = selectedKeys
+    .map((key): Move | null => {
+      const a = live.areas[key]
+      if (!a || a.dAvg.length < 2) return null
+      const now = a.dAvg[0]
+      const prev = a.dAvg[1]
+      if (!Number.isFinite(now) || !Number.isFinite(prev) || prev === 0) return null
+      const pct = ((now - prev) / Math.abs(prev)) * 100
+      if (Math.abs(pct) < MOVE_PCT) return null
+      const def = areas.find((x) => x.key === key)
+      const day = (a.dDt[0] || '').slice(0, 10)
+      return {
+        pct,
+        item: {
+          key: 'move:' + key,
+          kind: 'new',
+          title: `${(L === 'ja' ? def?.ja : def?.en) ?? key} · ¥${now.toFixed(2)}/kWh`,
+          meta: `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(1)}% ${L === 'ja' ? '前日比' : 'vs previous day'}${day ? ' · ' + day : ''}`,
+          badge: isWatched('area:' + key) ? '★' : undefined,
+          ts: tsOfDate(day),
+          onClick: () => {
+            setView('wholesale')
+            setSel((p) => ({ ...p, [key]: true }))
+            setShowNotif(false)
+          },
+        },
+      }
+    })
+    .filter((x): x is Move => x != null)
+    .sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+    .slice(0, 5)
+    .map((x) => x.item)
+
+  const notifSections: NotifSection[] = [
+    { key: 'data', label: L === 'ja' ? 'データ更新' : 'DATA UPDATES', items: dataItems },
+    {
+      key: 'moves',
+      label: L === 'ja' ? `大きな変動 · 前日比${MOVE_PCT}%以上` : `NOTABLE MOVES · ≥${MOVE_PCT}% day-on-day`,
+      items: moveItems,
+    },
+  ]
+  const notifUnread = unreadCount(notifSections, notifSeenAt)
+
 
   // ---- computed (mirror of renderVals) ----
   const v = useMemo(() => {
@@ -925,7 +1011,7 @@ export function MarketDataScreen() {
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('policy')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} /><span>Policy Deep Dive</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>3</span>
+            <PolicyNavBadge />
           </Hoverable>
         </div>
 
@@ -937,9 +1023,11 @@ export function MarketDataScreen() {
               <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{watch.length}</span>
             )}
           </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNav}>
+          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={toggleNotif}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} /><span>Notifications</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>2</span>
+            {notifUnread > 0 && (
+              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
+            )}
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} /><span>Settings</span>
@@ -977,9 +1065,11 @@ export function MarketDataScreen() {
             {isDarkB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />)}
             {isLightB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />)}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            {notifUnread > 0 && (
+              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
             <span style={v.langJaS} onClick={() => setLang('ja')}>日本語</span>
@@ -992,6 +1082,23 @@ export function MarketDataScreen() {
               <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
             </div>
           </div>
+
+          {/* Notifications — snapshot freshness + notable day-on-day moves */}
+          <NotificationsPopover
+            open={showNotif}
+            lang={L}
+            sections={notifSections}
+            seenAt={notifSeenAt}
+            onClose={() => setShowNotif(false)}
+            onMarkRead={notifMarkSeen}
+            action={{
+              label: L === 'ja' ? '政策の通知 →' : 'Policy activity →',
+              onClick: () => {
+                setShowNotif(false)
+                setScreen('policy')
+              },
+            }}
+          />
         </div>
   )
 
