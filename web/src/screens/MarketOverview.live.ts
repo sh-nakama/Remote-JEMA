@@ -123,10 +123,10 @@ export interface PolicyMeetingsLive {
 const TIER = (org: string): 'METI' | 'OCCTO' | 'EGC' =>
   org === 'OCCTO' || org === 'EGC' ? org : 'METI'
 
-/** The most recently summarised committee meetings (one per committee) for the
- * radar, plus the scheduled (future) meetings for the "Recent & Scheduled"
- * timeline. Both carry the real meeting date + committee key; the radar is ranked
- * by recency (no upstream relevance score). */
+/** The latest meeting of every tracked committee (newest first) for the radar,
+ * plus the scheduled (future) meetings for the "Recent & Scheduled" timeline.
+ * Both carry the real meeting date + committee key. The caller filters and caps
+ * the list; ordering is pure recency. */
 export function usePolicyMeetings(): PolicyMeetingsLive {
   const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, meetings: [], upcoming: [] })
   useEffect(() => {
@@ -150,7 +150,7 @@ export function usePolicyMeetings(): PolicyMeetingsLive {
           seen.add(x.com)
           reps.push(x)
         }
-        const meetings: Meeting[] = reps.slice(0, 12).map((x, i) => {
+        const meetings: Meeting[] = reps.map((x) => {
           const cc = com[x.com]
           const d = x.date || ''
           const isDone = x.status === 'done'
@@ -161,7 +161,6 @@ export function usePolicyMeetings(): PolicyMeetingsLive {
             no: x.num,
             m: d ? parseInt(d.slice(5, 7), 10) : 0,
             day: d ? parseInt(d.slice(8, 10), 10) : 0,
-            score: Math.max(45, 92 - i * 5),
             tori: x.tori,
             done: isDone,
             sEn: isDone ? x.prevEn || '' : '',
@@ -181,7 +180,6 @@ export function usePolicyMeetings(): PolicyMeetingsLive {
             no: u.num || 0,
             m: d ? parseInt(d.slice(5, 7), 10) : 0,
             day: d ? parseInt(d.slice(8, 10), 10) : 0,
-            score: 70,
             sched: true,
             done: false,
             date: d || undefined,

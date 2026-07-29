@@ -19,7 +19,6 @@ export interface Meeting {
   no: number
   m: number
   day: number
-  score: number
   tori?: boolean
   followed?: boolean
   watch?: boolean
@@ -132,7 +131,6 @@ export const meetings: Meeting[] = [
     no: 58,
     m: 6,
     day: 24,
-    score: 87,
     tori: true,
     followed: true,
     done: true,
@@ -146,7 +144,6 @@ export const meetings: Meeting[] = [
     no: 84,
     m: 6,
     day: 27,
-    score: 78,
     followed: true,
     done: true,
     sEn: 'Debated capacity-market linkage for long-duration storage; secretariat to draft options for August.',
@@ -159,7 +156,6 @@ export const meetings: Meeting[] = [
     no: 12,
     m: 6,
     day: 19,
-    score: 72,
     watch: true,
     done: true,
     sEn: 'Reviewed LTDA auction parameters for FY2028; storage participation thresholds remain open.',
@@ -172,7 +168,6 @@ export const meetings: Meeting[] = [
     no: 91,
     m: 6,
     day: 13,
-    score: 66,
     followed: true,
     done: true,
     sEn: 'Discussed imbalance-penalty recalibration and EPRX bidding-guideline amendments for tertiary products.',
@@ -185,7 +180,6 @@ export const meetings: Meeting[] = [
     no: 47,
     m: 6,
     day: 10,
-    score: 58,
     watch: true,
     done: false,
   },
@@ -196,7 +190,6 @@ export const meetings: Meeting[] = [
     no: 63,
     m: 6,
     day: 5,
-    score: 52,
     done: true,
     sEn: 'Progress check on non-firm connection expansion and curtailment forecasting accuracy.',
     sJa: 'ノンファーム接続拡大と出力制御予測の精度を確認。',
@@ -211,7 +204,6 @@ export const upcomingMeetings: Meeting[] = [
     no: 61,
     m: 7,
     day: 10,
-    score: 74,
     followed: true,
     sched: true,
     done: true,
@@ -225,7 +217,6 @@ export const upcomingMeetings: Meeting[] = [
     no: 48,
     m: 7,
     day: 17,
-    score: 61,
     watch: true,
     sched: true,
     done: true,
@@ -239,7 +230,6 @@ export const upcomingMeetings: Meeting[] = [
     no: 59,
     m: 7,
     day: 22,
-    score: 83,
     followed: true,
     sched: true,
     done: true,
@@ -253,7 +243,6 @@ export const upcomingMeetings: Meeting[] = [
     no: 85,
     m: 8,
     day: 5,
-    score: 79,
     followed: true,
     sched: true,
     done: true,

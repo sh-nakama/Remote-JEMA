@@ -356,12 +356,14 @@ export function MarketOverviewScreen() {
     OCCTO: dark ? '#7C9CD1' : '#4A6FA5',
     EGC: dark ? '#C77BD8' : '#7B2D8E',
   }
-  const radarList =
+  const RADAR_MAX = 12
+  const radarList = (
     filter === 'upcoming'
       ? // only still-future meetings — a stale static snapshot can hold a meeting
         // whose date has since passed; don't present it as forthcoming.
         upcoming.filter((m) => daysFrom(m) >= 0)
       : meetings.filter((m) => (filter === 'followed' ? !!m.key && isFollowing(m.key) : true))
+  ).slice(0, RADAR_MAX)
   const radar = radarList.map((m, i) => {
     const d = meetingDate(m)
     // Show a date only when it's the real published meeting date; a pending
@@ -374,7 +376,7 @@ export function MarketOverviewScreen() {
     const numStr = m.no ? (L === 'ja' ? `第${m.no}回` : `No. ${m.no}`) : ''
     const dd = daysFrom(m)
     const rel = m.sched && m.dateReal && dd >= 0 ? (L === 'ja' ? `あと${dd}日` : `in ${dd}d`) : ''
-    const meta = [numStr, dateStr, rel].filter(Boolean).join(' · ')
+    const meta = [dateStr, rel].filter(Boolean).join(' · ')
     const following = !!m.key && isFollowing(m.key)
     return {
     key: (m.key || m.tier) + '-' + m.no + '-' + (m.date || i),
@@ -385,12 +387,12 @@ export function MarketOverviewScreen() {
     n1: L === 'ja' ? m.ja : m.en,
     n2: L === 'ja' ? m.en : m.ja,
     meta,
+    numStr,
     tier: m.tier,
     tori: !!m.tori,
     sched: !!m.sched,
     done: !!m.done,
     pending: !m.done && !m.sched,
-    score: m.score,
     summary: m.done ? (L === 'ja' ? m.sJa : m.sEn) : '',
     cta: m.sched
       ? L === 'ja'
@@ -417,12 +419,6 @@ export function MarketOverviewScreen() {
       background: i === 0 ? 'var(--ac)' : 'var(--bg2)',
       color: i === 0 ? '#FFFFFF' : 'var(--tx2)',
       fontFeatureSettings: "'tnum' 1",
-    } as React.CSSProperties,
-    barStyle: {
-      width: m.score * 0.64 + 'px',
-      height: '100%',
-      borderRadius: 3,
-      background: i === 0 ? 'var(--ac)' : 'var(--fnt3)',
     } as React.CSSProperties,
     tierDot: {
       width: 7,
@@ -960,15 +956,15 @@ export function MarketOverviewScreen() {
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;position:relative')}>
                   <div>
                     <div style={s('font-size:16px;font-weight:600')}>METI Committee Radar <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>委員会レーダー</span></div>
-                    <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Recent meetings, ranked by importance · 重要度順・直近の会合</div>
-                    <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> View data not connected — ranked by recency &amp; institutional weight · 視聴回数データ未接続</div>
+                    <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest session per committee, newest first · 委員会ごとの最新会合・新着順</div>
+                    <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> Importance weighting not connected — recency only · 重要度による並べ替えは未接続</div>
                   </div>
                   <Hoverable as="span" base="width:28px;height:28px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer;flex-shrink:0" hover="background:var(--bg2);color:var(--acT)" onClick={toggleWhy} title="Why this ranking? · この順位の理由" aria-label="Why this ranking"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`} /></Hoverable>
                   {showWhy && (
                     <div style={s("position:absolute;right:0;top:34px;width:330px;background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);padding:15px;z-index:40;font-size:12px;color:var(--tx2)")}>
                       <div style={s('font-size:13px;font-weight:600;color:var(--tx)')}>Why this ranking? <span style={s('font-weight:400;color:var(--mut)')}>この順位の理由</span></div>
-                      <div style={s('margin-top:7px;line-height:1.55')}>Importance <span style={s("font-feature-settings:'tnum' 1")}>I ∈ [0,100]</span> = institutional tier (0.35) + recency, 30-day half-life (0.25) + activity (0.15) + decision density (0.10) + summary freshness (0.05) + views (0.10, <span style={s('color:var(--warnTx)')}>proposed</span>).</div>
-                      <div style={s('margin-top:7px;line-height:1.55;color:var(--mut)')}>Views are a proxy for attention from METI's official YouTube — not an official significance measure. While unavailable, w_V = 0 and remaining weights re-normalize. · 視聴回数はMETI公式YouTubeの推定注目度です。</div>
+                      <div style={s('margin-top:7px;line-height:1.55')}>Each tracked committee is represented by its most recent session, and those sessions are ordered by meeting date — newest first. Top {RADAR_MAX} shown. · 追跡中の委員会ごとの最新会合を、開催日の新しい順に{RADAR_MAX}件表示。</div>
+                      <div style={s('margin-top:7px;line-height:1.55;color:var(--mut)')}>A weighted importance score (institutional tier, decision density, attention) is <span style={s('color:var(--warnTx)')}>proposed</span> but not implemented — nothing beyond recency affects the order today. · 重要度スコアは未実装です。</div>
                       <div style={s('margin-top:9px;font-weight:600;color:var(--fnt2);cursor:not-allowed')} title="Coming soon · 近日公開">Adjust weighting · 重み付けを調整 →</div>
                     </div>
                   )}
@@ -1033,10 +1029,9 @@ export function MarketOverviewScreen() {
                         )}
                       </div>
                       <div style={s('display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;padding-top:2px')}>
-                        <div style={s('display:flex;align-items:center;gap:6px')}>
-                          <div style={s('width:64px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden')}><div style={m.barStyle}></div></div>
-                          <span style={s("font-size:11px;font-weight:600;color:var(--mut);font-feature-settings:'tnum' 1;width:18px;text-align:right")}>{m.score}</span>
-                        </div>
+                        {m.numStr && (
+                          <span style={s("font-size:12px;font-weight:600;color:var(--tx2);font-feature-settings:'tnum' 1;white-space:nowrap")}>{m.numStr}</span>
+                        )}
                         <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={() => openPolicy(m.comKey, m.num)}>{m.cta}</Hoverable>
                       </div>
                     </div>
