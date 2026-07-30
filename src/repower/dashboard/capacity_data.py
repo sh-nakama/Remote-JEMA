@@ -2,9 +2,9 @@
 
 Unlike the wholesale / balancing / policy datasets, the capacity-market summary
 is **not** published in a machine-readable feed. OCCTO releases MAIN AUCTION
-results (national + zonal clearing prices and procured capacity) as PDF press
-releases plus Excel "verification" workbooks; the only bulk CSV downloads hold
-per-bidder detail (電源単位), a different granularity that would have to be
+results (per-area clearing prices, procured capacity and contract totals) as PDF
+press releases plus Excel "verification" workbooks; the only bulk CSV downloads
+hold per-bidder detail (電源単位), a different granularity that would have to be
 re-aggregated to reconstruct the headline figures. The Long-Term Decarbonization
 Auction (LTDA, 長期脱炭素電源オークション) per-round technology split is likewise
 not published in structured form.
@@ -22,31 +22,115 @@ so the screen renders live data with no geometry change.
 
 from __future__ import annotations
 
+# ── OCCTO areas, in the order every OCCTO results table lists them ────────────
+# Keys match the rest of the app's area vocabulary (``export_web.AREAS`` /
+# ``web/src/lib/types.ts``), where Tokyo is keyed ``tepco``. Okinawa sits outside
+# the interconnected grid the capacity market clears over, so it has no clearing
+# price and is absent here.
+AREAS: list[dict[str, str]] = [
+    {"key": "hokkaido", "en": "Hokkaido", "ja": "北海道"},
+    {"key": "tohoku", "en": "Tohoku", "ja": "東北"},
+    {"key": "tepco", "en": "Tokyo", "ja": "東京"},
+    {"key": "chubu", "en": "Chubu", "ja": "中部"},
+    {"key": "hokuriku", "en": "Hokuriku", "ja": "北陸"},
+    {"key": "kansai", "en": "Kansai", "ja": "関西"},
+    {"key": "chugoku", "en": "Chugoku", "ja": "中国"},
+    {"key": "shikoku", "en": "Shikoku", "ja": "四国"},
+    {"key": "kyushu", "en": "Kyushu", "ja": "九州"},
+]
+AREA_KEYS: list[str] = [a["key"] for a in AREAS]
+
+
+def _by_area(*values: int) -> dict[str, int]:
+    """Zip nine OCCTO-ordered figures onto :data:`AREA_KEYS`."""
+    if len(values) != len(AREA_KEYS):
+        raise ValueError(f"expected {len(AREA_KEYS)} area values, got {len(values)}")
+    return dict(zip(AREA_KEYS, values, strict=True))
+
+
 # ── Main auction: one record per delivery fiscal year (対象実需給年度) ──────────
-# natl/hokkaido/kyushu are clearing prices in yen/kW (円/kW). For FY2025+ `natl`
-# is OCCTO's 総平均単価（経過措置控除後） = 約定総額 ÷ 約定総容量 (value-weighted
-# national average). FY2024 cleared at a single uniform national price with no
-# zonal split, so its zonal fields are None. `procured_gw` is 約定総容量 in GW
-# (1万kW = 0.01 GW). `ach` is OCCTO's published 目標調達量比 (procured-vs-target)
-# in whole percent.
+# The capacity market clears **per area** (エリア毎の約定価格): 約定処理 splits the
+# national market wherever an interconnector constraint binds, so one auction can
+# settle at several different prices. Only the first auction (FY2024) cleared
+# uniformly — FY2027 settled at six distinct prices. `prices` therefore carries
+# every area's clearing price in yen/kW·year (円/kW), read from the エリア毎の
+# 約定価格 table of the OCCTO press release for that year (see SOURCES).
 #
-# Figures extracted directly from the six OCCTO press-release PDFs (see SOURCES)
-# and cross-checked against media analyses (reivalue, note.com/gridshift,
-# itmedia). Zonal prices before FY2025 did not exist; from FY2025 the area
-# tables give distinct Hokkaido/Kyushu prices.
+# `capacity_kw` is the matching エリア毎の約定容量 and `net_total_yen` the published
+# 約定総額（経過措置控除後）; the procured total and OCCTO's national average unit
+# price (総平均単価 = 約定総額 ÷ 約定総容量) are derived from them, so no aggregate
+# is hand-typed and every figure stays traceable to a published table. `ach` is
+# OCCTO's published 目標調達量比 (procured-vs-target) in whole percent.
+#
+# 経過措置: a discount on the contract value of plants built before FY2011, which
+# is why the national average unit price sits below the clearing prices.
 MAIN_AUCTION: list[dict] = [
-    {"fy": 2024, "held": "Sep 2020", "natl": 14137, "hokkaido": None, "kyushu": None,
-     "procured_gw": 167.69, "ach": 97},
-    {"fy": 2025, "held": "Dec 2021", "natl": 3109, "hokkaido": 5242, "kyushu": 5242,
-     "procured_gw": 165.34, "ach": 93},
-    {"fy": 2026, "held": "Jan 2023", "natl": 5226, "hokkaido": 8749, "kyushu": 8748,
-     "procured_gw": 162.71, "ach": 92},
-    {"fy": 2027, "held": "Jan 2024", "natl": 7847, "hokkaido": 13287, "kyushu": 11457,
-     "procured_gw": 167.45, "ach": 98},
-    {"fy": 2028, "held": "Jan 2025", "natl": 11134, "hokkaido": 14812, "kyushu": 13177,
-     "procured_gw": 166.21, "ach": 97},
-    {"fy": 2029, "held": "Jan 2026", "natl": 13303, "hokkaido": 14972, "kyushu": 15112,
-     "procured_gw": 166.08, "ach": 96},
+    {
+        "fy": 2024,
+        "held": "Sep 2020",
+        "prices": _by_area(14137, 14137, 14137, 14137, 14137, 14137, 14137, 14137, 14137),
+        "capacity_kw": _by_area(
+            5_931_674, 17_652_765, 52_980_791, 25_276_498, 5_472_871,
+            28_343_041, 7_657_972, 7_018_482, 17_357_554,
+        ),
+        "net_total_yen": 1_598_741_200_454,
+        "ach": 97,
+    },
+    {
+        "fy": 2025,
+        "held": "Dec 2021",
+        "prices": _by_area(5242, 3495, 3495, 3495, 3495, 3495, 3495, 3495, 5242),
+        "capacity_kw": _by_area(
+            5_414_104, 16_106_883, 55_617_210, 23_759_952, 5_494_312,
+            26_172_806, 7_808_417, 7_465_778, 17_502_686,
+        ),
+        "net_total_yen": 514_010_589_965,
+        "ach": 93,
+    },
+    {
+        "fy": 2026,
+        "held": "Jan 2023",
+        "prices": _by_area(8749, 5833, 5834, 5832, 5832, 5832, 5832, 5832, 8748),
+        "capacity_kw": _by_area(
+            5_231_090, 16_609_897, 53_536_700, 23_432_491, 4_757_408,
+            26_123_850, 8_162_119, 7_952_551, 16_904_773,
+        ),
+        "net_total_yen": 850_396_238_334,
+        "ach": 92,
+    },
+    {
+        "fy": 2027,
+        "held": "Jan 2024",
+        "prices": _by_area(13287, 9044, 9555, 7823, 7638, 7638, 7638, 7638, 11457),
+        "capacity_kw": _by_area(
+            5_191_979, 17_733_376, 55_417_081, 23_234_464, 4_569_798,
+            28_860_919, 8_377_605, 7_864_566, 16_197_677,
+        ),
+        "net_total_yen": 1_313_960_531_206,
+        "ach": 98,
+    },
+    {
+        "fy": 2028,
+        "held": "Jan 2025",
+        "prices": _by_area(14812, 14812, 14812, 10280, 8785, 8785, 8785, 8785, 13177),
+        "capacity_kw": _by_area(
+            5_293_409, 16_526_974, 54_048_583, 23_597_868, 4_557_129,
+            27_502_806, 9_727_561, 7_504_988, 17_454_424,
+        ),
+        "net_total_yen": 1_850_597_827_276,
+        "ach": 97,
+    },
+    {
+        "fy": 2029,
+        "held": "Jan 2026",
+        "prices": _by_area(14972, 15111, 15111, 12388, 12388, 12388, 12388, 12388, 15112),
+        "capacity_kw": _by_area(
+            5_461_594, 16_812_309, 52_376_601, 23_902_096, 4_388_972,
+            27_409_123, 9_845_137, 7_520_510, 18_363_521,
+        ),
+        "net_total_yen": 2_209_359_548_463,
+        "ach": 96,
+    },
 ]
 
 # Per-year source URLs — the OCCTO press-release PDF for that delivery year.
@@ -77,6 +161,21 @@ LTDA: list[dict] = [
 ]
 
 
+# ── Derived aggregates ───────────────────────────────────────────────────────
+def procured_kw(entry: dict) -> int:
+    """約定総容量 for *entry* — the sum of its per-area cleared capacity."""
+    return sum(entry["capacity_kw"].values())
+
+
+def national_unit_price(entry: dict) -> int:
+    """OCCTO's 総平均単価 in yen/kW: 約定総額（経過措置控除後）÷ 約定総容量.
+
+    A value-weighted **average paid**, not a clearing price — the 経過措置
+    discount pulls it below the per-area clearing prices in ``prices``.
+    """
+    return round(entry["net_total_yen"] / procured_kw(entry))
+
+
 # ── Display formatting → the web MaRow shape ─────────────────────────────────
 def _fmt_price(v: float | int | None) -> str:
     """A yen/kW clearing price as ``¥12,345`` (thousands-separated), or ``—``."""
@@ -93,17 +192,22 @@ def _fmt_gw(v: float | int | None) -> str:
 
 
 def main_auction_rows() -> list[dict]:
-    """Curated main-auction results in the screen's ``MaRow`` shape."""
+    """Curated main-auction results in the screen's ``MaRow`` shape.
+
+    ``areas`` carries the raw per-area clearing price (yen/kW·year) so the
+    frontend can group the areas that cleared at the same price itself: which
+    areas share a price changes with every auction, so it cannot be baked into
+    fixed Hokkaido/Kyushu columns.
+    """
     rows: list[dict] = []
     for e in MAIN_AUCTION:
         rows.append({
             "fy": f"FY{e['fy']}",
             "held": e["held"],
-            "natl": _fmt_price(e["natl"]),
-            "hok": _fmt_price(e["hokkaido"]),
-            "kyu": _fmt_price(e["kyushu"]),
-            "proc": _fmt_gw(e["procured_gw"]),
+            "natl": _fmt_price(national_unit_price(e)),
+            "proc": _fmt_gw(procured_kw(e) / 1_000_000),
             "ach": int(e["ach"]),
+            "areas": dict(e["prices"]),
             "source": SOURCES.get(e["fy"], ""),
         })
     return rows

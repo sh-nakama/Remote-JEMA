@@ -7,12 +7,21 @@ import { useManifest } from '../lib/data'
 import { NotificationsPopover, useNotifSeen, unreadCount } from '../lib/notifications'
 import type { NotifItem, NotifSection } from '../lib/notifications'
 import { PolicyNavBadge } from '../lib/policyActivity'
-import { segBase } from '../lib/chartkit'
-import { maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
+import { segBase, areaColor } from '../lib/chartkit'
+import { CAPACITY_AREAS, maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
+import type { MaRow } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
 import { downloadCsv } from '../lib/download'
 
 type View = 'main' | 'ltda'
+
+type CapacityArea = (typeof CAPACITY_AREAS)[number]
+
+/** Areas that cleared at the same price in one auction. */
+interface PriceBand {
+  price: number
+  areas: CapacityArea[]
+}
 
 export function CapacityAuctionsScreen() {
   const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, refreshData, refreshing } = useApp()
@@ -34,16 +43,25 @@ export function CapacityAuctionsScreen() {
   }
   const tNotif = () => setShowNotif((n) => !n)
   const tExport = () => {
-    const rows = maSrc.map((m) => ({
-      'Delivery FY': m.fy,
-      'Auction held': m.held,
-      'National (¥/kW)': m.natl,
-      'Hokkaido (¥/kW)': m.hok,
-      'Kyushu (¥/kW)': m.kyu,
-      Procured: m.proc,
-      'Achievement %': m.ach,
-      Source: m.source ?? '',
-    }))
+    const rows = maSrc.map((m) => {
+      const rec: Record<string, string | number> = {
+        'Delivery FY': m.fy,
+        'Auction held': m.held,
+        'National average (¥/kW)': m.natl,
+      }
+      // One column per OCCTO area: the auction clears per area, and which areas
+      // share a price changes every year, so the split can't be summarised by a
+      // fixed pair of zone columns.
+      for (const a of CAPACITY_AREAS) {
+        const v = m.areas?.[a.key]
+        rec[`${a.en} ${a.ja} (¥/kW)`] = typeof v === 'number' ? v : '—'
+      }
+      rec['Distinct clearing prices'] = bandsOf(m).length
+      rec.Procured = m.proc
+      rec['Achievement %'] = m.ach
+      rec.Source = m.source ?? ''
+      return rec
+    })
     downloadCsv('jema-capacity-main-auction.csv', rows)
     toast('Downloaded main-auction results (CSV) · 約定結果をCSVで保存しました')
   }
@@ -60,19 +78,6 @@ export function CapacityAuctionsScreen() {
   const ltdaSrc = cap.ready ? cap.ltda : ltdaData
 
   // Derived row data
-  const maRows = maSrc.map((m) => ({
-    ...m,
-    bar: {
-      display: 'block',
-      width: m.ach + '%',
-      height: '100%',
-      borderRadius: 3,
-      background: m.ach >= 99 ? 'var(--ac)' : '#EF9F27',
-    } as React.CSSProperties,
-  }))
-
-  // ---- Main-auction KPI + price-chart model, derived from the live rows so
-  // the cards and bar chart always agree with the results table. ----
   const numOf = (v: string | number | undefined): number => {
     if (typeof v === 'number') return v
     // Strip ¥ / commas / units. A non-numeric placeholder like "—" must become
@@ -82,8 +87,52 @@ export function CapacityAuctionsScreen() {
     const n = Number(cleaned)
     return Number.isFinite(n) ? n : NaN
   }
+
+  // ---- Clearing-price bands ----
+  // The capacity market clears per OCCTO area, and the auction splits wherever
+  // an interconnector binds — FY2024 settled at one price nationwide, FY2027 at
+  // six. So the "zones" are derived per year by grouping the areas that cleared
+  // at the same price, never hardcoded to a Hokkaido/Kyushu pair.
+  const bandsOf = (m: MaRow | undefined): PriceBand[] => {
+    const by = new Map<number, CapacityArea[]>()
+    for (const a of CAPACITY_AREAS) {
+      const p = m?.areas?.[a.key]
+      if (typeof p !== 'number' || !Number.isFinite(p)) continue
+      by.set(p, [...(by.get(p) ?? []), a])
+    }
+    return [...by.entries()]
+      .sort((x, y) => y[0] - x[0])
+      .map(([price, areas]) => ({ price, areas }))
+  }
+  const areaNames = (areas: CapacityArea[]): string =>
+    areas.map((a) => (L === 'ja' ? a.ja : a.en)).join(' · ')
+  const yen = (v: number): string => (Number.isFinite(v) ? '¥' + Math.round(v).toLocaleString('en-US') : '—')
+
+  const maRows = maSrc.map((m) => {
+    const bands = bandsOf(m)
+    return {
+      ...m,
+      bands,
+      hi: bands[0]?.price ?? NaN,
+      lo: bands[bands.length - 1]?.price ?? NaN,
+      bar: {
+        display: 'block',
+        width: m.ach + '%',
+        height: '100%',
+        borderRadius: 3,
+        background: m.ach >= 99 ? 'var(--ac)' : '#EF9F27',
+      } as React.CSSProperties,
+    }
+  })
+
+  // ---- Main-auction KPI + price-chart model, derived from the live rows so
+  // the cards, chart and tables always agree with the results table. ----
+  const CH_X0 = 46
+  const CH_X1 = 944
   const CH_Y0 = 270
   const CH_TOP = 14
+  const chYears = maSrc.slice(-6)
+  const chSlotW = (CH_X1 - CH_X0) / Math.max(chYears.length, 1)
   // Y-axis ceiling derived from the plotted prices instead of a hardcoded 16,000.
   // The hi-fi geometry keeps gridlines at fixed y (190/110/30) worth 1·/2·/3·step,
   // with the axis topping out at 3.2·step — so step 5,000 reproduces the export's
@@ -93,9 +142,8 @@ export function CapacityAuctionsScreen() {
   const CH_STEP_LADDER = [500, 1000, 2000, 2500, 5000, 10000, 20000, 25000, 50000]
   const chDataMax = Math.max(
     0,
-    ...maSrc
-      .slice(0, 6)
-      .flatMap((m) => [numOf(m.natl), numOf(m.hok), numOf(m.kyu)])
+    ...chYears
+      .flatMap((m) => [numOf(m.natl), ...CAPACITY_AREAS.map((a) => m.areas?.[a.key] ?? NaN)])
       .filter((n) => Number.isFinite(n)),
   )
   const chStep =
@@ -104,43 +152,65 @@ export function CapacityAuctionsScreen() {
       : 5000
   const CH_VMAX = chStep * 3.2
   const yOf = (v: number) => CH_TOP + ((CH_VMAX - v) / CH_VMAX) * (CH_Y0 - CH_TOP)
-  // Fixed x-slots per delivery-year column. Zonal bars are drawn wherever the row
-  // carries distinct Hokkaido/Kyushu prices (FY2025+); FY2024 priced uniformly
-  // ("—") is excluded by the isFinite guard in maChart below.
-  const chSlots = [
-    { x: 100.8, zonal: true },
-    { x: 250.5, zonal: true },
-    { x: 400.2, zonal: true },
-    { x: 523.8, zonal: true },
-    { x: 673.5, zonal: true },
-    { x: 823.2, zonal: true },
-  ]
-  const maChart = maSrc.slice(0, 6).map((m, i) => {
-    const slot = chSlots[i] ?? { x: 100.8 + i * 149.7, zonal: false }
+
+  // One bar per area per delivery year: equal bar heights are exactly the areas
+  // that cleared together, so the split reads straight off the chart.
+  const CH_BAR_GAP = 2
+  const chBarW = Math.max(
+    5,
+    Math.min(16, (chSlotW * 0.84 - CH_BAR_GAP * (CAPACITY_AREAS.length - 1)) / CAPACITY_AREAS.length),
+  )
+  const chGroupW = chBarW * CAPACITY_AREAS.length + CH_BAR_GAP * (CAPACITY_AREAS.length - 1)
+  const maChart = chYears.map((m, i) => {
+    const cx = CH_X0 + chSlotW * (i + 0.5)
+    const x0 = cx - chGroupW / 2
+    const bands = bandsOf(m)
     const nat = numOf(m.natl)
-    const hok = numOf(m.hok)
-    const kyu = numOf(m.kyu)
+    const hi = bands[0]?.price ?? NaN
+    const lo = bands[bands.length - 1]?.price ?? NaN
     return {
       fy: m.fy,
-      x: slot.x,
-      zonal: slot.zonal && Number.isFinite(hok) && Number.isFinite(kyu),
+      cx,
+      x0,
+      hi,
+      lo,
       nat,
-      hok,
-      kyu,
       natY: yOf(nat),
-      natH: CH_Y0 - yOf(nat),
-      hokY: yOf(hok),
-      hokH: CH_Y0 - yOf(hok),
-      kyuY: yOf(kyu),
-      kyuH: CH_Y0 - yOf(kyu),
-      natLabel: Number.isFinite(nat) ? nat.toLocaleString('en-US') : '—',
+      natOk: Number.isFinite(nat),
+      // Range caption above the group — the whole point of the chart is the spread.
+      label: !Number.isFinite(hi) ? '—' : hi === lo ? yen(hi) : yen(lo) + '–' + yen(hi).slice(1),
+      labelY: Number.isFinite(hi) ? yOf(hi) - 7 : CH_Y0,
+      bars: CAPACITY_AREAS.map((a, j) => {
+        const v = m.areas?.[a.key]
+        const ok = typeof v === 'number' && Number.isFinite(v)
+        return {
+          key: a.key,
+          name: L === 'ja' ? a.ja : a.en,
+          v: ok ? v : NaN,
+          ok,
+          x: x0 + j * (chBarW + CH_BAR_GAP),
+          y: ok ? yOf(v) : CH_Y0,
+          h: ok ? CH_Y0 - yOf(v) : 0,
+        }
+      }),
     }
   })
+
   const maLast = maSrc[maSrc.length - 1]
   const maPrev = maSrc[maSrc.length - 2]
+  const lastBands = bandsOf(maLast)
+  const prevBands = bandsOf(maPrev)
+  const hiBand = lastBands[0]
+  const loBand = lastBands[lastBands.length - 1]
+  const spread = (hiBand?.price ?? NaN) - (loBand?.price ?? NaN)
   const deltaChip = (cur: number, prev: number) => {
+    if (!Number.isFinite(cur) || !Number.isFinite(prev) || prev === 0)
+      return {
+        txt: '—',
+        style: { background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } as React.CSSProperties,
+      }
     const d = cur - prev
-    const pct = prev ? (d / prev) * 100 : 0
+    const pct = (d / prev) * 100
     const up = d >= 0
     return {
       txt:
@@ -153,8 +223,8 @@ export function CapacityAuctionsScreen() {
     }
   }
   const hdDelta = deltaChip(numOf(maLast?.natl), numOf(maPrev?.natl))
-  const hokDelta = deltaChip(numOf(maLast?.hok), numOf(maPrev?.hok))
-  const kyuDelta = deltaChip(numOf(maLast?.kyu), numOf(maPrev?.kyu))
+  const hiDelta = deltaChip(hiBand?.price ?? NaN, prevBands[0]?.price ?? NaN)
+  const loDelta = deltaChip(loBand?.price ?? NaN, prevBands[prevBands.length - 1]?.price ?? NaN)
 
   // ---- notifications (bell popover) ----
   // Capacity data is event-driven (OCCTO publishes once per auction), so the
@@ -182,8 +252,11 @@ export function CapacityAuctionsScreen() {
           ? `${maLast.fy} メインオークション約定`
           : `${maLast.fy} main auction cleared`,
       meta: [
-        (L === 'ja' ? '全国 ' : 'National ') + maLast.natl + '/kW',
-        maPrev ? hdDelta.txt : null,
+        lastBands.length > 1
+          ? (L === 'ja' ? `${lastBands.length}価格帯 ` : `${lastBands.length} zonal prices `) +
+            yen(loBand.price) + '–' + yen(hiBand.price).slice(1) + '/kW'
+          : (L === 'ja' ? '全エリア一律 ' : 'uniform ') + yen(hiBand?.price ?? NaN) + '/kW',
+        (L === 'ja' ? '全国平均 ' : 'national avg ') + maLast.natl + '/kW',
         maLast.proc + (L === 'ja' ? ' 約定' : ' procured'),
         (L === 'ja' ? '目標達成 ' : '') + maLast.ach + '%' + (L === 'ja' ? '' : ' of target'),
       ]
@@ -471,28 +544,31 @@ export function CapacityAuctionsScreen() {
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>{maLast?.fy} clearing price<br />約定価格（全国）</div>
+                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>{maLast?.fy} national average<br />全国平均単価</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.natl).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kW·year</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>main auction {maLast?.held} · vs {maPrev?.fy}</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>after 経過措置 · main auction {maLast?.held} · vs {maPrev?.fy}</div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{hdDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured capacity<br />調達容量</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.proc).toFixed(1)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
                     <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{maLast?.ach}% of target 目標比</span>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{lastBands.length > 1 ? (L === 'ja' ? `${lastBands.length}価格帯に分断` : `${lastBands.length} clearing prices`) : (L === 'ja' ? '全エリア一律' : 'single national price')}</span>
+                  </div>
+                  {/* Highest / lowest clearing zone of the newest auction — the areas
+                      in each are derived from the result, not hardcoded, because the
+                      split moves every year. */}
+                  <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest clearing zone<br />最高値エリア</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(hiBand?.price) ? hiBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{hiBand ? areaNames(hiBand.areas) : '—'}</div>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...hiDelta.style }}>{hiDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Hokkaido zone<br />北海道エリア</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.hok).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>separate zone · limited TTC north</div>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...hokDelta.style }}>{hokDelta.txt}</span>
-                  </div>
-                  <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Kyushu zone<br />九州エリア</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.kyu).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>separate zone · solar-heavy south</div>
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...kyuDelta.style }}>{kyuDelta.txt}</span>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Lowest clearing zone<br />最安値エリア</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(loBand?.price) ? loBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{loBand ? areaNames(loBand.areas) : '—'}{Number.isFinite(spread) && spread > 0 ? ` · spread ${yen(spread)}` : ''}</div>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...loDelta.style }}>{loDelta.txt}</span>
                   </div>
                 </div>
 
@@ -500,8 +576,8 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Delivery Year <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>実需給年度別 約定価格</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · Hokkaido &amp; Kyushu cleared as separate zones since FY2025 · 北海道・九州は別価格</div>
+                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Area <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア別 約定価格</span></div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · one bar per OCCTO area — equal heights are areas that cleared together · 同一価格のエリアは同じ高さ</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>auction held ~4 years ahead of delivery</span>
                   </div>
@@ -516,37 +592,39 @@ export function CapacityAuctionsScreen() {
                       <text x="38" y="34" textAnchor="end" fontSize="11" fill="currentColor">{(chStep * 3).toLocaleString('en-US')}</text>
                       <text x="38" y="114" textAnchor="end" fontSize="11" fill="currentColor">{(chStep * 2).toLocaleString('en-US')}</text>
                       <text x="38" y="194" textAnchor="end" fontSize="11" fill="currentColor">{chStep.toLocaleString('en-US')}</text>
-                      <text x="120.8" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2024</text>
-                      <text x="270.5" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2025</text>
-                      <text x="420.2" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2026</text>
-                      <text x="569.8" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2027</text>
-                      <text x="719.5" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2028</text>
-                      <text x="869.2" y="292" textAnchor="middle" fontSize="11" fill="currentColor">FY2029</text>
+                      {maChart.map((c) => (
+                        <text key={c.fy} x={c.cx} y="292" textAnchor="middle" fontSize="11" fill="currentColor">{c.fy}</text>
+                      ))}
                     </g>
                     {maChart.map((c) => (
                       <g key={c.fy}>
-                        <rect x={c.x} y={c.natY} width="40" height={c.natH} rx="4" fill="#00A5CF">
-                          <title>{`${c.fy} · National ¥${c.natLabel}/kW`}</title>
-                        </rect>
-                        {c.zonal && (
-                          <>
-                            <rect x={c.x + 46} y={c.hokY} width="18" height={c.hokH} rx="3" fill="#4A6FA5">
-                              <title>{`${c.fy} · Hokkaido ¥${c.hok.toLocaleString('en-US')}/kW`}</title>
-                            </rect>
-                            <rect x={c.x + 68} y={c.kyuY} width="18" height={c.kyuH} rx="3" fill="#8AB17D">
-                              <title>{`${c.fy} · Kyushu ¥${c.kyu.toLocaleString('en-US')}/kW`}</title>
-                            </rect>
-                          </>
+                        {c.bars.filter((b) => b.ok).map((b) => (
+                          <rect key={b.key} x={b.x} y={b.y} width={chBarW} height={b.h} rx="2" fill={areaColor(b.key, dark)}>
+                            <title>{`${c.fy} · ${b.name} ¥${b.v.toLocaleString('en-US')}/kW`}</title>
+                          </rect>
+                        ))}
+                        {/* National average unit price — below the clearing prices
+                            because the 経過措置 discount is netted off it. */}
+                        {c.natOk && (
+                          <line x1={c.x0 - 4} y1={c.natY} x2={c.x0 + chGroupW + 4} y2={c.natY} stroke="var(--tx2)" strokeWidth="1.5" strokeDasharray="5 3">
+                            <title>{`${c.fy} · national average ¥${Math.round(c.nat).toLocaleString('en-US')}/kW`}</title>
+                          </line>
                         )}
-                        <text x={c.x + 20} y={c.natY - 6} fontSize="10.5" fontWeight="600" textAnchor="middle" style={{ fill: 'var(--tx2)' }}>{c.natLabel}</text>
+                        <text x={c.cx} y={c.labelY} fontSize="10.5" fontWeight="600" textAnchor="middle" style={{ fill: 'var(--tx2)' }}>{c.label}</text>
                       </g>
                     ))}
                   </svg>
-                  <div style={s('display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)')}>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#00A5CF')}></span>National 全国</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#4A6FA5')}></span>Hokkaido 北海道</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#8AB17D')}></span>Kyushu 九州</span>
-                    <span style={s('margin-left:auto;color:var(--mut)')}>FY2024 cleared near the price cap · FY2024は上限価格近傍</span>
+                  <div style={s('display:flex;align-items:center;gap:14px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)')}>
+                    {CAPACITY_AREAS.map((a) => (
+                      <span key={a.key} style={s('display:inline-flex;align-items:center;gap:6px')}>
+                        <span style={{ width: 12, height: 12, borderRadius: 4, background: areaColor(a.key, dark) }}></span>
+                        {a.en} {a.ja}
+                      </span>
+                    ))}
+                    <span style={s('display:inline-flex;align-items:center;gap:6px')}>
+                      <span style={{ width: 12, height: 0, borderTop: '2px dashed var(--tx2)' }}></span>
+                      National avg 全国平均単価
+                    </span>
                   </div>
                 </div>
 
@@ -555,20 +633,20 @@ export function CapacityAuctionsScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Auction Results <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>約定結果一覧</span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction by delivery year · prices before 経過措置 adjustments</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction by delivery year · clearing-price range across the OCCTO areas</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year · GW</span>
                   </div>
-                  <div style={s("display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)")}>
-                    <span>DELIVERY 年度</span><span>HELD 実施</span><span style={s('text-align:right')}>NATIONAL 全国</span><span style={s('text-align:right')}>HOKKAIDO</span><span style={s('text-align:right')}>KYUSHU</span><span style={s('text-align:right')}>PROCURED 調達</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span>
+                  <div style={s("display:grid;grid-template-columns:.8fr .8fr .9fr 1.3fr .8fr .9fr 1.3fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)")}>
+                    <span>DELIVERY 年度</span><span>HELD 実施</span><span style={s('text-align:right')}>NATIONAL AVG 全国平均</span><span style={s('text-align:right')}>ZONAL RANGE 価格帯</span><span style={s('text-align:right')}>ZONES 区分</span><span style={s('text-align:right')}>PROCURED 調達</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span>
                   </div>
                   {maRows.map((m) => (
-                    <Hoverable key={m.fy} base="display:grid;grid-template-columns:.8fr .8fr .9fr .9fr .9fr .9fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={() => (m.source ? window.open(m.source, '_blank', 'noopener') : tRow())}>
+                    <Hoverable key={m.fy} base="display:grid;grid-template-columns:.8fr .8fr .9fr 1.3fr .8fr .9fr 1.3fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={() => (m.source ? window.open(m.source, '_blank', 'noopener') : tRow())}>
                       <span style={s("font-size:13px;font-weight:600;font-feature-settings:'tnum' 1")}>{m.fy}</span>
                       <span style={s("font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.held}</span>
                       <span style={s("text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1")}>{m.natl}</span>
-                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.hok}</span>
-                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.kyu}</span>
+                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.bands.length === 0 ? '—' : m.hi === m.lo ? yen(m.hi) : yen(m.lo) + ' – ' + yen(m.hi)}</span>
+                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{m.bands.length <= 1 ? (L === 'ja' ? '一律' : 'uniform') : m.bands.length}</span>
                       <span style={s("text-align:right;font-size:12.5px;font-feature-settings:'tnum' 1")}>{m.proc}</span>
                       <span style={s('display:flex;align-items:center;gap:8px;justify-content:flex-end')}>
                         <span style={s('width:72px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0')}><span style={m.bar}></span></span>
@@ -576,7 +654,57 @@ export function CapacityAuctionsScreen() {
                       </span>
                     </Hoverable>
                   ))}
-                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>Achievement = procured ÷ target capacity 調達容量÷目標調達量 · click a year for the full OCCTO publication</div>
+                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>National average = 約定総額（経過措置控除後）÷ 約定総容量, so it sits below the clearing prices · Achievement = 調達容量÷目標調達量 · click a year for the full OCCTO publication</div>
+                </div>
+
+                {/* Per-area clearing-price matrix — the split the headline figures hide */}
+                <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
+                  <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
+                    <div>
+                      <div style={s('font-size:16px;font-weight:600')}>Area Clearing Prices <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア毎の約定価格</span></div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Every OCCTO area, every delivery year · shading marks the price bands the auction split into · 濃い網掛けほど高値の価格帯</div>
+                    </div>
+                    <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year</span>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: `1.5fr repeat(${Math.max(maRows.length, 1)}, 1fr)`, gap: 0, marginTop: 12, fontSize: 11, fontWeight: 600, color: 'var(--mut)', letterSpacing: '.04em', padding: '0 8px 8px', borderBottom: '1px solid var(--dv)' }}>
+                    <span>AREA エリア</span>
+                    {maRows.map((m) => (
+                      <span key={m.fy} style={s('text-align:right')}>{m.fy}</span>
+                    ))}
+                  </div>
+                  {CAPACITY_AREAS.map((a) => (
+                    <div key={a.key} style={{ display: 'grid', gridTemplateColumns: `1.5fr repeat(${Math.max(maRows.length, 1)}, 1fr)`, gap: 0, alignItems: 'center', padding: '8px', borderBottom: '1px solid var(--dv)' }}>
+                      <span style={s('display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600')}>
+                        <span style={{ width: 8, height: 8, borderRadius: 999, background: areaColor(a.key, dark), flexShrink: 0 }}></span>
+                        {L === 'ja' ? a.ja : a.en} <span style={s('font-size:11px;font-weight:400;color:var(--mut)')}>{L === 'ja' ? a.en : a.ja}</span>
+                      </span>
+                      {maRows.map((m) => {
+                        const v = m.areas?.[a.key]
+                        const rank = m.bands.findIndex((b) => b.price === v)
+                        // Tint by band rank so the areas that cleared together read
+                        // as one block down the column; a uniform year stays flat.
+                        const t = m.bands.length > 1 && rank >= 0 ? 0.18 * (1 - rank / (m.bands.length - 1)) : 0
+                        return (
+                          <span
+                            key={m.fy}
+                            title={`${m.fy} · ${L === 'ja' ? a.ja : a.en} · ${m.bands.length > 1 && rank >= 0 ? `${L === 'ja' ? '価格帯' : 'band'} ${rank + 1}/${m.bands.length}` : L === 'ja' ? '全国一律' : 'uniform'}`}
+                            style={{
+                              textAlign: 'right',
+                              fontSize: 12.5,
+                              fontWeight: rank === 0 && m.bands.length > 1 ? 600 : 400,
+                              fontFeatureSettings: "'tnum' 1",
+                              padding: '4px 6px',
+                              borderRadius: 6,
+                              background: t > 0 ? (dark ? `rgba(31,182,220,${t})` : `rgba(0,165,207,${t})`) : 'transparent',
+                            }}
+                          >
+                            {typeof v === 'number' ? yen(v) : '—'}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  ))}
+                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>The auction splits the national market wherever an interconnector binds, so areas on either side of the constraint clear at different prices · 連系線制約により約定処理が分断されたエリアは別価格で約定します</div>
                 </div>
               </div>
             )}

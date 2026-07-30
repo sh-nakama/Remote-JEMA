@@ -81,6 +81,30 @@ export const filterChipBase = (on: boolean): CSS => ({
   whiteSpace: 'nowrap',
 })
 
+/**
+ * Per-area series colour, `[light, dark]`. Same palette the Market screens
+ * paint their area series with, so an area keeps one identity across the app.
+ * `dark` entries only differ where the light tone lacks contrast on the dark
+ * canvas.
+ */
+export const AREA_COLORS: Record<string, [string, string]> = {
+  hokkaido: ['#1B2A4A', '#8FA7D9'],
+  tohoku: ['#00A5CF', '#1FB6DC'],
+  tepco: ['#7B2D8E', '#C77BD8'],
+  chubu: ['#2A9D8F', '#2A9D8F'],
+  hokuriku: ['#4A6FA5', '#7C9CD1'],
+  kansai: ['#E76F51', '#E76F51'],
+  chugoku: ['#C1440E', '#E8794B'],
+  shikoku: ['#E9C46A', '#E9C46A'],
+  kyushu: ['#8AB17D', '#8AB17D'],
+}
+
+/** Resolve an area's colour for the active theme. */
+export function areaColor(key: string, dark: boolean): string {
+  const c = AREA_COLORS[key]
+  return c ? c[dark ? 1 : 0] : dark ? '#5D6B85' : '#B4BCC9'
+}
+
 /** 30-min slot index (0–47) → "HH:MM". */
 export function slotLabel(i: number): string {
   return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00')

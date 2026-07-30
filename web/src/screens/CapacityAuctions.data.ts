@@ -1,24 +1,51 @@
 // Fixture data ported from screens/capacity-auctions.html (DCLogic constructor).
 
+import type { AreaKey } from '../lib/types'
+
+/**
+ * The nine OCCTO areas the capacity market clears over, in the order every
+ * OCCTO results table lists them. Okinawa sits outside the interconnected grid
+ * the auction covers, so it has no clearing price.
+ */
+export const CAPACITY_AREAS: { key: AreaKey; en: string; ja: string }[] = [
+  { key: 'hokkaido', en: 'Hokkaido', ja: '北海道' },
+  { key: 'tohoku', en: 'Tohoku', ja: '東北' },
+  { key: 'tepco', en: 'Tokyo', ja: '東京' },
+  { key: 'chubu', en: 'Chubu', ja: '中部' },
+  { key: 'hokuriku', en: 'Hokuriku', ja: '北陸' },
+  { key: 'kansai', en: 'Kansai', ja: '関西' },
+  { key: 'chugoku', en: 'Chugoku', ja: '中国' },
+  { key: 'shikoku', en: 'Shikoku', ja: '四国' },
+  { key: 'kyushu', en: 'Kyushu', ja: '九州' },
+]
+
 export interface MaRow {
   fy: string
   held: string
+  /** OCCTO's national average unit price 総平均単価 (after 経過措置), formatted. */
   natl: string
-  hok: string
-  kyu: string
+  /**
+   * Clearing price per OCCTO area, ¥/kW·year. The auction splits wherever an
+   * interconnector binds, so the set of areas sharing a price differs every
+   * year — hence a per-area map rather than fixed Hokkaido/Kyushu columns.
+   */
+  areas: Partial<Record<AreaKey, number>>
   proc: string
   ach: number
   /** OCCTO source URL for this year's figures (live data only). */
   source?: string
 }
 
+const px = (...v: number[]): Partial<Record<AreaKey, number>> =>
+  Object.fromEntries(CAPACITY_AREAS.map((a, i) => [a.key, v[i]]))
+
 export const maData: MaRow[] = [
-  { fy: 'FY2024', held: 'Jul 2020', natl: '¥14,137', hok: '—', kyu: '—', proc: '167.8 GW', ach: 95 },
-  { fy: 'FY2025', held: 'Jul 2021', natl: '¥5,242', hok: '—', kyu: '—', proc: '165.3 GW', ach: 100 },
-  { fy: 'FY2026', held: 'Jul 2022', natl: '¥5,832', hok: '—', kyu: '—', proc: '168.1 GW', ach: 99 },
-  { fy: 'FY2027', held: 'Jul 2023', natl: '¥9,555', hok: '¥13,357', kyu: '¥8,462', proc: '165.9 GW', ach: 98 },
-  { fy: 'FY2028', held: 'Jul 2024', natl: '¥8,748', hok: '¥12,690', kyu: '¥7,980', proc: '166.5 GW', ach: 99 },
-  { fy: 'FY2029', held: 'Jan 2026', natl: '¥8,190', hok: '¥12,050', kyu: '¥7,410', proc: '166.2 GW', ach: 99 },
+  { fy: 'FY2024', held: 'Sep 2020', natl: '¥9,534', areas: px(14137, 14137, 14137, 14137, 14137, 14137, 14137, 14137, 14137), proc: '167.7 GW', ach: 97 },
+  { fy: 'FY2025', held: 'Dec 2021', natl: '¥3,109', areas: px(5242, 3495, 3495, 3495, 3495, 3495, 3495, 3495, 5242), proc: '165.3 GW', ach: 93 },
+  { fy: 'FY2026', held: 'Jan 2023', natl: '¥5,226', areas: px(8749, 5833, 5834, 5832, 5832, 5832, 5832, 5832, 8748), proc: '162.7 GW', ach: 92 },
+  { fy: 'FY2027', held: 'Jan 2024', natl: '¥7,847', areas: px(13287, 9044, 9555, 7823, 7638, 7638, 7638, 7638, 11457), proc: '167.4 GW', ach: 98 },
+  { fy: 'FY2028', held: 'Jan 2025', natl: '¥11,134', areas: px(14812, 14812, 14812, 10280, 8785, 8785, 8785, 8785, 13177), proc: '166.2 GW', ach: 97 },
+  { fy: 'FY2029', held: 'Jan 2026', natl: '¥13,303', areas: px(14972, 15111, 15111, 12388, 12388, 12388, 12388, 12388, 15112), proc: '166.1 GW', ach: 96 },
 ]
 
 export interface LtdaRow {

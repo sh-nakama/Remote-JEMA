@@ -114,6 +114,25 @@ fixed.
 - `web_api.py` is a **localhost dev helper only**: wildcard CORS, zero auth, DB-mutating +
   subprocess-launching endpoints, no job timeout `(open — P3)`. Never bind it beyond 127.0.0.1
   or reuse it as a "real" backend.
+- **Capacity-market figures are curated by hand from OCCTO PDFs** (`dashboard/capacity_data.py`)
+  — there is no machine-readable feed, so a new auction means re-reading the press release.
+  `pdfplumber` is broken in this venv (`cryptography` `_rust` DLL); use PyMuPDF (`fitz`).
+  Two traps in those PDFs: (a) the auction clears **per OCCTO area** and splits wherever an
+  interconnector binds, so the number of distinct prices changes every year (1 in FY2024, 6 in
+  FY2027) — never model it as a fixed Hokkaido/Kyushu pair; (b) `natl` is the **総平均単価 =
+  約定総額（経過措置控除後）÷ 約定総容量**, *not* a clearing price, so it always sits below the
+  zonal prices. Sanity-check any new year by confirming the per-area 約定容量 sum equals the
+  published 約定総容量.
+- **`screens/*.html` are frozen pre-implementation design exports, not a spec and not data.**
+  The four top-level files are hi-fi Claude Design frames (inlined `dc-runtime`, `DCLogic`
+  fixture blocks) that the React screens were ported from — nothing imports or builds them.
+  Their numbers are *illustrative placeholders* and several are simply wrong:
+  `capacity-auctions.html` invents Hokkaido/Kyushu clearing prices, dates every auction "Jul",
+  scrambles real figures across the wrong years (`¥5,242` is FY2025 Hokkaido, `¥9,555` is
+  FY2027 Tokyo), and asserts "Hokkaido & Kyushu cleared as separate zones since FY2027" when
+  FY2027 actually split six ways. Treat divergence between a shipped screen and its `.html`
+  ancestor as **expected**; never resync a screen to match one, and never copy a figure out of
+  one. (They're also generated artifacts — hand-editing means patching a minified bundle.)
 
 ## Policy observer
 

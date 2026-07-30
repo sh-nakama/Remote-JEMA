@@ -24,6 +24,7 @@ from repower.dashboard.export_web import (
     parse_briefing,
     parse_digest_answer,
 )
+from repower.timeutil import today_jst
 
 
 def test_anchor_date_picks_latest():
@@ -35,7 +36,9 @@ def test_anchor_date_ignores_none():
 
 
 def test_anchor_date_all_none_falls_back_to_today():
-    assert _anchor_date({"supply": None, "area_price": None}) == date.today()
+    # today_jst(), not date.today(): the exporter anchors on the Japanese market
+    # day, so on a UTC runner the two differ for the whole JST 00:00-09:00 window.
+    assert _anchor_date({"supply": None, "area_price": None}) == today_jst()
 
 
 def test_write_json_roundtrip_utf8(tmp_path: Path):
