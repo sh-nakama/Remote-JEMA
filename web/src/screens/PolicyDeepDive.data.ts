@@ -19,6 +19,8 @@ export interface Committee {
   sourceCount?: number
   meetings?: number
   lastDate?: string | null
+  /** Summarisation queue priority (lower = summarised first). Live rows. */
+  priority?: number
   /** Committee-level cross-meeting synthesis (raw markdown, may be null) + how far
    * it's been synthesised, and a status rollup of its meetings (live rows). */
   synthesisEn?: string | null
@@ -57,6 +59,10 @@ export interface Meeting {
   /** False when `date` is a processing timestamp (updated/detected), not the
    * real meeting date — the backfill hasn't found it yet (live rows). */
   dateReal?: boolean
+  /** ISO/SQL timestamp of when this meeting row was last updated — bumped when it
+   * reaches `done` (= summarised). Live rows only; powers the "newly summarised"
+   * recency view. */
+  updatedAt?: string | null
   status: string
   tori?: boolean
   prevEn?: string

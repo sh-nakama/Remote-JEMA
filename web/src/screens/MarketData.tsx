@@ -1,9 +1,13 @@
 // Ported from screens/market-data.html — the Market Data screen.
-import { useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
+import { Fragment, useEffect, useMemo, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
-import { FreshnessChip } from '../lib/freshness'
+import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { useManifest } from '../lib/data'
+import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
+import type { NotifItem, NotifSection } from '../lib/notifications'
+import { PolicyNavBadge } from '../lib/policyActivity'
 import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate } from '../lib/chartkit'
 import { downloadCsv } from '../lib/download'
 import {
@@ -19,6 +23,7 @@ import {
 import {
   useWholesaleLive,
   windowLive,
+  windowLivePrev,
   windowSupply,
   useDriversLive,
   useBalancingLive,
@@ -149,6 +154,12 @@ export function MarketDataScreen() {
   const [closed, setClosed] = useState<Record<string, boolean>>({})
   const [drRange, setDrRange] = useState<DrRange>('90D')
   const [drOn, setDrOn] = useState<{ jkm: boolean; ncl: boolean; fx: boolean }>({ jkm: true, ncl: true, fx: true })
+  // Compare overlay (period-over-period) + inline drill-down accordions.
+  const [compare, setCompare] = useState(false)
+  const [expandedLine, setExpandedLine] = useState<string | null>(null)
+  const [expandedProduct, setExpandedProduct] = useState<string | null>(null)
+  // Notifications popover (bell).
+  const [showNotif, setShowNotif] = useState(false)
 
   const showHeatmap = true
 
@@ -221,12 +232,11 @@ export function MarketDataScreen() {
     downloadCsv(`jema-wholesale-${gran}-${range}.csv`, rows)
     toast(`Downloaded ${rows.length.toLocaleString('en-US')} rows (CSV) · CSVで保存しました`)
   }
-  const tCompare = () => toast('Compare mode: pick a second period to overlay — not in this prototype · 比較期間の選択は対象外')
-  const tLine = () => toast('Line drill-down (hourly flows & spread history) — not in this prototype · 連系線ドリルダウンは対象外')
+  const tCompare = () => setCompare((prev) => !prev)
+  const tLine = (key: string) => setExpandedLine((prev) => (prev === key ? null : key))
   const tSystem = () => toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中')
-  const tProduct = () => toast('Product drill-down (per-slot prices & offers) — not in this prototype · 商品別ドリルダウンは対象外')
-  const tNotif = () => toast('Notifications live on the Overview screen · 通知は概況画面にあります')
-  const tNav = () => toast('Placeholder destination in this prototype · 本プロトタイプ対象外')
+  const tProduct = (code: string) => setExpandedProduct((prev) => (prev === code ? null : code))
+  const toggleNotif = () => setShowNotif((n) => !n)
   const tRefresh = () => {
     refreshData()
     toast('Reloaded latest data · 最新データを再取得しました')
@@ -240,6 +250,87 @@ export function MarketDataScreen() {
   const driversLive = useDriversLive()
   const balLive = useBalancingLive()
   const tielineLive = useTielineLive('DAM')
+
+  // ---- notifications (bell popover) ----
+  // Derived from what this screen already holds: the export manifest (how fresh
+  // the snapshot is) and the loaded area series (day-on-day moves). JEMA has no
+  // alert service, so anything not derivable from a snapshot is deliberately
+  // absent rather than faked.
+  const manifest = useManifest()
+  const { seenAt: notifSeenAt, markSeen: notifMarkSeen } = useNotifSeen('jema-notif-seen-market')
+  const STALE_MS = 48 * 60 * 60 * 1000
+  const MOVE_PCT = 10 // day-on-day threshold for "notable" (JEPX daily averages swing a few % routinely)
+
+  const dataItems: NotifItem[] = []
+  const mf = manifest.data
+  if (mf?.generated_at) {
+    const priceDate = mf.sources?.area_price || mf.sources?.system_price || null
+    const supplyDate = mf.sources?.supply || null
+    const priceTs = tsOfDate(priceDate || mf.generated_at)
+    const stale = Number.isFinite(priceTs) && Date.now() - priceTs > STALE_MS
+    dataItems.push({
+      key: 'freshness',
+      kind: stale ? 'warn' : 'new',
+      title: stale
+        ? L === 'ja' ? '価格データが48時間以上更新されていません' : 'Prices are more than 48 hours old'
+        : L === 'ja' ? `価格データ ${priceDate ?? '—'} まで` : `Prices through ${priceDate ?? '—'}`,
+      meta: [
+        supplyDate ? (L === 'ja' ? `需給 ${supplyDate} まで` : `supply through ${supplyDate}`) : null,
+        L === 'ja' ? `書出 ${fmtStamp(mf.generated_at)}` : `exported ${fmtStamp(mf.generated_at)}`,
+      ]
+        .filter(Boolean)
+        .join(' · '),
+      ts: Date.parse(mf.generated_at),
+      onClick: tRefresh,
+    })
+  }
+
+  // Day-on-day move of each loaded area's daily average (index 0 = latest day).
+  // Only selected areas are fetched, so this covers exactly what's on screen.
+  type Move = { pct: number; item: NotifItem }
+  const moveItems: NotifItem[] = selectedKeys
+    .map((key): Move | null => {
+      const a = live.areas[key]
+      if (!a || a.dAvg.length < 2) return null
+      const now = a.dAvg[0]
+      const prev = a.dAvg[1]
+      if (!Number.isFinite(now) || !Number.isFinite(prev) || prev === 0) return null
+      const pct = ((now - prev) / Math.abs(prev)) * 100
+      if (Math.abs(pct) < MOVE_PCT) return null
+      const def = areas.find((x) => x.key === key)
+      const day = (a.dDt[0] || '').slice(0, 10)
+      return {
+        pct,
+        item: {
+          key: 'move:' + key,
+          kind: 'new',
+          title: `${(L === 'ja' ? def?.ja : def?.en) ?? key} · ¥${now.toFixed(2)}/kWh`,
+          meta: `${pct > 0 ? '▲' : '▼'} ${Math.abs(pct).toFixed(1)}% ${L === 'ja' ? '前日比' : 'vs previous day'}${day ? ' · ' + day : ''}`,
+          badge: isWatched('area:' + key) ? '★' : undefined,
+          ts: tsOfDate(day),
+          onClick: () => {
+            setView('wholesale')
+            setSel((p) => ({ ...p, [key]: true }))
+            setShowNotif(false)
+          },
+        },
+      }
+    })
+    .filter((x): x is Move => x != null)
+    .sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct))
+    .slice(0, 5)
+    .map((x) => x.item)
+
+  const notifSections: NotifSection[] = [
+    { key: 'data', label: L === 'ja' ? 'データ更新' : 'DATA UPDATES', items: dataItems },
+    {
+      key: 'moves',
+      label: L === 'ja' ? `大きな変動 · 前日比${MOVE_PCT}%以上` : `NOTABLE MOVES · ≥${MOVE_PCT}% day-on-day`,
+      items: moveItems,
+    },
+  ]
+  const notifUnread = unreadCount(notifSections, notifSeenAt)
+
 
   // ---- computed (mirror of renderVals) ----
   const v = useMemo(() => {
@@ -414,6 +505,16 @@ export function MarketDataScreen() {
       const ptsP = (arr: number[], y: (val: number) => number) =>
         arr.map((val, i) => pxAt(i).toFixed(1) + ',' + y(val).toFixed(1)).join(' ')
       const pxs = w.avg.map((_v, i) => pxAt(i))
+      // Compare overlay: previous equal-length window's avg, aligned slot-for-slot
+      // to this window by index. Clamped to the plot box so an outlier prior period
+      // can't escape the chart. Always computed; JSX only draws it when `compare`.
+      const pyC = (val: number) => Math.max(12, Math.min(150, py(val)))
+      const prevAvg = la ? windowLivePrev(la, gran, range) : []
+      const cmpN = Math.min(w.avg.length, prevAvg.length)
+      const pCmp =
+        cmpN > 1
+          ? prevAvg.slice(0, cmpN).map((val, i) => pxAt(i).toFixed(1) + ',' + pyC(val).toFixed(1)).join(' ')
+          : ''
       const band =
         ptsP(w.max, py) +
         ' ' +
@@ -539,6 +640,7 @@ export function MarketDataScreen() {
         pMax: ptsP(w.max, py),
         pAvg: ptsP(w.avg, py),
         pMin: ptsP(w.min, py),
+        pCmp,
         vMax: Math.max(...w.max).toFixed(1),
         vAvg: mean(w.avg).toFixed(1),
         vMin: Math.min(...w.min).toFixed(1),
@@ -586,13 +688,24 @@ export function MarketDataScreen() {
       const proc = lv ? Math.round(lv.proc).toLocaleString('en-US') : b.proc
       const off = lv ? Math.round(lv.off).toLocaleString('en-US') : b.off
       const ach = lv && lv.ach != null ? Math.round(lv.ach) : b.ach
+      // Per-area breakdown for the drill-down (procured-desc). Live only.
+      const areaDetail = (balLive.ready ? balLive.areaRows[BAL_CODES[bi]] : undefined) || []
       return {
         jp: b.jp,
         en: b.en,
+        code: BAL_CODES[bi],
         price,
         proc,
         off,
         ach,
+        areaRows: areaDetail.map((r) => ({
+          area: r.area,
+          name: areaDefs.find((a) => a.key === r.area)?.[L === 'ja' ? 'ja' : 'en'] || r.area,
+          price: r.price != null ? '¥' + r.price.toFixed(2) : '—',
+          proc: Math.round(r.proc).toLocaleString('en-US'),
+          off: Math.round(r.off).toLocaleString('en-US'),
+          ach: r.ach != null ? Math.round(r.ach) : null,
+        })),
         dot: { width: 8, height: 8, borderRadius: 999, background: dark ? b.cd : b.c, flexShrink: 0 } as CSS,
         bar: { display: 'block', width: ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
       }
@@ -662,6 +775,13 @@ export function MarketDataScreen() {
               whiteSpace: 'nowrap',
             }
           : { fontSize: 11.5, color: 'var(--fnt)', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }) as CSS,
+        // Intraday drill-down: per-slot utilization + flow (MW), plus peak.
+        peakPct: Math.round(Math.max(...u) * 100),
+        bars: u.map((val, i) => ({
+          h: Math.max(3, Math.round(val * 100)),
+          barCol: { display: 'block', width: '100%', borderRadius: 2, background: uColor(val) } as CSS,
+          t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * capN) + ' MW',
+        })),
         strip: u.map((val, i) => ({
           s: { height: 14, borderRadius: 2, background: uColor(val) } as CSS,
           t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * capN) + ' MW',
@@ -891,7 +1011,7 @@ export function MarketDataScreen() {
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('policy')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} /><span>Policy Deep Dive</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>3</span>
+            <PolicyNavBadge />
           </Hoverable>
         </div>
 
@@ -903,9 +1023,11 @@ export function MarketDataScreen() {
               <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{watch.length}</span>
             )}
           </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNav}>
+          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={toggleNotif}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} /><span>Notifications</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>2</span>
+            {notifUnread > 0 && (
+              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
+            )}
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} /><span>Settings</span>
@@ -943,9 +1065,11 @@ export function MarketDataScreen() {
             {isDarkB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />)}
             {isLightB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />)}
           </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
+          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            {notifUnread > 0 && (
+              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
             <span style={v.langJaS} onClick={() => setLang('ja')}>日本語</span>
@@ -958,6 +1082,23 @@ export function MarketDataScreen() {
               <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
             </div>
           </div>
+
+          {/* Notifications — snapshot freshness + notable day-on-day moves */}
+          <NotificationsPopover
+            open={showNotif}
+            lang={L}
+            sections={notifSections}
+            seenAt={notifSeenAt}
+            onClose={() => setShowNotif(false)}
+            onMarkRead={notifMarkSeen}
+            action={{
+              label: L === 'ja' ? '政策の通知 →' : 'Policy activity →',
+              onClick: () => {
+                setShowNotif(false)
+                setScreen('policy')
+              },
+            }}
+          />
         </div>
   )
 
@@ -1019,7 +1160,7 @@ export function MarketDataScreen() {
                   <span style={v.gMS} onClick={granM}>Monthly</span>
                 </div>
                 <span style={s('margin-left:auto;display:flex;gap:8px;align-items:center')}>
-                  <Hoverable as="span" base="font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={tCompare}>Compare 比較</Hoverable>
+                  <Hoverable as="span" base={compare ? 'font-size:12px;font-weight:600;color:var(--ac);cursor:pointer;white-space:nowrap' : 'font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap'} hover="color:var(--ac)" onClick={tCompare} title={L === 'ja' ? '前期間を重ねて比較' : 'Overlay the previous equal-length period'}>{compare ? '✓ ' : ''}Compare 比較</Hoverable>
                   <span style={s('color:var(--fnt3)')}>·</span>
                   <Hoverable as="span" base="font-size:12px;font-weight:500;color:var(--mut);cursor:pointer;white-space:nowrap" hover="color:var(--tx2)" onClick={resetAll}>Reset リセット</Hoverable>
                 </span>
@@ -1178,6 +1319,9 @@ export function MarketDataScreen() {
                             <polyline points={sec.pMax} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>
                             <g style={s('color:var(--tx)')}><polyline points={sec.pAvg} fill="none" stroke="currentColor" strokeWidth="1.8"></polyline></g>
                             <polyline points={sec.pMin} fill="none" stroke="#00A5CF" strokeWidth="1.6"></polyline>
+                            {compare && sec.pCmp ? (
+                              <polyline points={sec.pCmp} fill="none" stroke="var(--mut)" strokeWidth="1.5" strokeDasharray="4 3" strokeOpacity="0.85"></polyline>
+                            ) : null}
                           </ChartHover>
                           <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
                             <span>{sec.priceAx[0]}</span><span>{sec.priceAx[1]}</span><span>{sec.priceAx[2]}</span>
@@ -1186,6 +1330,9 @@ export function MarketDataScreen() {
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #00A5CF')}></span>Min ¥{sec.vMin}</span>
+                            {compare && sec.pCmp ? (
+                              <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px dashed var(--mut)')}></span>{L === 'ja' ? '前期間 avg' : 'Prev period avg'}</span>
+                            ) : null}
                           </div>
                         </div>
                       </div>
@@ -1232,10 +1379,11 @@ export function MarketDataScreen() {
                     <span>PRODUCT · 商品</span><span style={s('text-align:right')}>AVG PRICE</span><span style={s('text-align:right')}>PROCURED</span><span style={s('text-align:right')}>OFFERED</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span>
                   </div>
                   {v.balRows.map((b, bi) => (
-                    <Hoverable key={bi} base="display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={tProduct}>
+                    <Fragment key={bi}>
+                    <Hoverable base={expandedProduct === b.code ? 'display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer;background:var(--hov)' : 'display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer'} hover="background:var(--hov)" onClick={() => tProduct(b.code)}>
                       <span style={s('display:flex;align-items:center;gap:9px;min-width:0')}>
                         <span style={b.dot}></span>
-                        <span style={s('font-size:13px;font-weight:600;white-space:nowrap')}>{b.jp} <span style={s('font-weight:400;color:var(--mut);font-size:11.5px')}>{b.en}</span></span>
+                        <span style={s('font-size:13px;font-weight:600;white-space:nowrap')}>{expandedProduct === b.code ? '▾ ' : '▸ '}{b.jp} <span style={s('font-weight:400;color:var(--mut);font-size:11.5px')}>{b.en}</span></span>
                       </span>
                       <span style={s("text-align:right;font-size:13px;font-weight:600;font-feature-settings:'tnum' 1")}>¥{b.price}</span>
                       <span style={s("text-align:right;font-size:13px;font-feature-settings:'tnum' 1")}>{b.proc}</span>
@@ -1245,6 +1393,31 @@ export function MarketDataScreen() {
                         <span style={s("font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1")}>{b.ach}%</span>
                       </span>
                     </Hoverable>
+                    {expandedProduct === b.code ? (
+                      <div style={s('padding:11px 10px 14px;border-bottom:1px solid var(--dv);background:var(--bg0)')}>
+                        <div style={s('font-size:12px;font-weight:600;margin-bottom:8px')}>{L === 'ja' ? 'エリア別 調達内訳' : 'Procurement by TSO area'} <span style={s('font-weight:400;color:var(--mut);font-size:11px')}>{b.jp} {b.en}</span></div>
+                        {b.areaRows.length ? (
+                          <>
+                            <div style={s('display:grid;grid-template-columns:1.4fr .9fr .9fr .9fr .8fr;gap:0;font-size:10.5px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 6px 6px;border-bottom:1px solid var(--dv)')}>
+                              <span>AREA · エリア</span><span style={s('text-align:right')}>AVG PRICE</span><span style={s('text-align:right')}>PROCURED</span><span style={s('text-align:right')}>OFFERED</span><span style={s('text-align:right')}>達成率</span>
+                            </div>
+                            {b.areaRows.map((r) => (
+                              <div key={r.area} style={s('display:grid;grid-template-columns:1.4fr .9fr .9fr .9fr .8fr;gap:0;align-items:center;padding:6px;border-bottom:1px solid var(--dv)')}>
+                                <span style={s('font-size:12px;font-weight:500')}>{r.name}</span>
+                                <span style={s("text-align:right;font-size:12px;font-weight:600;font-feature-settings:'tnum' 1")}>{r.price}</span>
+                                <span style={s("text-align:right;font-size:12px;font-feature-settings:'tnum' 1")}>{r.proc}</span>
+                                <span style={s("text-align:right;font-size:12px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{r.off}</span>
+                                <span style={s("text-align:right;font-size:12px;font-feature-settings:'tnum' 1")}>{r.ach != null ? r.ach + '%' : '—'}</span>
+                              </div>
+                            ))}
+                            <div style={s('font-size:10.5px;color:var(--mut);margin-top:7px')}>{L === 'ja' ? '各エリアの直近ウィンドウ平均（¥/ΔkW·30min · MW）· 達成率＝調達量／応札量' : 'Per-area window averages (¥/ΔkW·30min · MW) · achievement = procured / offered'}</div>
+                          </>
+                        ) : (
+                          <div style={s('font-size:11.5px;color:var(--mut)')}>{L === 'ja' ? 'エリア別データは読込中です。' : 'Per-area data still loading.'}</div>
+                        )}
+                      </div>
+                    ) : null}
+                    </Fragment>
                   ))}
                   <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · Prices are weighted daily averages · 価格は日次加重平均</div>
                 </div>
@@ -1383,8 +1556,9 @@ export function MarketDataScreen() {
                     <span>LINE · 連系線</span><span>ROUTE · 区間</span><span style={s('text-align:right')}>FLOW</span><span style={s('text-align:right')}>TTC</span><span style={s('text-align:right')}>UTILIZATION 利用率</span><span style={s('text-align:right')}>SPREAD 値差</span><span style={s('text-align:right')}>CONGESTED 混雑</span>
                   </div>
                   {v.icRows.map((ln) => (
-                    <Hoverable key={ln.key} base="display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer" hover="background:var(--hov)" onClick={tLine}>
-                      <span style={s('min-width:0')}><span style={s('display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.n1}</span><span style={s('display:block;font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.n2}</span></span>
+                    <Fragment key={ln.key}>
+                    <Hoverable base={expandedLine === ln.key ? 'display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer;background:var(--hov)' : 'display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer'} hover="background:var(--hov)" onClick={() => tLine(ln.key)}>
+                      <span style={s('min-width:0')}><span style={s('display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{expandedLine === ln.key ? '▾ ' : '▸ '}{ln.n1}</span><span style={s('display:block;font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.n2}</span></span>
                       <span style={s('font-size:12px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.route}</span>
                       <span style={s("text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{ln.flow}</span>
                       <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{ln.cap}</span>
@@ -1395,6 +1569,22 @@ export function MarketDataScreen() {
                       <span style={s("text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{ln.spread}</span>
                       <span style={s('text-align:right')}><span style={ln.congS}>{ln.congTxt}</span></span>
                     </Hoverable>
+                    {expandedLine === ln.key ? (
+                      <div style={s('padding:12px 10px 16px;border-bottom:1px solid var(--dv);background:var(--bg0)')}>
+                        <div style={s('display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;flex-wrap:wrap;gap:6px')}>
+                          <span style={s('font-size:12.5px;font-weight:600')}>{L === 'ja' ? '当日の30分コマ別 フロー・利用率' : 'Intraday flow & utilization · 48 × 30-min slots'}</span>
+                          <span style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{ln.route} · {L === 'ja' ? 'ピーク' : 'peak'} {ln.peakPct}% · TTC {ln.cap} MW · {L === 'ja' ? '値差' : 'spread'} {ln.spread}</span>
+                        </div>
+                        <div style={s('display:grid;grid-template-columns:repeat(48,1fr);gap:2px;align-items:end;height:64px')}>
+                          {ln.bars.map((c, ci) => (
+                            <span key={ci} title={c.t} style={{ ...c.barCol, height: c.h + '%' }}></span>
+                          ))}
+                        </div>
+                        <div style={s("display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);margin-top:6px;font-feature-settings:'tnum' 1")}><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
+                        <div style={s('font-size:10.5px;color:var(--mut);margin-top:6px')}>{L === 'ja' ? 'バーの高さ＝運用容量に対する利用率 · ホバーでMW表示' : 'Bar height = utilization of TTC · hover for MW'}</div>
+                      </div>
+                    ) : null}
+                    </Fragment>
                   ))}
                   <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>TTC = total transfer capability 運用容量 · flows are net of counter-flows · click a line for hourly detail</div>
                 </div>

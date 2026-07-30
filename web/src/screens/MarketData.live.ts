@@ -152,9 +152,16 @@ export interface BalRow {
   ach: number | null
 }
 
+/** One product's figures for a single TSO area (drill-down detail). */
+export interface BalAreaRow extends BalRow {
+  area: string
+}
+
 export interface BalancingLive {
   ready: boolean
   rows: Record<string, BalRow>
+  /** Per-product, per-area breakdown (procured-desc) for the row drill-down. */
+  areaRows: Record<string, BalAreaRow[]>
   procTot: number
   avgPrice: number | null
   /** Latest stats-window end date (ISO) across products/areas — caption "as of". */
@@ -169,7 +176,7 @@ const BAL_AREAS = ['hokkaido', 'tohoku', 'tepco', 'chubu', 'hokuriku', 'kansai',
  * mean clearing price. (需給調整市場 is procured nationwide.) */
 export function useBalancingLive(): BalancingLive {
   const nonce = useDataNonce()
-  const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, procTot: 0, avgPrice: null, end: null })
+  const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, areaRows: {}, procTot: 0, avgPrice: null, end: null })
   useEffect(() => {
     let alive = true
     const jobs: Promise<BalancingStats | null>[] = []
@@ -180,6 +187,7 @@ export function useBalancingLive(): BalancingLive {
       .then((all) => {
         if (!alive) return
         const rows: Record<string, BalRow> = {}
+        const areaRows: Record<string, BalAreaRow[]> = {}
         let procTot = 0
         let end: string | null = null
         for (const s of all) if (s?.end && (!end || s.end > end)) end = s.end
@@ -187,14 +195,20 @@ export function useBalancingLive(): BalancingLive {
           let proc = 0
           let off = 0
           const ps: number[] = []
+          const ar: BalAreaRow[] = []
           for (const s of all) {
             if (!s || s.product_code !== code) continue
+            const aProc = s.avg_contracted_mw ?? 0
+            const aOff = s.avg_bid_volume_mw ?? 0
             if (s.avg_contracted_mw != null) proc += s.avg_contracted_mw
             if (s.avg_bid_volume_mw != null) off += s.avg_bid_volume_mw
             if (s.avg_price != null) ps.push(s.avg_price)
+            if (aProc > 0 || aOff > 0 || s.avg_price != null)
+              ar.push({ area: s.area, price: s.avg_price, proc: aProc, off: aOff, ach: aOff > 0 ? (aProc / aOff) * 100 : null })
           }
           const price = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : null
           rows[code] = { price, proc, off, ach: off > 0 ? (proc / off) * 100 : null }
+          areaRows[code] = ar.sort((a, b) => b.proc - a.proc)
           procTot += proc
         }
         // Volume-weighted by procured (contracted) MW across products — matches the
@@ -210,7 +224,7 @@ export function useBalancingLive(): BalancingLive {
           }
         }
         const avgPrice = wDen > 0 ? wNum / wDen : null
-        setState({ ready: true, rows, procTot, avgPrice, end })
+        setState({ ready: true, rows, areaRows, procTot, avgPrice, end })
       })
       .catch(() => {})
     return () => {
@@ -386,6 +400,21 @@ export function windowLive(la: LiveArea, gran: Gran, range: Range): Windowed {
     n ? fmtDate(dts[n - 1]) : '',
   ]
   return { avg, max, min, dt: dts, labels }
+}
+
+/**
+ * The window immediately *before* windowLive's (period-over-period), same length
+ * and downsampling, returned as avg only (oldest -> newest) for the Compare
+ * overlay. Empty when there is no prior data. The caller aligns it slot-for-slot
+ * to the current window by index, so it reads as "same position, previous period".
+ */
+export function windowLivePrev(la: LiveArea, gran: Gran, range: Range): number[] {
+  const want = Math.min(PERIODS[gran][range], la.avg.length)
+  const step = Math.max(1, Math.ceil(want / MAX_POINTS))
+  const order: number[] = []
+  for (let i = 2 * want - 1; i >= want; i -= step) order.push(i) // oldest -> newest of the prior block
+  const keep = order.filter((i) => i < la.avg.length && Number.isFinite(la.avg[i]))
+  return keep.map((i) => la.avg[i])
 }
 
 export interface SupplyWindow {

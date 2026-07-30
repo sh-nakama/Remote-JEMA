@@ -12,11 +12,13 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from repower.policy.scraper import (
     POLITE_DELAY,
     discover_meetings,
     fetch_committee_dates,
+    fetch_meti_url_map,
     fetch_occto_meeting_date,
     list_materials,
 )
@@ -24,6 +26,7 @@ from repower.policy.store import (
     committee_or_config,
     known_meeting_nums,
     meetings_missing_date,
+    meetings_missing_materials,
     record_meeting,
     set_committee_checked,
     set_meeting_dates,
@@ -34,11 +37,17 @@ from repower.policy.store import (
 
 def _select_committees(keys: list[str] | None, db_path: str | None):
     """Committees to process: the given *keys* (resolved DB-first so runtime-added
-    ones work), or all tracked (``enabled=1``, incl. user-added) committees when
-    *keys* is None. Callers sync beforehand, so no second sync here."""
+    ones work), or **every known committee** when *keys* is None — tracked *and*
+    discovered/untracked (``include_disabled=True``).
+
+    Detection is decoupled from tracking: we scan the whole catalog so a
+    newly-discovered committee's meetings are recorded (as pending) right away,
+    without waiting for the user to track it. The ``enabled`` flag only gates
+    *summarisation* (see ``pipeline.run``'s ``only_enabled``), not detection.
+    Callers sync beforehand, so no second sync here."""
     if keys:
         return [c for c in (committee_or_config(k, db_path=db_path) for k in keys) if c is not None]
-    return tracked_committees(db_path=db_path, sync=False)
+    return tracked_committees(db_path=db_path, sync=False, include_disabled=True)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +59,7 @@ def detect(
     enumerate_window: int = 8,
     backfill_to: int | None = None,
     dry_run: bool = False,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> list[dict]:
     """Run detection over the selected committees (default: all).
 
@@ -57,15 +67,23 @@ def detect(
 
         {"key", "source", "status", "latest_online", "known_latest", "new", "enumerated"}
 
-    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``.
+    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``. ``progress``, if
+    given, is called as ``progress(done, total, key)`` at the start of each committee
+    so a UI can show live "committee i of N" feedback during the (slow) scan.
     """
     if not dry_run:
         sync_committees(db_path)
 
     committees = _select_committees(keys, db_path)
     results: list[dict] = []
+    total = len(committees)
 
-    for c in committees:
+    for idx, c in enumerate(committees):
+        if progress is not None:
+            try:
+                progress(idx, total, c.key)
+            except Exception:  # noqa: BLE001 — progress is best-effort UI feedback
+                pass
         known = known_meeting_nums(c.key, db_path)
         known_latest = max(known) if known else None
 
@@ -160,5 +178,62 @@ def backfill_dates(
         results.append({"key": c.key, "source": c.source, "dated": updated})
         logger.info("policy dates %-26s updated=%d", c.key, updated)
         time.sleep(POLITE_DELAY)  # be gentle on meti.go.jp between committees
+
+    return results
+
+
+def backfill_materials(
+    keys: list[str] | None = None,
+    *,
+    db_path: str | None = None,
+    limit_per_committee: int | None = 8,
+) -> list[dict]:
+    """Enumerate materials for meetings that were detected without any.
+
+    ``detect`` only fetches materials for *new* meetings, so a meeting first seen
+    while its committee page was unavailable stays material-less — and the Policy
+    Deep Dive hides material-less, non-error meetings, so such a meeting never
+    appears even though its committee is tracked. This re-fetches the meeting pages
+    (newest first, capped at ``limit_per_committee`` per committee per run) and
+    records whatever materials are now published, so catch-up self-heals over one or
+    more runs. ``limit_per_committee=None`` processes every material-less meeting.
+
+    Returns one result dict per committee::
+
+        {"key", "source", "materialised", "checked"}
+    """
+    sync_committees(db_path)
+    committees = _select_committees(keys, db_path)
+    results: list[dict] = []
+
+    for c in committees:
+        nums = meetings_missing_materials(c.key, db_path=db_path)
+        if limit_per_committee is not None:
+            nums = nums[:limit_per_committee]
+        # METI: resolve every meeting's subpage URL from ONE index fetch, so we
+        # don't re-hit the (WAF-challenged) index once per meeting. If the index is
+        # unreachable this run, defer the whole committee rather than hammering it.
+        meti_urls = None
+        if nums and not c.is_occto and not c.is_egc:
+            meti_urls = fetch_meti_url_map(c, db_path=db_path)
+            if not meti_urls:
+                logger.info("policy materials %-26s index unreachable; deferring", c.key)
+                results.append(
+                    {"key": c.key, "source": c.source, "materialised": 0, "checked": 0}
+                )
+                continue
+        materialised = 0
+        for n in nums:
+            page_url = meti_urls.get(n) if meti_urls is not None else None
+            mats = list_materials(c, n, db_path=db_path, page_url=page_url)
+            if mats:
+                record_meeting(c.key, n, mats, db_path=db_path)
+                materialised += 1
+            time.sleep(POLITE_DELAY)  # be gentle between meeting-page fetches
+        results.append(
+            {"key": c.key, "source": c.source, "materialised": materialised, "checked": len(nums)}
+        )
+        if nums:
+            logger.info("policy materials %-26s materialised=%d/%d", c.key, materialised, len(nums))
 
     return results

@@ -141,6 +141,8 @@ def parse_meti_meeting_dates(content: bytes | str, index_url: str) -> dict[int, 
     out: dict[int, datetime.date] = {}
     for a in soup.find_all("a", href=True):
         full = a["href"] if a["href"].startswith("http") else urljoin(index_url, a["href"])
+        if "/shingikai/" not in urlparse(full).path:
+            continue  # skip non-committee links (e.g. footer /main/31.html)
         num = meeting_num_from_url(full)
         if num is None or num in out:
             continue
@@ -265,7 +267,12 @@ def parse_pdf_links(content: bytes | str, base_url: str) -> list[dict]:
 def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, str]:
     """Map ``meeting_num → absolute subpage URL`` from a METI index page.
 
-    Matches ``NNN.html`` / ``N.html`` links (the numbered meeting subpages).
+    Matches ``NNN.html`` / ``N.html`` links (the numbered meeting subpages). Only
+    links whose path is under ``/shingikai/`` are kept — this drops footer/nav links
+    such as ``/main/31.html`` that would otherwise register as a phantom meeting and
+    corrupt the latest-meeting frontier. Joint meetings hosted under a sibling
+    committee dir (e.g. ``.../suiso_seisaku/014.html``) are still under ``/shingikai/``
+    and remain included.
     """
     soup = _soup(content)
     out: dict[int, str] = {}
@@ -274,6 +281,8 @@ def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, s
         if not re.search(r"(^|/)\d{1,3}\.html(?:[?#].*)?$", href, re.IGNORECASE):
             continue
         full = href if href.startswith("http") else urljoin(index_url, href)
+        if "/shingikai/" not in urlparse(full).path:
+            continue  # skip non-committee links (e.g. footer /main/31.html)
         num = meeting_num_from_url(full)
         if num is not None:
             out.setdefault(num, full)
@@ -281,26 +290,44 @@ def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, s
 
 
 def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None = None) -> list[dict]:
-    """Parse an EGC index/log table → list of ``{meeting_num, direct_pdfs, haifu_url}``.
+    """Parse an EGC index/log table → list of ``{meeting_num, date, direct_pdfs, haifu_url}``.
 
-    Each meeting row carries direct PDFs (議事要旨 / 議事録) plus a 配布資料 (haifu)
-    subpage URL holding the handout PDFs. Rows without any PDF/haifu link (e.g.
-    ``第1回～第5回`` navigation rows) are skipped.
+    Each meeting row carries a date and a ``第N回`` label, optionally with direct PDFs
+    (議事要旨 / 議事録) and a 配布資料 (haifu) subpage URL holding the handout PDFs. A row
+    is kept when it is a *genuine held meeting* — it has materials **or** a parseable
+    meeting date — so 非公開開催 / 書面開催 meetings (which publish no materials, e.g. the
+    main-commission ``index_emsc.html`` page lists ``第613回 ※非公開開催`` with an empty
+    materials column) are still tracked and don't leave a hole in the meeting-number
+    frontier. Archive navigation rows list meeting *ranges* (``第1回～第25回``) and header
+    rows carry neither materials nor a date, so they are dropped. First row per meeting
+    number wins (main index before older log pages when the caller merges).
     """
     soup = _soup(content)
     meetings: list[dict] = []
+    seen: set[int] = set()
     for table in soup.find_all("table"):
         for row in table.find_all("tr"):
-            cells = row.find_all("td")
-            if len(cells) < 3:
+            if not row.find_all("td"):
                 continue
-            num_match = re.search(r"第(\d+)回", row.get_text())
+            row_text = row.get_text(" ", strip=True)
+            # Archive/navigation rows link meeting *ranges* (第1回～第25回) — skip them so
+            # a range's leading number isn't mistaken for a single meeting.
+            if re.search(r"第\d+回\s*[〜～~]", row_text):
+                continue
+            num_match = re.search(r"第(\d+)回", row_text)
             if not num_match:
                 continue
             meeting_num = int(num_match.group(1))
             if min_meeting is not None and meeting_num < min_meeting:
                 continue
-            info: dict = {"meeting_num": meeting_num, "direct_pdfs": [], "haifu_url": None}
+            if meeting_num in seen:
+                continue
+            info: dict = {
+                "meeting_num": meeting_num,
+                "date": parse_jp_date(row_text),
+                "direct_pdfs": [],
+                "haifu_url": None,
+            }
             for a in row.find_all("a", href=True):
                 href = a["href"]
                 full = urljoin(page_url, href)
@@ -308,7 +335,10 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
                     info["direct_pdfs"].append({"url": full, "text": a.get_text(strip=True)})
                 elif "haifu" in href.lower() and href.lower().endswith(".html"):
                     info["haifu_url"] = full
-            if info["direct_pdfs"] or info["haifu_url"]:
+            # Keep genuine held meetings: those with materials, or (materials-less
+            # 非公開/書面開催 meetings) those carrying a parseable meeting date.
+            if info["direct_pdfs"] or info["haifu_url"] or info["date"] is not None:
+                seen.add(meeting_num)
                 meetings.append(info)
     return meetings
 
@@ -508,30 +538,57 @@ def _energy_board_materials(committee: Committee, meeting_num: int, *, db_path: 
 
 
 # ── Material enumeration (what a meeting contains) ───────────────────────────
-def list_materials(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> list[Material]:
+def list_materials(
+    committee: Committee,
+    meeting_num: int,
+    *,
+    db_path: str | None = None,
+    page_url: str | None = None,
+) -> list[Material]:
     """Enumerate the source documents for one meeting. One fetch of the meeting's
-    page (METI/OCCTO) or the index row + 配布資料 subpage (EGC)."""
+    page (METI/OCCTO) or the index row + 配布資料 subpage (EGC).
+
+    ``page_url`` (METI only) lets a caller that already resolved the meeting's
+    subpage URL — e.g. from a single shared index fetch via :func:`fetch_meti_url_map`
+    — skip the per-meeting index fetch, so a batch backfill hits the (often
+    WAF-challenged) index once instead of once per meeting."""
     if committee.is_occto:
         return _list_occto(committee, meeting_num, db_path=db_path)
     if committee.is_egc:
         return _list_egc(committee, meeting_num, db_path=db_path)
-    return _list_meti(committee, meeting_num, db_path=db_path)
+    return _list_meti(committee, meeting_num, db_path=db_path, page_url=page_url)
 
 
-def _list_meti(committee: Committee, meeting_num: int, *, db_path: str | None) -> list[Material]:
-    # force=True: detection may have already cached (and 304'd) the index this run;
-    # we need a real body to parse, so bypass the conditional cache here.
+def fetch_meti_url_map(committee: Committee, *, db_path: str | None = None) -> dict[int, str]:
+    """Fetch a METI committee index once → ``{meeting_num: subpage URL}``.
+
+    Lets a caller resolve many meetings' pages from a *single* index fetch instead
+    of re-fetching the index per meeting. Returns ``{}`` if the index is
+    unreachable (e.g. a WAF 202 that outlasts the retry budget)."""
     status, content = _fetch(committee.url, db_path=db_path, force=True)
     if status == "ok" and content is not None:
-        url_map = parse_meti_meeting_urls(content, committee.url)
-        page_url = url_map.get(meeting_num)
-        if page_url:
-            time.sleep(POLITE_DELAY)
-            s, body = _fetch(page_url, db_path=db_path, force=True)
-            if s == "ok" and body is not None:
-                mats = _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
-                if mats:
-                    return mats
+        return parse_meti_meeting_urls(content, committee.url)
+    return {}
+
+
+def _list_meti(
+    committee: Committee, meeting_num: int, *, db_path: str | None, page_url: str | None = None
+) -> list[Material]:
+    # force=True: detection may have already cached (and 304'd) the index this run;
+    # we need a real body to parse, so bypass the conditional cache here. A caller
+    # can pass a pre-resolved page_url to skip this index fetch entirely.
+    if page_url is None:
+        status, content = _fetch(committee.url, db_path=db_path, force=True)
+        if status == "ok" and content is not None:
+            page_url = parse_meti_meeting_urls(content, committee.url).get(meeting_num)
+            if page_url:
+                time.sleep(POLITE_DELAY)
+    if page_url:
+        s, body = _fetch(page_url, db_path=db_path, force=True)
+        if s == "ok" and body is not None:
+            mats = _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+            if mats:
+                return mats
     # METI meeting page unavailable/empty — energy-board backup (same meti.go.jp PDFs).
     return _energy_board_materials(committee, meeting_num, db_path=db_path)
 

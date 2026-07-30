@@ -88,34 +88,114 @@ _job: dict = {
     "finished_at": None,
     "exit_code": None,  # subprocess exit code (command jobs)
     "result": None,     # structured result (catchup)
+    "stages": [],       # ordered per-stage progress (catchup): running/done/error
     "output": [],       # stdout tail (command jobs)
     "error": None,
 }
 
 
+def _stage_start(key: str, label: str, label_ja: str) -> int:
+    """Append a new 'running' stage to the live job and return its index.
+
+    The web frontend's progress panel polls the job and renders each stage (with
+    its live detail and any failure) as it advances, then summarises the outcome.
+    Mutating under the lock keeps the GET handler's snapshot consistent.
+    """
+    with _job_lock:
+        stages = _job.get("stages") or []
+        stages.append({
+            "key": key, "label": label, "label_ja": label_ja,
+            "state": "running", "detail": None, "detail_ja": None,
+        })
+        _job["stages"] = stages
+        return len(stages) - 1
+
+
+def _stage_finish(idx: int, state: str, detail: str | None = None,
+                  detail_ja: str | None = None) -> None:
+    """Mark a previously-started stage done/error with a short bilingual outcome."""
+    with _job_lock:
+        stages = _job.get("stages") or []
+        if 0 <= idx < len(stages):
+            stages[idx].update(state=state, detail=detail, detail_ja=detail_ja)
+
+
+def _stage_progress(idx: int, detail: str | None, detail_ja: str | None) -> None:
+    """Update a still-running stage's live detail (progress within the stage)."""
+    with _job_lock:
+        stages = _job.get("stages") or []
+        if 0 <= idx < len(stages) and stages[idx].get("state") == "running":
+            stages[idx]["detail"] = detail
+            stages[idx]["detail_ja"] = detail_ja
+
+
 def _run_catchup_job(db_path: str | None) -> None:
     from repower.policy.catalog import discover_committees
-    from repower.policy.detect import backfill_dates, detect
+    from repower.policy.detect import backfill_dates, backfill_materials, detect
     from repower.policy.schedule import refresh_upcoming
     from repower.policy.store import pending_meetings
 
     try:
-        det = detect(db_path=db_path)
+        # 1) Detect new meetings across the tracked committees ("check for updates").
+        #    This scans every committee (slow), so report live per-committee progress.
+        i = _stage_start("detect", "Checked for updates", "更新を確認")
+        det = detect(
+            db_path=db_path,
+            progress=lambda done, total, key: _stage_progress(
+                i, f"{done + 1}/{total} · {key}", f"{done + 1}/{total} · {key}"
+            ),
+        )
         new = sum(r["new"] for r in det)
+        _stage_finish(i, "done",
+                      f"{new} new meeting(s)" if new else "no new meetings",
+                      f"新着{new}件" if new else "新着なし")
+
+        # 1b) Populate materials for meetings detected without any (e.g. first seen
+        #     while the committee page was unavailable) so tracked committees'
+        #     meetings become visible — the Deep Dive hides material-less meetings.
+        i = _stage_start("materials", "Fetched meeting materials", "会合資料を取得")
+        matres = backfill_materials(db_path=db_path, limit_per_committee=8)
+        n_mat = sum(r["materialised"] for r in matres)
+        _stage_finish(i, "done",
+                      f"{n_mat} meeting(s) populated" if n_mat else "materials current",
+                      f"{n_mat}件を取得" if n_mat else "対象なし")
+
+        # 2) Backfill any missing meeting dates.
+        i = _stage_start("dates", "Backfilled meeting dates", "会合日を補完")
         dated = backfill_dates(only_missing=True, occto_limit=6, db_path=db_path)
         n_dated = sum(r["dated"] for r in dated)
+        _stage_finish(i, "done",
+                      f"{n_dated} date(s) filled" if n_dated else "dates current",
+                      f"{n_dated}件を補完" if n_dated else "対象なし")
+
+        # 3) Refresh the upcoming-meetings schedule (optional feed — may fail on its
+        #    own without failing the whole catch-up).
+        i = _stage_start("schedule", "Refreshed schedule", "予定を更新")
         try:
             n_up = refresh_upcoming(db_path=db_path)
+            _stage_finish(i, "done",
+                          f"{n_up} upcoming" if n_up is not None else "refreshed",
+                          f"予定{n_up}件" if n_up is not None else "更新済み")
         except Exception as e:  # noqa: BLE001 — schedule feed is optional
             logger.warning("catchup: schedule refresh failed: %s", e)
             n_up = None
+            _stage_finish(i, "error", "feed unavailable", "取得できませんでした")
+
+        # 4) Refresh the committee catalog from every discovery source in one pass
+        #    (primary METI/OCCTO/EGC indexes + the energy-board backup feed).
+        i = _stage_start("discover", "Refreshed committee catalog", "委員会カタログを更新")
         cat = discover_committees(db_path=db_path)
+        n_disc = cat["inserted"]
+        _stage_finish(i, "done",
+                      f"{n_disc} newly discovered" if n_disc else "no new committees",
+                      f"新規{n_disc}件を発見" if n_disc else "新規なし")
+
         pending = len(pending_meetings(only_enabled=True, db_path=db_path))
         result = {
             "new_meetings": new,
             "dated": n_dated,
             "upcoming": n_up,
-            "discovered": cat["inserted"],
+            "discovered": n_disc,
             "pending": pending,
             "note": "Auth-free refresh done. Run `repower policy run` (or the "
                     "policy-catchup skill) to summarise the pending backlog via NotebookLM.",
@@ -125,6 +205,10 @@ def _run_catchup_job(db_path: str | None) -> None:
     except Exception as e:  # noqa: BLE001
         logger.exception("catchup job failed")
         with _job_lock:
+            # Name the step that was in flight so the UI can say where it failed.
+            for st in _job.get("stages") or []:
+                if st.get("state") == "running":
+                    st.update(state="error", detail=str(e)[:120], detail_ja="失敗しました")
             _job.update(state="error", finished_at=_now(), error=str(e))
 
 
@@ -139,7 +223,7 @@ def start_catchup(db_path: str | None) -> dict:
             return dict(_job)
         _job.update(kind="catchup", cmd="catchup", argv=None, state="running",
                     started_at=_now(), finished_at=None, exit_code=None,
-                    result=None, output=[], error=None)
+                    result=None, stages=[], output=[], error=None)
         snapshot = dict(_job)
     threading.Thread(target=_run_catchup_job, args=(db_path,), daemon=True).start()
     return snapshot
@@ -254,7 +338,7 @@ def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dic
             return 409, {"error": "a job is already running", "job": dict(_job)}
         _job.update(kind="command", cmd=cmd, argv=argv, state="running",
                     started_at=_now(), finished_at=None, exit_code=None,
-                    result=None, output=[], error=None)
+                    result=None, stages=[], output=[], error=None)
         snap = dict(_job)
     # Long-running NotebookLM commands need a much wider cap than the default so the
     # killer timer doesn't abort them mid-report (see _NOTEBOOKLM_TIMEOUT_S).
@@ -277,7 +361,7 @@ def start_refresh(db_path: str | None) -> tuple[int, dict]:
         argv = ["refresh-web"]
         _job.update(kind="command", cmd="refresh-web", argv=argv, state="running",
                     started_at=_now(), finished_at=None, exit_code=None,
-                    result=None, output=[], error=None)
+                    result=None, stages=[], output=[], error=None)
         snap = dict(_job)
     threading.Thread(
         target=_run_command_job, args=(argv,),

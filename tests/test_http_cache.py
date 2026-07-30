@@ -120,3 +120,92 @@ def test_invalidate_forces_refetch(tmp_path, monkeypatch):
     assert content == b"good"
     # No conditional header → a fresh fetch, not a 304-skip.
     assert "If-None-Match" not in calls[0]["headers"]
+
+
+def _fake_curl_cffi(monkeypatch, status_sequence):
+    """Install a fake ``curl_cffi`` module whose Session.get yields the given
+    statuses in order, and stub out ``time.sleep`` (recording each delay)."""
+    import sys
+    import types
+
+    seq = iter(status_sequence)
+
+    class _FakeResp:
+        def __init__(self, status):
+            self.status_code = status
+            self.content = b"cleared" if status == 200 else b""
+            self.headers = {"ETag": "e1", "Last-Modified": "lm1"}
+
+    class _FakeSession:
+        def get(self, url, **kwargs):
+            return _FakeResp(next(seq))
+
+    fake_curl = types.ModuleType("curl_cffi")
+    fake_curl.requests = types.SimpleNamespace(Session=_FakeSession)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "curl_cffi", fake_curl)
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(http_cache.time, "sleep", lambda s: sleeps.append(s))
+    return sleeps
+
+
+def test_curl_202_challenge_retries_then_succeeds(monkeypatch):
+    # Two 202 WAF challenges then a 200: a short warm-up gap precedes the first
+    # attempt, then the persistent session backs off (5s, 15s) and clears.
+    sleeps = _fake_curl_cffi(monkeypatch, [202, 202, 200])
+
+    result = http_cache._curl_get("http://x/f", {}, 30.0)
+
+    assert result == (200, b"cleared", "e1", "lm1")
+    assert sleeps == [2.0, 5.0, 15.0]
+
+
+def test_curl_202_challenge_gives_up_after_budget(monkeypatch):
+    # Persistent 202: warm-up gap, then the full backoff schedule, then give up
+    # (None) so the caller surfaces the failure rather than looping forever.
+    sleeps = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202, 202])
+
+    result = http_cache._curl_get("http://x/f", {}, 30.0)
+
+    assert result is None
+    assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY, *http_cache._CHALLENGE_RETRY_DELAYS]
+
+
+def _fake_clock(monkeypatch):
+    """Freeze ``time.monotonic``/``time.sleep`` so pacing is deterministic: sleep
+    advances the fake clock. Returns the recorded sleep durations."""
+    clock = {"t": 1000.0}
+    sleeps: list[float] = []
+    monkeypatch.setattr(http_cache.time, "monotonic", lambda: clock["t"])
+
+    def _sleep(s):
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(http_cache.time, "sleep", _sleep)
+    return sleeps
+
+
+def test_pace_host_spaces_consecutive_same_host_requests(monkeypatch):
+    # Back-to-back hits on one host: the first is immediate, the second waits the
+    # full politeness interval so we don't machine-gun a single server.
+    sleeps = _fake_clock(monkeypatch)
+    http_cache._last_request_at.clear()
+
+    http_cache._pace_host("https://a.example/1")
+    http_cache._pace_host("https://a.example/2")
+
+    assert sleeps == [http_cache._MIN_HOST_INTERVAL]
+
+
+def test_pace_host_does_not_serialise_distinct_hosts(monkeypatch):
+    # Different hosts don't block each other — no wait for either first hit.
+    sleeps = _fake_clock(monkeypatch)
+    http_cache._last_request_at.clear()
+
+    http_cache._pace_host("https://a.example/1")
+    http_cache._pace_host("https://b.example/1")
+
+    assert sleeps == []
+
+

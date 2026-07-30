@@ -1,13 +1,14 @@
 ---
 name: policy-catchup
-description: Run one NotebookLM policy-summarisation catch-up round for the RePower policy observer — pull the synced DB, summarise pending committee meetings (priority committees, newest-first, until the daily quota is hit), then push. Use after the user has run `notebooklm login`, when they ask to "run the policy catch-up", "advance the policy backfill", "summarise more policy meetings", or "summarise the <committee> policy meetings".
+description: Run one NotebookLM policy-summarisation catch-up round for the RePower policy observer — pull the synced DB, summarise the newest pending meeting of each tracked committee (breadth-first, priority order) until the daily quota is hit, then push. Use after the user has run `notebooklm login`, when they ask to "run the policy catch-up", "advance the policy backfill", "summarise more policy meetings", or "summarise the <committee> policy meetings".
 ---
 
 # Policy catch-up routine
 
 Drives one **daily** catch-up round for the policy observer (`repower policy`):
 pull the latest DB, summarise as many pending meetings as the NotebookLM quota
-allows for the priority committees, then push the results back to Hugging Face.
+allows — breadth-first across the tracked committees (newest meeting of each first) —
+then push the results back to Hugging Face.
 
 ## When to use
 The user has just run `notebooklm login` (or confirms auth is fresh) and asks to
@@ -28,29 +29,29 @@ day only hits the spent quota.
 - cwd is the repo root; invoke the CLI as `.venv/Scripts/python.exe -m repower.cli`.
 
 ## Scope
-Default **priority committees, newest-first** (override if the user names others).
-Priority now lives in the DB registry (`policy_committee.priority`, seeded from
-`committees.py` and editable in the dashboard's *Manage tracked committees* panel),
-so `policy run --committee all` drains committees in that order — by default:
-1. `system_review`
-2. `emissions_trading`
-3. `chousei_jukyu`
+Default **breadth-first across all tracked committees** — `policy run --committee all`
+summarises the **newest pending meeting of each committee first** (in priority order),
+then each committee's second-newest, and so on. This keeps the latest meeting of every
+tracked committee current before draining any one committee's back-catalogue — what a
+small daily quota should buy. (`--committee all` defaults to breadth-first; pass
+`--depth-first` to drain strictly in priority order instead, or name a single committee
+to backfill just its history.)
 
-All other committees (including `doji_shijo` and `saiene_shuryoku`) share the
-default priority and are summarised after these three once quota frees up — run
-them explicitly with `--committee <key>` if the user asks.
+Priority lives in the DB registry (`policy_committee.priority`, seeded from
+`committees.py` and editable in the dashboard's *Manage tracked committees* panel) and
+breaks ties between committees at the same depth — by default `system_review`,
+`emissions_trading`, `chousei_jukyu` lead.
 
 **Dashboard-queued meetings drain first.** Meetings the operator queued from the
 Policy tab's "Summarise …" buttons (when auth was stale) are flagged
 `gen_requested`; `pending_meetings` sorts those ahead of everything else, so a
-plain `policy run` (or this skill) picks them up first, before priority order.
+plain `policy run` (or this skill) picks them up first, before the breadth order.
 Disabled committees are skipped entirely.
 
-`--max-per-run 8` per committee (the CLI default is 5, so pass `8` explicitly). This
-is just an upper bound per process — the real limiter is the account-wide **daily
-generation quota**, which normally stops the round after only a few meetings (often
-within committee #1). `--committee` is **single-valued**: one `policy run` per key
-(use `all` for every committee).
+`--max-per-run 8` is the **total** meetings for the run (the CLI default is 5, so pass
+`8` explicitly). It's just an upper bound — the real limiter is the account-wide **daily
+generation quota**, which normally stops the round after only a few meetings. With
+breadth-first those few land on the newest meeting of the top committees.
 
 ## Steps
 
@@ -69,22 +70,21 @@ within committee #1). `--committee` is **single-valued**: one `policy run` per k
    .venv/Scripts/python.exe -m repower.cli pull-hf
    ```
 
-3. **Summarise the priority committees ONE AT A TIME, sequentially** — never
-   concurrently (they share one NotebookLM account and one daily quota). Run each as
-   its own Bash invocation and read its summary line before deciding to continue:
+3. **Summarise breadth-first across all tracked committees** in one pass — the newest
+   pending meeting of each committee first (priority order), spreading the day's quota
+   across committees:
    ```bash
    export NOTEBOOKLM_BIN="C:/Users/SehunNakama/.local/bin/notebooklm.exe"
-   .venv/Scripts/python.exe -m repower.cli policy run --committee system_review --max-per-run 8
+   .venv/Scripts/python.exe -m repower.cli policy run --committee all --breadth --max-per-run 8
    ```
-   then `emissions_trading`, then `chousei_jukyu` (same pattern). These are long-running
-   (minutes per meeting); run them foreground (or background and wait for each to
-   finish before the next). Each prints `processed=… done=… errored=… synthesized=…`.
+   This is long-running (minutes per meeting); run it foreground (or background and
+   wait for it to finish). It prints `processed=… done=… errored=… synthesized=…`.
 
-   **Stop condition:** if a run prints `WARNING: NotebookLM rate limit hit` (or
-   reports `done=0` due to a rate limit), **STOP — do not launch the remaining
-   committees this session.** They would only re-hit the same account-wide cap and
-   burn work (notebook create/upload/delete churn). A rate limit is the normal
-   end-of-day stopping point, not a failure.
+   **Stop condition:** the run stops itself when it prints `WARNING: NotebookLM rate
+   limit hit` (or reports `done=0` due to a rate limit) — that's the normal
+   end-of-day stopping point, not a failure. If the user named specific committees,
+   run one `policy run --committee <key> --max-per-run 8` per key instead, sequentially
+   (a single committee runs depth-first through its backlog).
 
 4. **Push if anything changed.** Sum the counters across the runs that executed. If
    `done > 0` OR `synthesized > 0` OR `errored > 0`, persist:
@@ -105,7 +105,9 @@ within committee #1). `--committee` is **single-valued**: one `policy run` per k
 - Never fabricate summaries or bypass the auth gate.
 - `done=0` with a rate-limit WARNING is **success-for-today**, not a failure — report
   it plainly and stop.
-- Run committees **sequentially, never in parallel** (shared account + daily quota).
+- The default `--committee all` pass is a single sequential process. If the user names
+  multiple explicit `--committee` passes, run them **sequentially, never in parallel**
+  (shared account + daily quota).
 - **Do not `/loop` or schedule** this skill — strictly once per ~24h.
 - `push-hf` overwrites the whole DB file. `pull-hf` first guards against clobbering
   the daily market cron, but the summarisation window is multi-minute; if the market

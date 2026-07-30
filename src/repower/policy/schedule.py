@@ -33,6 +33,19 @@ logger = logging.getLogger(__name__)
 METI_CALENDAR_URL = "https://wwws.meti.go.jp/interface/honsho/committee/index.cgi/committee/"
 REQUEST_TIMEOUT = 40.0
 
+# The METI site answers with an HTTP-200 "overload/failover" holding page when it is
+# busy ("ただいまアクセスが集中しております") instead of the calendar. It carries no dates, so a
+# naive parse yields zero meetings — which must NOT be mistaken for "no upcoming
+# meetings" and used to wipe the snapshot. These markers identify that holding page.
+_UNAVAILABLE_MARKERS = ("アクセスが集中", "ただいまアクセス")
+
+
+class ScheduleUnavailable(RuntimeError):
+    """The upcoming-schedule feed could not be fetched — a network error or the METI
+    overload/failover holding page (HTTP 200 with no calendar). Raised by
+    ``refresh_upcoming`` so a transient outage is reported *without* replacing the
+    existing ``policy_upcoming`` snapshot with an empty set."""
+
 # Standalone category tokens on the METI calendar (a line that is *exactly* one of
 # these is a category label, not a meeting name).
 _METI_CATEGORIES = {"審議会", "研究会", "会合", "検討会", "懇談会", "会議", "分科会"}
@@ -194,13 +207,26 @@ def _dedupe_future(items: list[Upcoming], today: datetime.date) -> list[Upcoming
 
 
 # ── Networked fetch ──────────────────────────────────────────────────────────
+def _looks_unavailable(content: bytes) -> bool:
+    """True if *content* is the METI overload/failover holding page (not real data)."""
+    head = content[:8192].decode("utf-8", "replace")
+    return any(m in head for m in _UNAVAILABLE_MARKERS)
+
+
 def _fetch(url: str, *, db_path: str | None = None) -> bytes | None:
     try:
         status, content = conditional_get(
             url, db_path=db_path, headers={"Accept-Language": "ja,en;q=0.9"},
             allow_curl_fallback=True, force=True, timeout=REQUEST_TIMEOUT,
         )
-        return content if status == "ok" else None
+        if status != "ok" or content is None:
+            return None
+        if _looks_unavailable(content):
+            logger.warning(
+                "schedule fetch: %s served the site's overload/failover page; treating as unavailable", url,
+            )
+            return None
+        return content
     except Exception as e:  # noqa: BLE001 — one bad source must not abort the refresh
         logger.warning("schedule fetch failed %s: %s", url, e)
         return None
@@ -221,10 +247,22 @@ def refresh_upcoming(*, db_path: str | None = None, today: datetime.date | None 
     """Refresh the ``policy_upcoming`` snapshot from the live schedule sources.
 
     Fully replaces the table (it's a rolling snapshot). Returns the row count.
+
+    Raises ``ScheduleUnavailable`` when the feed can't be fetched (network error or the
+    METI overload/failover page) so a transient outage does NOT clobber the existing
+    snapshot with an empty set. Both callers — the CLI pipeline and the web-api catch-up
+    job — already treat that as a soft, non-fatal "feed unavailable".
     """
     from repower.policy.store import replace_upcoming
 
-    rows = fetch_upcoming(db_path=db_path, today=today)
+    today = today or today_jst()
+    meti = _fetch(METI_CALENDAR_URL, db_path=db_path)
+    if meti is None:
+        raise ScheduleUnavailable(
+            "METI committee calendar unavailable (network error or overload page); "
+            "keeping the existing upcoming snapshot"
+        )
+    rows = _dedupe_future(parse_meti_calendar(meti), today)
     replace_upcoming(rows, db_path=db_path)
     logger.info("policy schedule: %d upcoming meeting(s) (%d matched to tracked committees)",
                 len(rows), sum(1 for r in rows if r.committee_key))

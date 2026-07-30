@@ -2,7 +2,11 @@ import React, { useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
-import { FreshnessChip } from '../lib/freshness'
+import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
+import type { NotifItem, NotifKind, NotifSection } from '../lib/notifications'
+import { PolicyNavBadge, usePolicyActivity, POLICY_RECENT_DAYS } from '../lib/policyActivity'
+import type { PolicyActivityItem } from '../lib/policyActivity'
 import { chip, segBase, filterChipBase, slotLabel } from '../lib/chartkit'
 import { downloadIcs } from '../lib/download'
 import {
@@ -50,7 +54,7 @@ const shortLabel = (m: Meeting, ja: boolean): string => {
 }
 
 export function MarketOverviewScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow, refreshData, refreshing } = useApp()
+  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, isFollowing, toggleFollow, requestCommittee, refreshData, refreshing } = useApp()
   const dark = theme === 'dark'
   const L = lang
 
@@ -91,6 +95,12 @@ export function MarketOverviewScreen() {
   const tMarket = () => setScreen('market')
   const tPolicy = () => setScreen('policy')
   const tCapacity = () => setScreen('capacity')
+  // Open one committee's session on the Policy screen rather than dumping the
+  // reader on whatever that screen happened to have selected.
+  const openPolicy = (com: string | null, num?: number | null) => {
+    if (com) requestCommittee(com, num)
+    setScreen('policy')
+  }
   const tRefresh = () => {
     refreshData()
     toast('Reloaded latest data · 最新データを再取得しました')
@@ -114,6 +124,61 @@ export function MarketOverviewScreen() {
   const toggleGhost = () => setGhostOn((g) => !g)
   const toggleWhy = () => setShowWhy((w) => !w)
   const toggleNotif = () => setShowNotif((n) => !n)
+
+  // ---- notifications (bell popover) ----
+  // Live policy-pipeline activity plus snapshot freshness. JEMA has no alerting
+  // service, so anything not derivable from a snapshot is deliberately absent
+  // rather than mocked up.
+  const pAct = usePolicyActivity()
+  const { seenAt: notifSeenAt, markSeen: notifMarkSeen } = useNotifSeen('jema-notif-seen-overview')
+  const STALE_MS = 48 * 60 * 60 * 1000
+
+  const polItem = (m: PolicyActivityItem, kind: NotifKind, badge?: string): NotifItem => ({
+    key: m.key,
+    title: (L === 'ja' ? m.ja : m.en) + (m.tori ? ' 🏁' : ''),
+    meta: [m.date, m.org].filter(Boolean).join(' · '),
+    kind,
+    badge,
+    ts: m.ts,
+    onClick: () => {
+      setShowNotif(false)
+      openPolicy(m.com, m.num)
+    },
+  })
+
+  const dataItems: NotifItem[] = []
+  const mf = manifest.data
+  if (mf?.generated_at) {
+    const priceDate = mf.sources?.system_price || mf.sources?.area_price || null
+    const priceTs = tsOfDate(priceDate || mf.generated_at)
+    const stale = Number.isFinite(priceTs) && Date.now() - priceTs > STALE_MS
+    dataItems.push({
+      key: 'freshness',
+      kind: stale ? 'warn' : 'new',
+      title: stale
+        ? L === 'ja' ? '価格データが48時間以上更新されていません' : 'Prices are more than 48 hours old'
+        : L === 'ja' ? `価格データ ${priceDate ?? '—'} まで` : `Prices through ${priceDate ?? '—'}`,
+      meta: L === 'ja' ? `書出 ${fmtStamp(mf.generated_at)}` : `exported ${fmtStamp(mf.generated_at)}`,
+      ts: Date.parse(mf.generated_at),
+      onClick: tRefresh,
+    })
+  }
+
+  const notifSections: NotifSection[] = [
+    {
+      key: 'new',
+      label: L === 'ja' ? '新規の会合 · 要約待ち' : 'NEW MEETINGS · awaiting digest',
+      items: pAct.detected.slice(0, 5).map((m) => polItem(m, 'new', L === 'ja' ? '新規' : 'New')),
+    },
+    {
+      key: 'done',
+      label: L === 'ja' ? '新着要約' : 'NEWLY SUMMARISED',
+      items: pAct.summarised.slice(0, 5).map((m) => polItem(m, 'done')),
+    },
+    { key: 'data', label: L === 'ja' ? 'データ更新' : 'DATA UPDATES', items: dataItems },
+  ]
+  const notifUnread = unreadCount(notifSections, notifSeenAt)
+
   const fs = () => {
     const el = chartRef.current
     if (!el) return
@@ -291,12 +356,14 @@ export function MarketOverviewScreen() {
     OCCTO: dark ? '#7C9CD1' : '#4A6FA5',
     EGC: dark ? '#C77BD8' : '#7B2D8E',
   }
-  const radarList =
+  const RADAR_MAX = 12
+  const radarList = (
     filter === 'upcoming'
       ? // only still-future meetings — a stale static snapshot can hold a meeting
         // whose date has since passed; don't present it as forthcoming.
         upcoming.filter((m) => daysFrom(m) >= 0)
       : meetings.filter((m) => (filter === 'followed' ? !!m.key && isFollowing(m.key) : true))
+  ).slice(0, RADAR_MAX)
   const radar = radarList.map((m, i) => {
     const d = meetingDate(m)
     // Show a date only when it's the real published meeting date; a pending
@@ -309,22 +376,23 @@ export function MarketOverviewScreen() {
     const numStr = m.no ? (L === 'ja' ? `第${m.no}回` : `No. ${m.no}`) : ''
     const dd = daysFrom(m)
     const rel = m.sched && m.dateReal && dd >= 0 ? (L === 'ja' ? `あと${dd}日` : `in ${dd}d`) : ''
-    const meta = [numStr, dateStr, rel].filter(Boolean).join(' · ')
+    const meta = [dateStr, rel].filter(Boolean).join(' · ')
     const following = !!m.key && isFollowing(m.key)
     return {
     key: (m.key || m.tier) + '-' + m.no + '-' + (m.date || i),
     rank: i + 1,
     comKey: m.key ?? null,
+    num: m.no || null,
     following,
     n1: L === 'ja' ? m.ja : m.en,
     n2: L === 'ja' ? m.en : m.ja,
     meta,
+    numStr,
     tier: m.tier,
     tori: !!m.tori,
     sched: !!m.sched,
     done: !!m.done,
     pending: !m.done && !m.sched,
-    score: m.score,
     summary: m.done ? (L === 'ja' ? m.sJa : m.sEn) : '',
     cta: m.sched
       ? L === 'ja'
@@ -351,12 +419,6 @@ export function MarketOverviewScreen() {
       background: i === 0 ? 'var(--ac)' : 'var(--bg2)',
       color: i === 0 ? '#FFFFFF' : 'var(--tx2)',
       fontFeatureSettings: "'tnum' 1",
-    } as React.CSSProperties,
-    barStyle: {
-      width: m.score * 0.64 + 'px',
-      height: '100%',
-      borderRadius: 3,
-      background: i === 0 ? 'var(--ac)' : 'var(--fnt3)',
     } as React.CSSProperties,
     tierDot: {
       width: 7,
@@ -409,6 +471,8 @@ export function MarketOverviewScreen() {
     const metaTxt = dateTxt + ' · ' + rel
     return {
       key: 'cal-' + (m.key || m.tier) + '-' + (m.date || i),
+      comKey: m.key ?? null,
+      num: m.no || null,
       name: shortLabel(m, L === 'ja'),
       meta: metaTxt,
       tip: (L === 'ja' ? m.ja : m.en) + ' · ' + metaTxt,
@@ -561,7 +625,7 @@ export function MarketOverviewScreen() {
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tPolicy}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} />
             <span>Policy Deep Dive</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>3</span>
+            <PolicyNavBadge />
           </Hoverable>
         </div>
 
@@ -577,7 +641,9 @@ export function MarketOverviewScreen() {
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={toggleNotif}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
             <span>Notifications</span>
-            <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>2</span>
+            {notifUnread > 0 && (
+              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
+            )}
           </Hoverable>
           <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} />
@@ -627,7 +693,9 @@ export function MarketOverviewScreen() {
           </Hoverable>
           <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            {notifUnread > 0 && (
+              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
+            )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
             <span style={segBase(L === 'ja')} onClick={() => setLang('ja')}>日本語</span>
@@ -641,43 +709,23 @@ export function MarketOverviewScreen() {
             </div>
           </div>
 
-          {/* Notifications popover */}
-          {showNotif && (
-            <div style={s('position:absolute;right:24px;top:66px;width:360px;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);padding:16px;z-index:60')}>
-              <div style={s('font-size:14px;font-weight:600')}>Notifications <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>通知</span></div>
-              <div style={s('font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--mut);margin:12px 0 6px')}>NEW POLICY MEETINGS · 新規の会合</div>
-              <div style={s('display:flex;flex-direction:column;gap:2px')}>
-                <Hoverable base="display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={tPolicy}>
-                  <span style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);margin-top:6px;flex-shrink:0')}></span>
-                  <div style={s('flex:1;min-width:0')}>
-                    <div style={s('font-size:12.5px;font-weight:500')}>Electricity &amp; Gas Basic Policy Subcommittee</div>
-                    <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>No. 84 · 27 Jun 2026 · METI</div>
-                  </div>
-                  <span style={s('font-size:10px;font-weight:600;background:var(--acTint);color:var(--acT);border-radius:6px;padding:1px 6px;flex-shrink:0')}>New</span>
-                </Hoverable>
-                <Hoverable base="display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:10px;cursor:pointer" hover="background:var(--hov)" onClick={tPolicy}>
-                  <span style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);margin-top:6px;flex-shrink:0')}></span>
-                  <div style={s('flex:1;min-width:0')}>
-                    <div style={s('font-size:12.5px;font-weight:500')}>E&amp;G Market Surveillance Commission</div>
-                    <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>No. 58 · 24 Jun 2026 · とりまとめ</div>
-                  </div>
-                  <span style={s('font-size:10px;font-weight:600;background:var(--acTint);color:var(--acT);border-radius:6px;padding:1px 6px;flex-shrink:0')}>New</span>
-                </Hoverable>
-              </div>
-              <div style={s('display:flex;align-items:center;gap:6px;font-size:11px;font-weight:600;letter-spacing:.05em;color:var(--mut);margin:12px 0 6px')}>PRICE ALERTS · 価格アラート <span style={s('font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 6px;letter-spacing:0')}>PROPOSED</span></div>
-              <div style={s('display:flex;gap:9px;align-items:flex-start;padding:8px;border-radius:10px;background:var(--bg3)')}>
-                <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;color:#F4A261;margin-top:2px;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`} />
-                <div style={s('flex:1;min-width:0')}>
-                  <div style={s("font-size:12.5px;font-weight:500;font-feature-settings:'tnum' 1")}>TEPCO JEPX avg &gt; ¥18/kWh (Daily)</div>
-                  <div style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>Rule armed · needs threshold-evaluation job</div>
-                </div>
-              </div>
-              <div style={s('display:flex;justify-content:space-between;border-top:1px solid var(--dv);margin-top:12px;padding-top:10px')}>
-                <Hoverable as="span" base="font-size:12px;color:var(--tx2);cursor:pointer" hover="color:var(--acT)" onClick={toggleNotif}>Mark all read · すべて既読に</Hoverable>
-                <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} onClick={tPolicy}>View all →</span>
-              </div>
-            </div>
-          )}
+          {/* Notifications — live policy activity + snapshot freshness */}
+          <NotificationsPopover
+            open={showNotif}
+            lang={L}
+            sections={notifSections}
+            seenAt={notifSeenAt}
+            note={L === 'ja' ? `過去${POLICY_RECENT_DAYS}日` : `last ${POLICY_RECENT_DAYS}d`}
+            onClose={() => setShowNotif(false)}
+            onMarkRead={notifMarkSeen}
+            action={{
+              label: L === 'ja' ? 'すべて表示 →' : 'View all →',
+              onClick: () => {
+                setShowNotif(false)
+                tPolicy()
+              },
+            }}
+          />
         </div>
   )
 
@@ -879,7 +927,7 @@ export function MarketOverviewScreen() {
                     <React.Fragment key={cm.key}>
                       <div style={cm.lineS}></div>
                       <div style={cm.dotS}></div>
-                      <div style={cm.cardS} onClick={tPolicy} title={cm.tip}>
+                      <div style={cm.cardS} onClick={() => openPolicy(cm.comKey, cm.num)} title={cm.tip}>
                         <div style={s('font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{cm.name}</div>
                         <div style={s("font-size:10px;color:var(--mut);white-space:nowrap;font-feature-settings:'tnum' 1")}>{cm.meta}</div>
                       </div>
@@ -908,15 +956,15 @@ export function MarketOverviewScreen() {
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;position:relative')}>
                   <div>
                     <div style={s('font-size:16px;font-weight:600')}>METI Committee Radar <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>委員会レーダー</span></div>
-                    <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Recent meetings, ranked by importance · 重要度順・直近の会合</div>
-                    <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> View data not connected — ranked by recency &amp; institutional weight · 視聴回数データ未接続</div>
+                    <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest session per committee, newest first · 委員会ごとの最新会合・新着順</div>
+                    <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> Importance weighting not connected — recency only · 重要度による並べ替えは未接続</div>
                   </div>
                   <Hoverable as="span" base="width:28px;height:28px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer;flex-shrink:0" hover="background:var(--bg2);color:var(--acT)" onClick={toggleWhy} title="Why this ranking? · この順位の理由" aria-label="Why this ranking"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:17px;height:17px"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`} /></Hoverable>
                   {showWhy && (
                     <div style={s("position:absolute;right:0;top:34px;width:330px;background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);padding:15px;z-index:40;font-size:12px;color:var(--tx2)")}>
                       <div style={s('font-size:13px;font-weight:600;color:var(--tx)')}>Why this ranking? <span style={s('font-weight:400;color:var(--mut)')}>この順位の理由</span></div>
-                      <div style={s('margin-top:7px;line-height:1.55')}>Importance <span style={s("font-feature-settings:'tnum' 1")}>I ∈ [0,100]</span> = institutional tier (0.35) + recency, 30-day half-life (0.25) + activity (0.15) + decision density (0.10) + summary freshness (0.05) + views (0.10, <span style={s('color:var(--warnTx)')}>proposed</span>).</div>
-                      <div style={s('margin-top:7px;line-height:1.55;color:var(--mut)')}>Views are a proxy for attention from METI's official YouTube — not an official significance measure. While unavailable, w_V = 0 and remaining weights re-normalize. · 視聴回数はMETI公式YouTubeの推定注目度です。</div>
+                      <div style={s('margin-top:7px;line-height:1.55')}>Each tracked committee is represented by its most recent session, and those sessions are ordered by meeting date — newest first. Top {RADAR_MAX} shown. · 追跡中の委員会ごとの最新会合を、開催日の新しい順に{RADAR_MAX}件表示。</div>
+                      <div style={s('margin-top:7px;line-height:1.55;color:var(--mut)')}>A weighted importance score (institutional tier, decision density, attention) is <span style={s('color:var(--warnTx)')}>proposed</span> but not implemented — nothing beyond recency affects the order today. · 重要度スコアは未実装です。</div>
                       <div style={s('margin-top:9px;font-weight:600;color:var(--fnt2);cursor:not-allowed')} title="Coming soon · 近日公開">Adjust weighting · 重み付けを調整 →</div>
                     </div>
                   )}
@@ -981,11 +1029,10 @@ export function MarketOverviewScreen() {
                         )}
                       </div>
                       <div style={s('display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0;padding-top:2px')}>
-                        <div style={s('display:flex;align-items:center;gap:6px')}>
-                          <div style={s('width:64px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden')}><div style={m.barStyle}></div></div>
-                          <span style={s("font-size:11px;font-weight:600;color:var(--mut);font-feature-settings:'tnum' 1;width:18px;text-align:right")}>{m.score}</span>
-                        </div>
-                        <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={tPolicy}>{m.cta}</Hoverable>
+                        {m.numStr && (
+                          <span style={s("font-size:12px;font-weight:600;color:var(--tx2);font-feature-settings:'tnum' 1;white-space:nowrap")}>{m.numStr}</span>
+                        )}
+                        <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap" hover="color:var(--ac)" onClick={() => openPolicy(m.comKey, m.num)}>{m.cta}</Hoverable>
                       </div>
                     </div>
                   ))}

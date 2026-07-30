@@ -9,8 +9,8 @@
 // reshaped by the same code into the screen's fixture types. Fixtures remain the
 // loading fallback so the render code is unchanged.
 
-import { useEffect, useState } from 'react'
-import { getSnapshot } from '../lib/data'
+import { useEffect, useRef, useState } from 'react'
+import { getSnapshot, useDataNonce } from '../lib/data'
 import type { Committee, DigestSection, DocRef, JpSection, Meeting, Upcoming } from './PolicyDeepDive.data'
 
 interface CommitteeSnap {
@@ -26,6 +26,7 @@ interface CommitteeSnap {
   source_count?: number
   meetings?: number
   last_date?: string | null
+  priority?: number
   synthesisEn?: string | null
   synthesisJa?: string | null
   lastSynth?: number | null
@@ -43,6 +44,7 @@ interface MeetingSnap {
   ja: string
   date: string
   dateReal?: boolean
+  updatedAt?: string | null
   status: string
   tori: boolean
   title: string
@@ -104,6 +106,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
     sourceCount: x.source_count ?? 0,
     meetings: x.meetings ?? 0,
     lastDate: x.last_date ?? null,
+    priority: x.priority ?? 100,
     synthesisEn: x.synthesisEn ?? null,
     synthesisJa: x.synthesisJa ?? null,
     lastSynth: x.lastSynth ?? null,
@@ -120,6 +123,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
     ja: x.ja,
     date: x.date,
     dateReal: x.dateReal ?? true,
+    updatedAt: x.updatedAt ?? null,
     status: x.status,
     tori: x.tori,
     title: x.title,
@@ -155,7 +159,22 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
 }
 
 export function usePolicyLive(interactive: boolean): PolicyLive {
+  // Subscribe to the global refresh signal (bumped by refreshSnapshots()) so the
+  // screen refetches after a manage-modal policy job (detect/discover/run) or the
+  // Run catch-up button writes new meetings/summaries to the DB. Without this the
+  // effect only ran on mount, so newly-detected meetings never appeared until a
+  // full reload — the modal refreshed its own catalog but not the screen behind it.
+  const nonce = useDataNonce()
   const [state, setState] = useState<PolicyLive>({ ready: false, stale: false, committees: [], meetings: [], upcoming: [] })
+  // Once the live API has served real data this session, keep it "sticky". The
+  // `/api/health` probe re-runs on window focus and flips `interactive` false the
+  // moment the backend is unreachable (e.g. while `repower web-api` is restarting),
+  // which re-runs this effect. Without this guard the non-interactive branch would
+  // reload the static export — whose `upcoming` is empty and which lacks
+  // just-detected meetings — clobbering the fresh live data already on screen (the
+  // "flash of good data, then revert to the old cached page" bug). So we only fall
+  // back to the snapshot when live data has never loaded this session.
+  const hadLive = useRef(false)
   useEffect(() => {
     let alive = true
     const loadStatic = (): Promise<Raw> =>
@@ -181,16 +200,27 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
     }
     if (interactive) {
       loadLive()
-        .then((raw) => apply(raw, false))
-        .catch(() => loadStatic().then((raw) => apply(raw, true)).catch(() => {}))
-    } else {
+        .then((raw) => {
+          hadLive.current = true
+          apply(raw, false)
+        })
+        // Live failed after retries. Only downgrade to the static snapshot if we've
+        // never shown live data; otherwise keep the last-good live data on screen.
+        .catch(() => {
+          if (!hadLive.current) loadStatic().then((raw) => apply(raw, true)).catch(() => {})
+        })
+    } else if (!hadLive.current) {
+      // Read-only context (no local backend seen this session): the static export is
+      // the intended source, not a stale fallback — so don't flag it.
       loadStatic()
         .then((raw) => apply(raw, false))
         .catch(() => {})
     }
+    // else: `interactive` just went false but live data is already loaded — keep it
+    // on screen rather than reverting to the export.
     return () => {
       alive = false
     }
-  }, [interactive])
+  }, [interactive, nonce])
   return state
 }

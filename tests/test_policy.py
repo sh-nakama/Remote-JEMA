@@ -81,6 +81,26 @@ def test_parse_meti_meeting_urls():
     assert all(u.endswith(".html") and "/00" in u or "/003" in u for u in urls.values())
 
 
+def test_parse_meti_meeting_urls_skips_non_committee_links():
+    # A footer link like /main/31.html would otherwise register as phantom meeting
+    # 31 and hijack the latest-meeting frontier. Joint meetings under a sibling
+    # /shingikai/ committee dir must still be kept.
+    html = """
+    <html><body>
+      <ul>
+        <li><a href="/shingikai/enecho/x/nenryo/022.html">2026年7月17日 第22回</a></li>
+        <li><a href="/shingikai/enecho/x/suiso/014.html">2024年6月7日 第15回</a></li>
+      </ul>
+      <footer><a href="/main/31.html">サイトポリシー</a></footer>
+    </body></html>
+    """
+    base = "https://www.meti.go.jp/shingikai/enecho/x/nenryo/"
+    urls = parse_meti_meeting_urls(html, base)
+    assert set(urls) == {22, 14}
+    assert 31 not in urls
+    assert urls[14].endswith("/shingikai/enecho/x/suiso/014.html")
+
+
 def test_parse_pdf_links_resolves_and_dedups():
     base = "https://www.meti.go.jp/shingikai/x/003.html"
     links = parse_pdf_links(METI_MEETING, base)
@@ -99,6 +119,92 @@ def test_parse_egc_index_skips_nav_rows():
     assert m["haifu_url"].endswith("haifu_100.html")
     # 議事要旨 + 議事録 are direct PDFs; the video link is not.
     assert len(m["direct_pdfs"]) == 2
+
+
+# Main-commission (index_emsc.html) shape: a leading archive-navigation table of
+# 第N回～第M回 range links, then the recent-meetings table where some rows are
+# 非公開開催 / 書面開催 with an empty materials column.
+EGC_EMSC_INDEX = """
+<html><body>
+<h3>電力・ガス取引監視等委員会（第604回～）</h3>
+<table>
+  <tr>
+    <td><a href="index_log10.html">第507回～第565回 (令和6年度)</a></td>
+    <td><a href="index_log11.html">第566回～第603回 (令和7年度)</a></td>
+  </tr>
+</table>
+<table>
+  <tr>
+    <td>令和8年7月22日</td><td>第613回</td><td></td><td></td><td></td><td>※非公開開催</td>
+  </tr>
+  <tr>
+    <td>令和8年7月15日</td><td>第612回</td><td></td><td></td>
+    <td><a href="emsc/612_haifu.html">配布資料</a></td>
+    <td><a href="https://www.youtube.com/live/x">動画</a></td>
+  </tr>
+  <tr>
+    <td>令和8年6月17日</td><td>第609回</td><td></td><td></td><td></td><td>※書面開催</td>
+  </tr>
+  <tr>
+    <td>令和8年6月8日</td><td>第608回</td>
+    <td><a href="emsc/pdf/608_giji.pdf">議事要旨</a></td>
+    <td><a href="emsc/pdf/608_gijiroku.pdf">議事録</a></td>
+    <td><a href="emsc/608_haifu.html">配布資料</a></td>
+    <td><a href="https://www.youtube.com/live/y">動画</a></td>
+  </tr>
+</table>
+</body></html>
+"""
+
+
+def test_parse_egc_index_picks_up_nonpublic_meetings():
+    url = "https://www.egc.meti.go.jp/activity/index_emsc.html"
+    meetings = parse_egc_index(EGC_EMSC_INDEX, url)
+    by_num = {m["meeting_num"]: m for m in meetings}
+    # Every genuine meeting is present — including the materials-less
+    # 非公開開催 (613) and 書面開催 (609) rows that used to be dropped.
+    assert set(by_num) == {613, 612, 609, 608}
+    # The archive range links (第507回～第565回 …) are not mistaken for meetings.
+    assert 507 not in by_num and 566 not in by_num
+    # Non-public meetings are dated (from the row) but carry no materials.
+    import datetime
+
+    assert by_num[613]["date"] == datetime.date(2026, 7, 22)
+    assert by_num[613]["direct_pdfs"] == [] and by_num[613]["haifu_url"] is None
+    assert by_num[609]["date"] == datetime.date(2026, 6, 17)
+    # A 配布資料-only meeting keeps its haifu subpage; a full meeting keeps its PDFs.
+    assert by_num[612]["haifu_url"].endswith("emsc/612_haifu.html")
+    assert len(by_num[608]["direct_pdfs"]) == 2
+
+
+def test_parse_egc_index_commission_and_subsequence_number():
+    # Verification pages (index_emscverification.html) number rows as
+    # 第520回(第6回): the commission number followed by a series sub-sequence.
+    # The canonical meeting number is the first (commission) number, 520.
+    # A leading とりまとめ (compilation report) row has a date but no 第N回.
+    html = """
+    <html><body>
+    <table>
+      <tr>
+        <td>令和6年6月26日</td>
+        <td colspan="5"><a href="ev/report_20240626.html">検証に係るとりまとめ</a></td>
+      </tr>
+      <tr>
+        <td>令和6年6月26日</td><td>第520回(第6回)</td>
+        <td><a href="ev/pdf/520_giji.pdf">議事要旨</a></td>
+        <td><a href="ev/520_haifu.html">配布資料</a></td>
+      </tr>
+    </table>
+    </body></html>
+    """
+    url = "https://www.egc.meti.go.jp/activity/index_emscverification.html"
+    by_num = {m["meeting_num"]: m for m in parse_egc_index(html, url)}
+    # The first (commission) number wins; the sub-sequence 6 is not a meeting.
+    assert set(by_num) == {520}
+    import datetime
+
+    assert by_num[520]["date"] == datetime.date(2024, 6, 26)
+    assert by_num[520]["haifu_url"].endswith("ev/520_haifu.html")
 
 
 def test_classify_material():
@@ -225,6 +331,141 @@ def test_detect_unchanged_short_circuits(monkeypatch, tmp_path):
     results = detect_mod.detect(["santeii"], db_path=db)
     assert results[0]["status"] == "unchanged"
     assert results[0]["new"] == 0
+
+
+# ── Material backfill (self-heal meetings detected during a source outage) ────
+def test_meetings_missing_materials_lists_hidden_meetings(tmp_path):
+    """meetings_missing_materials returns detected meetings with no materials
+    (newest first), excluding done meetings and meetings that already have docs."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    store.record_meeting(key, 1, None, db_path=db)  # material-less
+    store.record_meeting(key, 2, None, db_path=db)  # material-less
+    store.record_meeting(  # already has a material → not hidden
+        key, 3,
+        [Material(3, "003_min", "https://x/3_gijiroku.pdf", "議事録", "minutes")],
+        db_path=db,
+    )
+    store.record_meeting(key, 4, None, db_path=db)  # will be marked done
+    mid4 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                if m["meeting_num"] == 4)
+    store.update_meeting(mid4, db_path=db, state="done", briefing_md="x")
+
+    assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
+
+
+def test_backfill_materials_populates_detected_meetings(monkeypatch, tmp_path):
+    """backfill_materials fetches materials for material-less detected meetings so
+    they stop being hidden — the 'tracked committee shows no meetings' fix."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    store.record_meeting(key, 1, None, db_path=db)
+    store.record_meeting(key, 2, None, db_path=db)
+    assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
+
+    def fake_list(c, n, **kw):
+        return [Material(n, f"{n:03d}_01", f"https://x/{n}_agenda.pdf", "議事次第", "agenda")]
+
+    # METI committee: backfill resolves subpage URLs from one index fetch.
+    monkeypatch.setattr(detect_mod, "fetch_meti_url_map",
+                        lambda c, **kw: {1: "https://x/001.html", 2: "https://x/002.html"})
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["materialised"] == 2 and row["checked"] == 2
+    # Both meetings now carry a material, so none remain hidden.
+    assert store.meetings_missing_materials(key, db_path=db) == []
+    assert len(store.meeting_materials(key, 2, db_path=db)) == 1
+
+
+def test_backfill_materials_respects_per_committee_limit(monkeypatch, tmp_path):
+    """The catch-up path caps work per committee so a full self-heal spreads across
+    runs instead of hammering the source in one pass."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    for n in range(1, 6):
+        store.record_meeting(key, n, None, db_path=db)
+
+    monkeypatch.setattr(detect_mod, "fetch_meti_url_map",
+                        lambda c, **kw: {n: f"https://x/{n:03d}.html" for n in range(1, 6)})
+    monkeypatch.setattr(detect_mod, "list_materials",
+                        lambda c, n, **kw: [Material(n, f"{n:03d}_01",
+                                                     f"https://x/{n}.pdf", "議事次第", "agenda")])
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db, limit_per_committee=2)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["checked"] == 2 and row["materialised"] == 2  # newest two only
+    # Meetings 4 and 5 healed; 1–3 still pending for the next run.
+    assert store.meetings_missing_materials(key, db_path=db) == [3, 2, 1]
+
+
+def test_backfill_materials_meti_fetches_index_once(monkeypatch, tmp_path):
+    """A METI committee's index is fetched exactly once per run and each meeting's
+    subpage URL is passed through, instead of re-fetching the (WAF-challenged)
+    index once per meeting."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"  # METI
+    for n in (1, 2, 3):
+        store.record_meeting(key, n, None, db_path=db)
+
+    index_fetches = {"n": 0}
+
+    def fake_url_map(c, **kw):
+        index_fetches["n"] += 1
+        return {1: "https://x/001.html", 2: "https://x/002.html", 3: "https://x/003.html"}
+
+    seen_page_urls: list[str | None] = []
+
+    def fake_list(c, n, **kw):
+        seen_page_urls.append(kw.get("page_url"))
+        return [Material(n, f"{n:03d}_01", f"https://x/{n}.pdf", "議事次第", "agenda")]
+
+    monkeypatch.setattr(detect_mod, "fetch_meti_url_map", fake_url_map)
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db)
+
+    assert index_fetches["n"] == 1  # one index fetch for all three meetings
+    assert seen_page_urls == ["https://x/003.html", "https://x/002.html", "https://x/001.html"]
+    assert next(r for r in results if r["key"] == key)["materialised"] == 3
+
+
+def test_backfill_materials_defers_when_index_unreachable(monkeypatch, tmp_path):
+    """If a METI committee's index can't be fetched (e.g. a persistent WAF 202),
+    backfill defers the whole committee rather than hammering it per meeting."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"  # METI
+    store.record_meeting(key, 1, None, db_path=db)
+    store.record_meeting(key, 2, None, db_path=db)
+
+    called = {"list": 0}
+
+    def fake_list(c, n, **kw):
+        called["list"] += 1
+        return [Material(n, f"{n:03d}_01", f"https://x/{n}.pdf", "議事次第", "agenda")]
+
+    monkeypatch.setattr(detect_mod, "fetch_meti_url_map", lambda c, **kw: {})  # unreachable
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+
+    results = detect_mod.backfill_materials([key], db_path=db)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["materialised"] == 0 and row["checked"] == 0
+    assert called["list"] == 0  # never fell through to per-meeting index fetches
+    # Meetings stay pending so the next run retries them.
+    assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
 
 
 # ── Running document regeneration ────────────────────────────────────────────
@@ -640,22 +881,37 @@ def test_sync_preserves_ui_edits(tmp_path):
     assert row["priority"] == 7
 
 
-def test_disabled_committee_excluded_from_detection(monkeypatch, tmp_path):
+def test_disabled_committee_detected_but_not_summarised(monkeypatch, tmp_path):
+    """Detection is decoupled from tracking: detect() scans *every* committee — so
+    discovered/untracked ones get their meetings recorded as pending — while the
+    ``enabled`` flag only gates summarisation (the daily worklist)."""
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
     store.set_committee_enabled("santeii", False, db_path=db)
 
     tracked_keys = {c.key for c in store.tracked_committees(db_path=db)}
-    assert "santeii" not in tracked_keys
+    assert "santeii" not in tracked_keys  # enabled-only helper still excludes it
     assert "system_review" in tracked_keys
 
-    # detect() over the whole (enabled) registry must skip the disabled committee.
+    # detect() now scans the whole catalog — including the disabled committee — and
+    # records a new (pending) meeting for it.
     seen: list[str] = []
-    monkeypatch.setattr(detect_mod, "discover_meetings",
-                        lambda c, **kw: seen.append(c.key) or Discovery("unchanged", []))
+
+    def fake_discover(c, **kw):
+        seen.append(c.key)
+        return Discovery("ok", [1]) if c.key == "santeii" else Discovery("unchanged", [])
+
+    monkeypatch.setattr(detect_mod, "discover_meetings", fake_discover)
     monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
     detect_mod.detect(db_path=db)
-    assert "santeii" not in seen and "system_review" in seen
+    assert "santeii" in seen and "system_review" in seen
+
+    # …but the disabled committee is kept out of the summarisation worklist, while
+    # it still shows up when the enabled filter is off (e.g. the deep-dive feed).
+    q_enabled = {w["committee_key"] for w in store.pending_meetings(db_path=db, only_enabled=True)}
+    q_all = {w["committee_key"] for w in store.pending_meetings(db_path=db, only_enabled=False)}
+    assert "santeii" not in q_enabled
+    assert "santeii" in q_all
 
 
 def test_add_user_committee_tracked_and_resolved(tmp_path):

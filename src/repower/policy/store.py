@@ -693,6 +693,33 @@ def meetings_missing_date(key: str, db_path: str | None = None) -> list[int]:
         return [r[0] for r in rows]
 
 
+def meetings_missing_materials(key: str, db_path: str | None = None) -> list[int]:
+    """Meeting numbers for *key* that have no source materials yet and aren't done
+    (newest first).
+
+    ``detect`` only enumerates materials for genuinely *new* meetings, so a meeting
+    first seen while its committee page was unavailable (e.g. a transient METI
+    outage) keeps zero materials — and the Policy Deep Dive hides material-less,
+    non-error meetings, so such a meeting never appears even though its committee is
+    tracked. This lists them so a catch-up can re-fetch their materials.
+    """
+    with session_scope(db_path, commit=False) as session:
+        with_mats = {
+            r[0]
+            for r in session.query(PolicyMaterial.meeting_num)
+            .filter(PolicyMaterial.committee_key == key)
+            .distinct()
+            .all()
+        }
+        rows = (
+            session.query(PolicyMeeting.meeting_num, PolicyMeeting.state)
+            .filter_by(committee_key=key)
+            .order_by(PolicyMeeting.meeting_num.desc())
+            .all()
+        )
+        return [num for (num, state) in rows if state != "done" and num not in with_mats]
+
+
 def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = None) -> int:
     """Set ``meeting_date`` for the given ``{meeting_num: date}`` of committee *key*.
 

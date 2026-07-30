@@ -232,11 +232,17 @@ def add_committee_by_url(url: str, *, db_path: str | None = None, track: bool = 
     return {"ok": True, "key": res["key"], "name_ja": name_ja, "existing": res["existing"]}
 
 
-def discover_committees(*, db_path: str | None = None) -> dict:
-    """Refresh the committee catalog: enumerate energy committees from the three
-    org indexes and persist any not already known as untracked rows.
+def discover_committees(*, db_path: str | None = None, include_backup: bool = True) -> dict:
+    """Refresh the committee catalog from every discovery source in one call.
 
-    Returns ``{"found", "inserted", "by_source"}``.
+    Enumerates energy committees from the three primary org indexes (METI/OCCTO/EGC)
+    and, by default, the energy-board.xvps.jp backup feed, persisting any not already
+    known as untracked rows. The backup diff runs *after* the primary upsert, so a
+    committee surfaced by both sources is inserted only once.
+
+    Returns ``{"found", "inserted", "by_source", "backup"}`` where ``inserted`` is the
+    combined newly-discovered count across all sources and ``backup`` is the
+    energy-board cross-check summary (``None`` when skipped or its feed is down).
     """
     from repower.policy.store import sync_committees, upsert_discovered_committees
 
@@ -246,5 +252,23 @@ def discover_committees(*, db_path: str | None = None) -> dict:
     by_source: dict[str, int] = {}
     for it in items:
         by_source[it["source"]] = by_source.get(it["source"], 0) + 1
-    logger.info("policy catalog: %d committees listed, %d newly discovered", len(items), inserted)
-    return {"found": len(items), "inserted": inserted, "by_source": by_source}
+
+    backup = None
+    if include_backup:
+        # Secondary/backup source: diff the energy-board aggregator feed against the
+        # catalog (now including anything inserted above, so no double counting) and
+        # accumulate any energy committees the primary indexes missed. Best-effort:
+        # a flaky aggregator feed must not fail the whole discovery pass.
+        try:
+            from repower.policy.energy_board import cross_check
+
+            backup = cross_check(db_path=db_path, persist=True)
+            inserted += int(backup.get("added") or 0)
+        except Exception as e:  # noqa: BLE001 — backup feed is optional
+            logger.warning("policy discover: energy-board cross-check failed: %s", e)
+
+    logger.info(
+        "policy catalog: %d committees listed, %d newly discovered (backup added: %s)",
+        len(items), inserted, (backup or {}).get("added", "skipped"),
+    )
+    return {"found": len(items), "inserted": inserted, "by_source": by_source, "backup": backup}

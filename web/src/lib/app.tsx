@@ -27,7 +27,7 @@ import { refreshSnapshots } from './data'
 export type Lang = 'en' | 'ja'
 export type Theme = 'light' | 'dark'
 export type Screen = 'overview' | 'market' | 'policy' | 'capacity'
-export type Overlay = 'search' | 'settings' | 'watchlist' | 'committees'
+export type Overlay = 'search' | 'settings' | 'watchlist' | 'committees' | 'guide'
 
 /** A single starred entity. `id` is the stable key (e.g. `area:tepco`). */
 export interface WatchEntry {
@@ -37,6 +37,61 @@ export interface WatchEntry {
   ja: string
   /** Screen to open when the entry is activated. */
   screen: Screen
+}
+
+/** One reported step of a background job (the catch-up job populates these). */
+export interface JobStage {
+  key: string
+  label: string
+  label_ja: string
+  state: string // running | done | error
+  detail?: string | null
+  detail_ja?: string | null
+}
+
+/** Structured result of a completed catch-up job (absent for other job kinds). */
+export interface PolicyCatchupResult {
+  new_meetings?: number
+  dated?: number
+  discovered?: number
+  pending?: number
+  upcoming?: number | null
+}
+
+/** A single tracked run shown in the progress panel + its history. */
+export interface JobRun {
+  id: number
+  kind: string
+  title: string
+  titleJa: string
+  state: 'running' | 'done' | 'error'
+  stages: JobStage[]
+  output: string[]
+  result: PolicyCatchupResult | null
+  error: string | null
+  startedAt: number
+  finishedAt: number | null
+}
+
+/** What `trackJob` needs to begin mirroring a backend job into the panel. */
+export interface JobTrackMeta {
+  kind: string
+  title: string
+  titleJa: string
+  /** Job-status endpoint to poll (default `/api/policy/job`). */
+  endpoint?: string
+  onDone?: (run: JobRun) => void
+}
+
+/** Raw job-status payload from the web API. */
+interface RawJob {
+  state?: string
+  stages?: JobStage[]
+  output?: string[]
+  result?: unknown
+  error?: string | null
+  cmd?: string
+  kind?: string
 }
 
 export interface AppState {
@@ -75,6 +130,12 @@ export interface AppState {
   isFollowing: (key: string) => boolean
   toggleFollow: (key: string) => void
 
+  /** Archived committees (persisted overrides). Committees whose last meeting was
+   * in 2025 or earlier are archived out of the Explorer by default; an explicit
+   * entry here (true/false) wins over that default, so the user can restore an
+   * archived committee or re-archive an active one. */
+  archiveOverrides: Record<string, boolean>
+  setArchived: (key: string, archived: boolean) => void
   /** User settings (persisted). */
   homeScreen: Screen
   setHomeScreen: (s: Screen) => void
@@ -85,6 +146,12 @@ export interface AppState {
   focusArea: AreaKey | null
   requestArea: (a: AreaKey) => void
   clearFocusArea: () => void
+
+  /** Transient: a committee (and meeting number, when known) that another screen
+   * asked Policy Deep Dive to open — e.g. a row of the Overview radar. */
+  focusCommittee: { com: string; num: number | null } | null
+  requestCommittee: (com: string, num?: number | null) => void
+  clearFocusCommittee: () => void
 
   /** True when a local backend API (`repower web-api`) is reachable — enables the
    * write controls (track committees) and the Run catch-up button. False on the
@@ -98,6 +165,19 @@ export interface AppState {
   /** True for a brief window after `refreshData()` while snapshots refetch —
    * drives the spinning refresh icon so the reload is visibly in progress. */
   refreshing: boolean
+
+  /** Recent background-job runs (newest first) shown in the progress panel —
+   * catch-up and full-refresh push a JobRun here as they run. */
+  jobRuns: JobRun[]
+  /** Mirror a just-started backend job into `jobRuns` (drives the panel). */
+  trackJob: (meta: JobTrackMeta) => void
+  /** Progress panel collapsed to a compact pill (persisted). */
+  panelMin: boolean
+  setPanelMinimized: (min: boolean) => void
+  /** Remove one run from the panel history. */
+  dismissRun: (id: number) => void
+  /** Clear finished runs from the panel history (keeps a running one). */
+  clearRuns: () => void
 }
 
 const Ctx = createContext<AppState | null>(null)
@@ -163,12 +243,16 @@ export function AppProvider({
       return DEFAULT_FOLLOW
     }
   })
+  const [archiveOverrides, setArchiveOverrides] = useState<Record<string, boolean>>(() =>
+    readJson<Record<string, boolean>>('jema-archive-committees', {}),
+  )
   const [homeScreen, setHomeScreenS] = useState<Screen>(homeInit)
   const [defaultGran, setDefaultGranS] = useState<Level>(() => {
     const g = read('jema-gran') as Level | null
     return g && LEVELS.includes(g) ? g : 'Daily'
   })
   const [focusArea, setFocusArea] = useState<AreaKey | null>(null)
+  const [focusCommittee, setFocusCommittee] = useState<{ com: string; num: number | null } | null>(null)
   const [interactive, setInteractive] = useState(false)
 
   // Interactive mode = a local backend (`repower web-api`) is reachable, which
@@ -259,6 +343,14 @@ export function AppProvider({
     })
   }, [])
 
+  const setArchived = useCallback((key: string, archived: boolean) => {
+    setArchiveOverrides((prev) => {
+      const next = { ...prev, [key]: archived }
+      write('jema-archive-committees', JSON.stringify(next))
+      return next
+    })
+  }, [])
+
   const setHomeScreen = useCallback((s: Screen) => {
     write('jema-home', s)
     setHomeScreenS(s)
@@ -270,9 +362,97 @@ export function AppProvider({
 
   const requestArea = useCallback((a: AreaKey) => setFocusArea(a), [])
   const clearFocusArea = useCallback(() => setFocusArea(null), [])
+  const requestCommittee = useCallback(
+    (com: string, num?: number | null) => setFocusCommittee({ com, num: num ?? null }),
+    [],
+  )
+  const clearFocusCommittee = useCallback(() => setFocusCommittee(null), [])
   const [refreshing, setRefreshing] = useState(false)
   const refreshTimer = useRef<number | null>(null)
-  const jobTimer = useRef<number | null>(null)
+  const jobPollRef = useRef<number | null>(null)
+  const jobIdRef = useRef(0)
+  const [jobRuns, setJobRuns] = useState<JobRun[]>([])
+  const [panelMin, setPanelMinS] = useState<boolean>(read('jema-panel-min') === '1')
+
+  const setPanelMinimized = useCallback((min: boolean) => {
+    write('jema-panel-min', min ? '1' : '0')
+    setPanelMinS(min)
+  }, [])
+  const dismissRun = useCallback((id: number) => {
+    setJobRuns((prev) => prev.filter((r) => r.id !== id))
+  }, [])
+  const clearRuns = useCallback(() => {
+    // Keep any still-running job; drop finished history.
+    setJobRuns((prev) => prev.filter((r) => r.state === 'running'))
+  }, [])
+
+  // Mirror a just-started backend job (catch-up / full refresh) into `jobRuns` so
+  // the progress panel can show live per-stage progress and a run history. Polls
+  // the shared single-flight job slot, refetches page snapshots as each stage
+  // completes (new meetings land mid-run), and once more on completion.
+  const trackJob = useCallback((meta: JobTrackMeta) => {
+    const endpoint = meta.endpoint || '/api/policy/job'
+    const id = (jobIdRef.current += 1)
+    const run0: JobRun = {
+      id, kind: meta.kind, title: meta.title, titleJa: meta.titleJa,
+      state: 'running', stages: [], output: [], result: null, error: null,
+      startedAt: Date.now(), finishedAt: null,
+    }
+    setJobRuns((prev) => [run0, ...prev].slice(0, 8))
+    setPanelMinS(false) // pop the panel open on a new job
+    let doneStages = 0
+    let errs = 0
+    const poll = () => {
+      fetch(endpoint)
+        .then((r) => r.json())
+        .then((j: RawJob) => {
+          errs = 0
+          const stages = (j.stages || []) as JobStage[]
+          const state: JobRun['state'] =
+            j.state === 'running' ? 'running' : j.state === 'error' ? 'error' : 'done'
+          let snap: JobRun | null = null
+          setJobRuns((prev) =>
+            prev.map((x) => {
+              if (x.id !== id) return x
+              snap = {
+                ...x, stages, output: j.output || [], state,
+                result: (j.result as PolicyCatchupResult) ?? null,
+                error: j.error ?? null,
+                finishedAt: state === 'running' ? null : Date.now(),
+              }
+              return snap
+            }),
+          )
+          const nowDone = stages.filter((sg) => sg.state !== 'running').length
+          if (nowDone > doneStages) {
+            doneStages = nowDone
+            refreshSnapshots() // new meetings land as each stage completes
+          }
+          if (j.state === 'running') {
+            jobPollRef.current = window.setTimeout(poll, 1000)
+          } else {
+            refreshSnapshots()
+            if (snap) meta.onDone?.(snap)
+          }
+        })
+        .catch(() => {
+          if ((errs += 1) > 5) {
+            setJobRuns((prev) =>
+              prev.map((x) =>
+                x.id === id
+                  ? { ...x, state: 'error', error: 'lost connection to the local API', finishedAt: Date.now() }
+                  : x,
+              ),
+            )
+            return
+          }
+          jobPollRef.current = window.setTimeout(poll, 1500)
+        })
+    }
+    if (jobPollRef.current) window.clearTimeout(jobPollRef.current)
+    jobPollRef.current = window.setTimeout(poll, 700)
+  }, [])
+
   const refreshData = useCallback(() => {
     // Static (GitHub Pages / no backend): there's nothing to re-scrape, so just
     // bust the snapshot cache and refetch. A short spinner signals the reload.
@@ -283,43 +463,34 @@ export function AppProvider({
       refreshTimer.current = window.setTimeout(() => setRefreshing(false), 800)
       return
     }
-    // Interactive (local `repower web-api`): kick off a real full refresh
-    // (recover gaps → scrape every source → export-web), keep the spinner up for
-    // the whole job, then reload the freshly-written snapshots. Polls the shared
-    // single-flight job slot, so it also attaches to an already-running job (409).
-    const finish = (msg: string) => {
-      if (jobTimer.current) window.clearTimeout(jobTimer.current)
-      jobTimer.current = null
-      setRefreshing(false)
-      refreshSnapshots()
-      toast(msg)
-    }
-    const poll = () => {
-      fetch('/api/data/refresh')
-        .then((r) => r.json())
-        .then((j: { state?: string }) => {
-          if (j && j.state === 'running') {
-            jobTimer.current = window.setTimeout(poll, 2000)
-          } else if (j && j.state === 'error') {
-            finish(pick('Refresh failed — see the web-api console', '更新に失敗しました — web-api のログを確認してください'))
-          } else {
-            finish(pick('Data refreshed', 'データを更新しました'))
-          }
-        })
-        .catch(() => finish(pick('Refresh status unavailable', '更新状況を取得できませんでした')))
-    }
+    // Interactive (local `repower web-api`): kick off a real full refresh (recover
+    // gaps → scrape every source → export-web) and mirror it into the progress
+    // panel via trackJob (which refetches snapshots as it runs). Keep the spinner
+    // up until the job finishes.
     setRefreshing(true)
     fetch('/api/data/refresh', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
       .then(async (r) => {
         const j = (await r.json().catch(() => null)) as { error?: string } | null
-        if (r.status === 202) {
-          toast(pick('Refreshing data — scraping sources…', 'データ取得中 — 各ソースを収集しています…'))
-          if (jobTimer.current) window.clearTimeout(jobTimer.current)
-          jobTimer.current = window.setTimeout(poll, 2000)
-        } else if (r.status === 409) {
-          toast(pick('A job is already running — waiting…', '実行中のジョブがあります — 完了を待っています…'))
-          if (jobTimer.current) window.clearTimeout(jobTimer.current)
-          jobTimer.current = window.setTimeout(poll, 2000)
+        if (r.status === 202 || r.status === 409) {
+          toast(
+            r.status === 409
+              ? pick('A job is already running — waiting…', '実行中のジョブがあります — 完了を待っています…')
+              : pick('Refreshing data — scraping sources…', 'データ取得中 — 各ソースを収集しています…'),
+          )
+          trackJob({
+            kind: 'refresh-web',
+            title: 'Data refresh',
+            titleJa: 'データ更新',
+            endpoint: '/api/data/refresh',
+            onDone: (run) => {
+              setRefreshing(false)
+              toast(
+                run.state === 'error'
+                  ? pick('Refresh failed — see the web-api console', '更新に失敗しました — web-api のログを確認してください')
+                  : pick('Data refreshed', 'データを更新しました'),
+              )
+            },
+          })
         } else {
           setRefreshing(false)
           toast(j && j.error ? j.error : pick('Could not start refresh', '更新を開始できませんでした'))
@@ -329,7 +500,7 @@ export function AppProvider({
         setRefreshing(false)
         toast(pick('Could not reach the local API', 'ローカル API に接続できませんでした'))
       })
-  }, [interactive, toast, pick])
+  }, [interactive, toast, pick, trackJob])
 
   // Global keyboard: ⌘K / Ctrl-K opens search, Esc closes any overlay.
   useEffect(() => {
@@ -369,6 +540,8 @@ export function AppProvider({
       followed,
       isFollowing,
       toggleFollow,
+      archiveOverrides,
+      setArchived,
       homeScreen,
       setHomeScreen,
       defaultGran,
@@ -376,9 +549,18 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      focusCommittee,
+      requestCommittee,
+      clearFocusCommittee,
       interactive,
       refreshData,
       refreshing,
+      jobRuns,
+      trackJob,
+      panelMin,
+      setPanelMinimized,
+      dismissRun,
+      clearRuns,
     }),
     [
       lang,
@@ -402,6 +584,8 @@ export function AppProvider({
       followed,
       isFollowing,
       toggleFollow,
+      archiveOverrides,
+      setArchived,
       homeScreen,
       setHomeScreen,
       defaultGran,
@@ -409,9 +593,18 @@ export function AppProvider({
       focusArea,
       requestArea,
       clearFocusArea,
+      focusCommittee,
+      requestCommittee,
+      clearFocusCommittee,
       interactive,
       refreshData,
       refreshing,
+      jobRuns,
+      trackJob,
+      panelMin,
+      setPanelMinimized,
+      dismissRun,
+      clearRuns,
     ],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

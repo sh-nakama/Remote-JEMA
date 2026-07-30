@@ -407,29 +407,54 @@ def policy_dates(
 @policy_app.command("schedule")
 def policy_schedule():
     """Refresh the upcoming-meeting snapshot from external calendars (no auth required)."""
-    from repower.policy.schedule import fetch_upcoming
-    from repower.policy.store import replace_upcoming
+    from repower.policy.schedule import ScheduleUnavailable, refresh_upcoming
+    from repower.policy.store import list_upcoming
 
-    rows = fetch_upcoming()
-    written = replace_upcoming(rows)
-    matched = sum(1 for r in rows if r.committee_key)
+    try:
+        refresh_upcoming()
+    except ScheduleUnavailable as e:
+        # A transient METI outage (network error or the overload/failover page) must
+        # not wipe the stored snapshot — report it and show what's still on file.
+        typer.echo(f"schedule feed unavailable: {e}", err=True)
+    rows = list_upcoming()
+    matched = sum(1 for r in rows if r["committee_key"])
     typer.echo(f"{'DATE':<12}{'ORG':<7}{'#':>4}  NAME")
     for r in rows:
-        num = str(r.meeting_num) if r.meeting_num else "-"
-        tick = "*" if r.committee_key else " "
-        typer.echo(f"{r.date.isoformat():<12}{r.org:<7}{num:>4}{tick} {r.name_ja[:52]}")
-    typer.echo(f"-- {written} upcoming meeting(s); {matched} matched to tracked committees (*) --")
+        num = str(r["meeting_num"]) if r["meeting_num"] else "-"
+        tick = "*" if r["committee_key"] else " "
+        typer.echo(f"{r['date']:<12}{r['org']:<7}{num:>4}{tick} {r['name_ja'][:52]}")
+    typer.echo(f"-- {len(rows)} upcoming meeting(s); {matched} matched to tracked committees (*) --")
+
+
+@policy_app.command("materials")
+def policy_materials(
+    committee: str = typer.Option("all", help="Committee key or 'all'"),
+    limit: int = typer.Option(0, help="Max material-less meetings per committee (0 = no limit)"),
+):
+    """Fetch materials for meetings detected without any (makes them visible in the UI)."""
+    from repower.policy.detect import backfill_materials
+
+    keys = None if committee == "all" else [committee]
+    results = backfill_materials(keys, limit_per_committee=(limit or None))
+    total = 0
+    for r in results:
+        if r["checked"]:
+            typer.echo(f"{r['key']:<28}{r['source']:<6} materialised {r['materialised']}/{r['checked']}")
+            total += r["materialised"]
+    typer.echo(f"-- {total} meeting(s) populated with materials --")
 
 
 @policy_app.command("run")
 def policy_run(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     max_per_run: int = typer.Option(5, help="Max meetings to summarise this run (rate/cost guard)"),
-    breadth: bool = typer.Option(
-        False, "--breadth",
+    breadth: bool | None = typer.Option(
+        None, "--breadth/--depth-first",
         help="Breadth-first: summarise the newest pending meeting of each committee "
              "(in priority order) before going deeper — spreads a small daily quota "
-             "across committees instead of draining one committee's backlog.",
+             "across committees instead of draining one committee's backlog. Defaults "
+             "to breadth-first for '--committee all' and depth-first for a single "
+             "committee; pass --breadth/--depth-first to override.",
     ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
@@ -437,7 +462,10 @@ def policy_run(
 
     _require_auth_or_exit()
     keys = None if committee == "all" else [committee]
-    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth)
+    # Default: breadth-first across the whole tracked set (get the latest meeting of
+    # each committee current first), depth-first when draining a single committee.
+    breadth_first = (committee == "all") if breadth is None else breadth
+    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth_first)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} synthesized={summary['synthesized']}"
@@ -619,10 +647,12 @@ def policy_list():
 
 @policy_app.command("discover")
 def policy_discover():
-    """Enumerate energy committees from the METI/OCCTO/EGC indexes into the catalog.
+    """Enumerate energy committees from the METI/OCCTO/EGC indexes **and** the
+    energy-board backup feed into the catalog — one discovery pass over every source.
 
     No auth. New committees are added untracked (``enabled=0``) — track them with
     ``policy track <key>`` (or the web Manage modal) to include them in the pipeline.
+    Use ``policy crosscheck`` to run only the energy-board backup diff.
     """
     from repower.policy.catalog import discover_committees
 
@@ -630,6 +660,12 @@ def policy_discover():
     typer.echo(f"catalog: {res['found']} committees listed, {res['inserted']} newly discovered")
     for src, n in sorted(res["by_source"].items()):
         typer.echo(f"  {src:<6}{n}")
+    backup = res.get("backup")
+    if backup is not None:
+        typer.echo(
+            f"  backup (energy-board): {backup['theirs']} recent · "
+            f"{backup['matched']} known · {backup['added']} added"
+        )
 
 
 @policy_app.command("crosscheck")
