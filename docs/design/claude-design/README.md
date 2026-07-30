@@ -16,6 +16,18 @@ Design uses to build its Design System card index.
 Each `screens/*.html` is a self-contained, themeable (light/dark) preview that
 renders standalone in a browser and as a card in the Claude Design pane.
 
+> **Not to be confused with the repo-root `screens/*.html`.** Those are a
+> different, later set: hi-fi Claude Design *exports* (~114–159 KB, inlined
+> `dc-runtime` + `DCLogic` fixtures) that `web/src/screens/*.tsx` were ported
+> from, and they include a fourth screen, Capacity & Auctions, that never got a
+> wireframe here. The files in *this* folder are the low-fi wireframe cards split
+> from `../wireframes.html`.
+>
+> Both sets are **pre-implementation mockups filled with illustrative data**, not
+> a source of truth. `screens/capacity-auctions.html`, for example, invents its
+> Hokkaido/Kyushu clearing prices and mislabels how the FY2027 auction split. The
+> shipped React screens are authoritative; see `docs/GOTCHAS.md`.
+
 ## How to push into Claude Design
 
 Design-system authorization needs an **interactive `claude` terminal**, so this
