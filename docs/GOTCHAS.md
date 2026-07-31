@@ -102,6 +102,38 @@ fixed.
   1269) `(open — P3)` — don't copy them into new live-wired UI.
 - ***.live.ts arrays are newest-first** (index 0 = latest, via `rev()`); `windowLive`/
   `windowSupply` flip back to oldest-first for plotting. Check direction before indexing.
+- **The tail of a supply export is padded with all-null rows.** The datetime grid runs to the
+  end of the export window, but the TSO feed lags, so the newest rows have `area_demand_mw` and
+  every fuel `null`. Two traps followed from that (both fixed, don't reintroduce):
+  *(a)* the ingest helper `g()` coerces missing values to `0`, which drew a demand line flat
+  along the axis — i.e. "demand fell to 0 MW for five days". `supDemand` is therefore read with
+  `nn()` (NaN-preserving) and `windowSupply` drops rows with a non-finite demand. *(b)* anchoring
+  the plotted window on `supDt[0]` anchored it on padding, pushing the real series off the right
+  edge; use `latestT`/`latestPriceT`/`latestSupplyT`, which walk to the newest row that actually
+  carries a value.
+- **Never derive a chart's x-domain from the union of the selected series' extents.** Per-area
+  coverage differs by weeks in the real export (one TSO's supply can lag a month), so a single
+  stale area stretched the shared domain and squeezed *every* chart's line into a ~16% sliver —
+  the bug in #22, which looked like "the range chip is ignored". The domain is now
+  `[anchor − effectiveRangeDays, anchor]`: a 7D chip always draws exactly 7 days, and a short
+  series stops early leaving honest whitespace plus a `Nd behind` badge.
+- **A range chip is not always plottable at the selected granularity.** `Native` is capped by
+  `LEVEL_WINDOW_DAYS["Native"] = 90` in `export_web.py` (mirrored client-side as
+  `NATIVE_EXPORT_DAYS`), and `Weekly`/`Monthly` need a floor (28/120 d) or a `7D` window holds
+  ≤1 aggregated bucket and every chart renders blank. `effectiveRangeDays` applies both; keep
+  `rangeClampNote` in sync so the UI says why the window differs from the chip.
+- **Draw series as gap-aware segments, not one polyline.** A single `<polyline>`/`<polygon>`
+  bridges a multi-week hole with a straight run that reads as genuine flat data. Use
+  `gapSegments()` (splits at >2.5× the median cadence, so it adapts to downsampling) with
+  `segPoints`/`bandPoints` from `lib/chart.tsx`.
+- **Guard every chart divisor.** Price scales use `span = hi - lo || 1`; recomputing
+  `(v - lo) / (hi - lo)` inline in JSX bypassed that guard and emitted `cy="NaN"` whenever a
+  window held only identical prices (easy to hit now that drag-zoom exists — JEPX prints ¥0.00
+  in high-solar periods). Expose the scale from the section object instead; `ChartFrame` also
+  suppresses a non-finite `dotY` as a backstop.
+- **`ChartFrame` charts use `preserveAspectRatio="none"` with `width:100%;height:auto`**, so the
+  on-screen height is `viewBoxHeight / 480 × renderedWidth` — the 480×320 expanded chart came
+  out ~812 px tall at full width. Pass `cssHeight` to constrain it; the geometry is unaffected.
 - **MarketOverview and MarketData duplicate helpers that have already drifted** (`chip` vs
   `makeChip`: flat threshold 0.5% vs 0.05%; also `slotLabel`, `segBase`, Gaussian `mk()`)
   `(open — P3)`. Change both copies or extract to `lib/` first.
