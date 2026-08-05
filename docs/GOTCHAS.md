@@ -192,6 +192,21 @@ fixed.
   hijacks `known_latest` (all real committee pages, incl. cross-dir joint meetings under a sibling
   `/shingikai/.../` committee, stay under `/shingikai/`). Meeting numbers use the *URL* file number,
   so a joint `第15回` linking to `.../suiso_seisaku/014.html` is recorded as 14 — expected, not a bug.
+- **A meeting with no `meeting_date` renders as `検出 YYYY-MM-DD`** (the detection timestamp), not
+  as the date it was held — `build_policy_snapshot` falls back to `updated_at`/`detected_at` and
+  sets `dateReal: false`, which `PolicyDeepDive.tsx` labels `検出` / `detected`. So a "wrong date"
+  report is really a *missing date*, never a display bug: check
+  `SELECT meeting_num, meeting_date FROM policy_meeting WHERE committee_key=…` first.
+- Meeting dates are recorded by **`detect`**, off the same index body it parses for meeting URLs
+  (`Discovery.dates`) — METI/EGC indexes print the date right next to the link, so it costs
+  nothing. `backfill_dates` is only the *repair* pass (OCCTO subpages, plus METI/EGC indexes that
+  304'd or were WAF-blocked during detection). It has to stay that way: meti.go.jp answers a
+  **202 WAF challenge** whose retry backoff (5→15→30 s) can cost minutes *per committee*, so a
+  second full crawl over ~85 committees frequently doesn't finish in one run — which is how
+  原子力小委員会 and ~15 other committees sat with **zero** dated meetings for weeks
+  (fixed 2026-08-05). For the same reason `backfill_dates(only_missing=True)` must **skip a
+  committee whose meetings are all dated before fetching anything** — it used to fetch first and
+  filter after, spending the WAF budget on settled committees and starving the ones that needed it.
 
 ## Streamlit dashboard
 

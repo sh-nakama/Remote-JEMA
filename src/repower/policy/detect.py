@@ -65,11 +65,19 @@ def detect(
 
     Returns one result dict per committee::
 
-        {"key", "source", "status", "latest_online", "known_latest", "new", "enumerated"}
+        {"key", "source", "status", "latest_online", "known_latest", "new",
+         "enumerated", "dated"}
 
     ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``. ``progress``, if
     given, is called as ``progress(done, total, key)`` at the start of each committee
     so a UI can show live "committee i of N" feedback during the (slow) scan.
+
+    Meeting *dates* are recorded here too, from the same index body discovery
+    already parsed (``dated``). Dates are not a separate crawl's job: METI/EGC
+    indexes print them next to the meeting link, and a full second pass over the
+    WAF-throttled committee pages (:func:`backfill_dates`) often doesn't finish,
+    which used to leave meetings permanently dateless — the Deep Dive then shows
+    a 検出 (detection) date instead of the date the meeting was held.
     """
     if not dry_run:
         sync_committees(db_path)
@@ -96,6 +104,7 @@ def detect(
             "known_latest": known_latest,
             "new": 0,
             "enumerated": 0,
+            "dated": 0,
         }
 
         if disc.status != "ok":
@@ -124,12 +133,17 @@ def detect(
                 res["new"] += 1
 
         if not dry_run:
+            # Persist the dates carried by the index we just parsed. Covers newly
+            # recorded meetings *and* already-known ones that never got a date,
+            # so this self-heals committees the date backfill never reached.
+            res["dated"] = set_meeting_dates(c.key, disc.dates, db_path=db_path)
             set_committee_checked(c.key, db_path=db_path)
 
         results.append(res)
         logger.info(
-            "policy detect %-26s online=%s known=%s new=%d enumerated=%d",
+            "policy detect %-26s online=%s known=%s new=%d enumerated=%d dated=%d",
             c.key, res["latest_online"], known_latest, res["new"], res["enumerated"],
+            res["dated"],
         )
 
     return results
@@ -144,12 +158,20 @@ def backfill_dates(
 ) -> list[dict]:
     """Populate ``policy_meeting.meeting_date`` from the committees' official pages.
 
-    METI/EGC dates come from one index (+ EGC log pages) fetch per committee, so
-    they are cheap and always refreshed. OCCTO dates live on per-meeting subpages,
-    so they are fetched one page at a time (polite delay) and, by default, only for
-    meetings that still lack a date — making the steady-state daily cost tiny while
-    a first run backfills everything. ``occto_limit`` caps OCCTO subpage fetches per
-    committee per run (None = no cap). Returns one result dict per committee.
+    A repair pass — the primary path is :func:`detect`, which records METI/EGC
+    dates straight off the index it already fetches. This re-reads the official
+    pages for meetings that are *still* dateless (e.g. an OCCTO committee, whose
+    index carries no dates, or a METI/EGC index that was 304/blocked at detection
+    time).
+
+    METI/EGC dates come from one index (+ EGC log pages) fetch per committee;
+    OCCTO dates live on per-meeting subpages, so they are fetched one page at a
+    time (polite delay). With ``only_missing`` (the default) a committee whose
+    meetings are all dated is skipped without any fetch — meti.go.jp sits behind a
+    WAF whose challenge/backoff can cost minutes per page, so re-reading settled
+    committees is what used to starve the ones that actually need a date.
+    ``occto_limit`` caps OCCTO subpage fetches per committee per run (None = no
+    cap). Returns one result dict per committee.
     """
     sync_committees(db_path)
     committees = _select_committees(keys, db_path)
@@ -157,9 +179,13 @@ def backfill_dates(
 
     for c in committees:
         updated = 0
+        missing = set(meetings_missing_date(c.key, db_path)) if only_missing else None
+        if missing is not None and not missing:
+            results.append({"key": c.key, "source": c.source, "dated": 0})
+            continue  # nothing to fill — don't spend a fetch on this committee
         if c.is_occto:
-            nums = meetings_missing_date(c.key, db_path) if only_missing else known_meeting_nums(c.key, db_path)
-            nums = sorted(nums, reverse=True)
+            nums = sorted(missing if missing is not None else known_meeting_nums(c.key, db_path),
+                          reverse=True)
             if occto_limit is not None:
                 nums = nums[:occto_limit]
             dates = {}
@@ -171,8 +197,7 @@ def backfill_dates(
             updated = set_meeting_dates(c.key, dates, db_path=db_path)
         else:
             dates = fetch_committee_dates(c, db_path=db_path)
-            if only_missing:
-                missing = set(meetings_missing_date(c.key, db_path))
+            if missing is not None:
                 dates = {n: d for n, d in dates.items() if n in missing}
             updated = set_meeting_dates(c.key, dates, db_path=db_path)
         results.append({"key": c.key, "source": c.source, "dated": updated})

@@ -62,10 +62,19 @@ class Discovery:
 
     ``status`` is ``ok`` (meeting list valid), ``unchanged`` (index 304'd — no new
     meetings), or ``error`` (fetch/parse failed; ``meeting_nums`` is empty).
+
+    ``dates`` maps ``meeting_num → date`` read from the *same* index body that
+    produced ``meeting_nums``. METI/EGC indexes print the meeting date right next
+    to the meeting link, so detection gets them for free and must persist them —
+    otherwise a meeting's date depends on ``backfill_dates`` completing a second
+    full crawl of the (WAF-throttled) committee pages, which routinely doesn't
+    finish and leaves meetings showing a 検出 (detection) date instead. Empty for
+    OCCTO, whose JS-rendered index carries no dates.
     """
 
     status: str
     meeting_nums: list[int] = field(default_factory=list)
+    dates: dict[int, datetime.date] = field(default_factory=dict)
 
 
 # ── Pure helpers (no network) ────────────────────────────────────────────────
@@ -466,6 +475,10 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
     — pass ``force=True`` when a body is always needed (e.g. probe previews of a
     URL that is already in the cache). ``max_probes`` bounds the OCCTO scan for
     interactive callers; detection passes neither and keeps the cheap behaviour.
+
+    For METI/EGC the returned :class:`Discovery` also carries the meeting *dates*
+    parsed from that same index body, so the caller can persist them without a
+    second fetch.
     """
     if committee.is_occto:
         latest = probe_occto_latest(committee, start_from=known_latest,
@@ -482,11 +495,13 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
         if committee.is_egc:
             meetings = parse_egc_index(content, committee.url)
             nums = sorted({m["meeting_num"] for m in meetings}, reverse=True)
-            return Discovery("ok", nums)
+            dates = {m["meeting_num"]: m["date"] for m in meetings if m["date"] is not None}
+            return Discovery("ok", nums, dates)
         # METI
         url_map = parse_meti_meeting_urls(content, committee.url)
         if url_map:
-            return Discovery("ok", sorted(url_map, reverse=True))
+            return Discovery("ok", sorted(url_map, reverse=True),
+                             parse_meti_meeting_dates(content, committee.url))
         logger.info("policy: no numbered meeting subpages for %s", committee.key)
 
     # Primary METI fetch failed (or the index had no meetings) — fall back to the
@@ -497,7 +512,8 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
         if nums:
             logger.info("policy: %s METI index unavailable — energy-board backup (%d meetings)",
                         committee.key, len(nums))
-            return Discovery("ok", sorted(nums, reverse=True))
+            return Discovery("ok", sorted(nums, reverse=True),
+                             _energy_board_dates(committee, db_path=db_path))
 
     return Discovery("ok", []) if status == "ok" else Discovery("error", [])
 
