@@ -606,7 +606,8 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             if k not in last_date_by_com or ds > last_date_by_com[k]:
                 last_date_by_com[k] = ds
 
-    def _synth(c, col):
+    def _opt(c, col):
+        """Read a column that may be absent from the caller's SELECT."""
         return c[col] if col in c.keys() else None
 
     data = [
@@ -617,6 +618,9 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             "ja": c["name_ja"] or "",
             "tier": _committee_tier(c),
             "tracked": bool(c["enabled"]),
+            # Concluded: every fetch pass skips it. Distinct from `tracked`, which
+            # only gates summarisation.
+            "archived": bool(_opt(c, "archived")),
             "discovered": c["committee_key"] not in config_keys,
             # Summarisation queue position (lower = first). User-editable in the
             # local Manage modal; drives pending_meetings ordering.
@@ -629,9 +633,9 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             "last_date": last_date_by_com.get(c["committee_key"]),
             # Committee-level cross-meeting synthesis (the "where this committee is
             # at" overview) + how far it's been synthesised, and a status rollup.
-            "synthesisEn": _synth(c, "running_digest_en_md"),
-            "synthesisJa": _synth(c, "running_summary_md"),
-            "lastSynth": _synth(c, "last_synth_meeting"),
+            "synthesisEn": _opt(c, "running_digest_en_md"),
+            "synthesisJa": _opt(c, "running_summary_md"),
+            "lastSynth": _opt(c, "last_synth_meeting"),
             "done": rollup.get(c["committee_key"], {}).get("done", 0),
             "pending": rollup.get(c["committee_key"], {}).get("pending", 0),
             "error": rollup.get(c["committee_key"], {}).get("error", 0),
@@ -650,7 +654,7 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
         committees = con.execute(text(
             "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
             "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
-            "last_synth_meeting FROM policy_committee"
+            "last_synth_meeting, archived FROM policy_committee"
         )).mappings().all()
         meetings = con.execute(text(
             "SELECT committee_key, meeting_date, state FROM policy_meeting"
@@ -682,7 +686,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
                 "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
-                "last_synth_meeting FROM policy_committee"
+                "last_synth_meeting, archived FROM policy_committee"
             )
         ).mappings().all()
         meetings = con.execute(

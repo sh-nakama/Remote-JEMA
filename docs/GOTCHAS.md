@@ -238,6 +238,22 @@ fixed.
   `detect` now re-requests the index with `force=True` when — and only when — that committee still
   has dateless meetings, so the cost is bounded by the shrinking set that actually needs repair
   rather than by the committee count. Don't "optimise" that forced re-fetch away.
+- **`enabled` (tracked) does not gate detection — only summarisation.** Untracking a committee
+  leaves it in the detect/backfill crawl by design, so a newly-discovered committee's meetings get
+  recorded before anyone tracks it (`_select_committees` passes `include_disabled=True`). To stop
+  *fetching* a concluded committee, mark it **`archived`** (`repower policy archive <key>`, or the
+  archive-box toggle in the Manage modal). Archived committees are skipped by all three passes —
+  detect, `backfill_dates`, `backfill_materials` — which is the only way to stop a dead committee
+  burning the daily WAF budget on every run. `denryoku_jukyu` / `denryoku_kaikaku` are the
+  motivating cases: closed, all-dateless, and re-crawled forever for nothing.
+  - `archived` is deliberately **orthogonal to `enabled`**: a committee can stay tracked (so its
+    already-detected meetings still summarise) while archived (so nothing new is fetched). Don't
+    collapse the two flags, and don't infer archiving from meeting dates — the motivating
+    committees have *no* dates, and `emsc_system` is dormant yet legitimately enabled.
+  - Naming a committee explicitly (`--committee <key>`) **overrides the skip**, so a one-off
+    re-crawl works without un-archiving.
+  - Archiving only stops *fetching*: rows, meetings and materials are kept and still render in the
+    Deep Dive. It is also a **DB-only change**, so it reaches CI via the HF dataset push, not git.
 
 ## Streamlit dashboard
 

@@ -162,9 +162,14 @@ class PolicyCommittee(Base):
     #   enabled     — the daily detect/summarise pipeline processes this committee.
     #   user_added  — added at runtime (discovery / UI) vs seeded from committees.py.
     #   priority    — summarisation priority (mirrors the config value; lower first).
+    #   archived    — the committee has concluded: skip every fetch pass (detection
+    #                 and both backfills). Independent of ``enabled``, which only
+    #                 gates summarisation: a dormant committee can be tracked but
+    #                 archived, or untracked but still actively detected.
     enabled = Column(Boolean, default=True, nullable=False)
     user_added = Column(Boolean, default=False, nullable=False)
     priority = Column(Integer, default=100)
+    archived = Column(Boolean, default=False, nullable=False)
     # Per-source scraper config (mirrors committees.Committee) so a committee added
     # at runtime is scrapeable without a code change. OCCTO: max_meeting/prefix;
     # EGC: log_pages (JSON array of log-page filenames) / min_meeting.
@@ -394,6 +399,7 @@ def _migrate_add_policy_registry(engine) -> None:
             ("prefix", "ALTER TABLE policy_committee ADD COLUMN prefix VARCHAR(64)"),
             ("log_pages", "ALTER TABLE policy_committee ADD COLUMN log_pages TEXT"),
             ("min_meeting", "ALTER TABLE policy_committee ADD COLUMN min_meeting INTEGER"),
+            ("archived", "ALTER TABLE policy_committee ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0"),
         ]
         with engine.begin() as conn:
             for col, ddl in adds:

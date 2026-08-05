@@ -37,17 +37,26 @@ from repower.policy.store import (
 
 def _select_committees(keys: list[str] | None, db_path: str | None):
     """Committees to process: the given *keys* (resolved DB-first so runtime-added
-    ones work), or **every known committee** when *keys* is None — tracked *and*
-    discovered/untracked (``include_disabled=True``).
+    ones work), or **every known non-archived committee** when *keys* is None —
+    tracked *and* discovered/untracked (``include_disabled=True``).
 
     Detection is decoupled from tracking: we scan the whole catalog so a
     newly-discovered committee's meetings are recorded (as pending) right away,
     without waiting for the user to track it. The ``enabled`` flag only gates
     *summarisation* (see ``pipeline.run``'s ``only_enabled``), not detection.
+
+    ``archived`` committees *are* excluded — a concluded committee will never
+    publish again, so re-crawling its index every day only burns budget (and, on
+    METI, trips the WAF challenge ladder on every run). Naming a committee
+    explicitly overrides this, so a deliberate re-crawl of an archived committee
+    still works without un-archiving it.
+
     Callers sync beforehand, so no second sync here."""
     if keys:
         return [c for c in (committee_or_config(k, db_path=db_path) for k in keys) if c is not None]
-    return tracked_committees(db_path=db_path, sync=False, include_disabled=True)
+    return tracked_committees(
+        db_path=db_path, sync=False, include_disabled=True, include_archived=False,
+    )
 
 logger = logging.getLogger(__name__)
 

@@ -163,6 +163,7 @@ def enabled_committees(db_path: str | None = None) -> list[Committee]:
 
 def tracked_committees(
     db_path: str | None = None, *, include_disabled: bool = False, sync: bool = True,
+    include_archived: bool = False,
 ) -> list[Committee]:
     """The committees to detect/summarise, as :class:`Committee` objects.
 
@@ -170,6 +171,10 @@ def tracked_committees(
     ``enabled`` flag). ``sync=True`` seeds the code committees first. Before the
     first sync (empty registry) it falls back to the code config so a fresh dry-run
     still sees every committee.
+
+    ``archived`` committees (concluded, no longer meeting) are excluded unless
+    ``include_archived=True`` — they are a *fetch* exclusion, orthogonal to the
+    ``enabled`` tracking flag. Their stored meetings are untouched and still render.
     """
     if sync:
         sync_committees(db_path)
@@ -177,6 +182,10 @@ def tracked_committees(
         q = session.query(PolicyCommittee)
         if not include_disabled:
             q = q.filter(PolicyCommittee.enabled.is_(True))
+        if not include_archived:
+            # Rows predating the migration default can read NULL, so match on
+            # "not true" rather than "is false".
+            q = q.filter(PolicyCommittee.archived.isnot(True))
         rows = q.all()
         if not rows and not sync:
             return list(COMMITTEES)
@@ -227,6 +236,23 @@ def set_committee_enabled(key: str, enabled: bool, db_path: str | None = None) -
         return True
 
 
+def set_committee_archived(key: str, archived: bool, db_path: str | None = None) -> bool:
+    """Mark a committee as concluded (or revive it). Archived committees are skipped
+    by every fetch pass — detection and both backfills — so a closed committee stops
+    consuming the daily crawl budget (and, for METI, stops tripping the WAF ladder on
+    every run). Existing meetings/materials are kept and still render.
+
+    Independent of ``enabled``: archiving does not untrack, and untracking does not
+    stop detection. Returns True if the row existed.
+    """
+    with session_scope(db_path) as session:
+        row = session.get(PolicyCommittee, key)
+        if row is None:
+            return False
+        row.archived = bool(archived)
+        return True
+
+
 def set_committee_priority(key: str, priority: int, db_path: str | None = None) -> bool:
     """Set a committee's summarisation priority (the catch-up queue position; lower
     is summarised first). Persisted across ``sync_committees`` so a committee can
@@ -269,6 +295,7 @@ def list_committees(db_path: str | None = None) -> list[dict]:
                 "name_en": r.name_en or r.committee_key,
                 "name_ja": r.name_ja or r.committee_key,
                 "enabled": bool(r.enabled) if r.enabled is not None else True,
+                "archived": bool(r.archived),
                 "user_added": bool(r.user_added),
                 "priority": r.priority if r.priority is not None else 100,
                 "latest_meeting": r.latest_meeting,
