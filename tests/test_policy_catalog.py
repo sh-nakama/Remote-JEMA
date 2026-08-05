@@ -253,3 +253,141 @@ def test_export_policy_on_fresh_db(tmp_path):
     res = export_web.export_policy(tmp_path / "web", db_path=db)
     assert res.get("error") is None
     assert res["committees"] == len(committee_keys())
+
+
+# -- Archived committees (issue #36) ------------------------------------------
+# Archiving is a *fetch* exclusion: a concluded committee stops being crawled by
+# detection and both backfills, so it no longer burns the daily budget (or, on
+# METI, trips the WAF challenge ladder every run). It is orthogonal to `enabled`,
+# which gates summarisation only -- untracking never stops detection.
+def test_archived_committee_is_skipped_by_the_fetch_passes(tmp_path):
+    from repower.policy.detect import _select_committees
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    before = [c.key for c in _select_committees(None, db)]
+    key = before[0]
+
+    assert store.set_committee_archived(key, True, db_path=db) is True
+    after = [c.key for c in _select_committees(None, db)]
+    assert key not in after
+    assert len(after) == len(before) - 1
+    # Only that committee is dropped; everything else still gets fetched.
+    assert set(after) == set(before) - {key}
+
+
+def test_archiving_does_not_untrack(tmp_path):
+    """`archived` and `enabled` are independent axes. A committee can be tracked
+    (so its already-detected meetings still summarise) yet archived (so nothing new
+    is fetched) -- which is exactly the state a concluded committee should reach."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+
+    store.set_committee_archived(key, True, db_path=db)
+    row = next(r for r in store.list_committees(db_path=db) if r["key"] == key)
+    assert row["archived"] is True
+    assert row["enabled"] is True
+    assert key in store.enabled_committee_keys(db_path=db)
+
+
+def test_explicit_committee_key_overrides_the_archive_skip(tmp_path):
+    """Naming a committee explicitly still fetches it, so a deliberate one-off
+    re-crawl works without having to un-archive first."""
+    from repower.policy.detect import _select_committees
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_archived(key, True, db_path=db)
+
+    assert [c.key for c in _select_committees([key], db)] == [key]
+
+
+def test_archive_round_trips_and_survives_sync(tmp_path):
+    """`sync_committees` runs before every pass, so if it clobbered `archived` the
+    skip would silently undo itself on the next run."""
+    from repower.policy.detect import _select_committees
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+
+    store.set_committee_archived(key, True, db_path=db)
+    for _ in range(3):
+        store.sync_committees(db_path=db)
+    assert key not in [c.key for c in _select_committees(None, db)]
+
+    store.set_committee_archived(key, False, db_path=db)
+    assert key in [c.key for c in _select_committees(None, db)]
+
+
+def test_set_committee_archived_reports_unknown_key(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    assert store.set_committee_archived("no_such_committee", True, db_path=db) is False
+
+
+def test_tracked_committees_include_archived_opt_in(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_archived(key, True, db_path=db)
+
+    hidden = [c.key for c in store.tracked_committees(db, include_disabled=True)]
+    shown = [c.key for c in store.tracked_committees(db, include_disabled=True, include_archived=True)]
+    assert key not in hidden
+    assert key in shown
+
+
+def test_catalog_payload_exposes_archived(tmp_path):
+    """The Manage modal needs `archived` to render (and toggle) the state."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_archived(key, True, db_path=db)
+
+    row = next(c for c in export_web.build_policy_catalog(db) if c["key"] == key)
+    assert row["archived"] is True
+    assert row["tracked"] is True  # archiving must not read as "untracked" in the UI
+
+
+def test_committees_payload_defaults_archived_false_when_column_absent():
+    """`build_committees_payload` is shared with callers whose SELECT predates the
+    column, so a missing `archived` must degrade to False rather than raise."""
+    committees = [{
+        "committee_key": "x", "name_ja": "x", "name_en": "X", "url": "", "source": "METI",
+        "latest_meeting": 1, "source_count": 0, "enabled": 1, "priority": 100,
+    }]
+    out = export_web.build_committees_payload(committees, [])
+    assert out[0]["archived"] is False
+
+
+def test_migration_adds_archived_to_an_existing_db(tmp_path):
+    """Existing installs must gain the column with every committee un-archived, so
+    upgrading never silently stops fetching anything."""
+    import sqlite3
+
+    import repower.db as _db
+    from repower.db import init_db
+    from repower.policy.detect import _select_committees
+
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    store.sync_committees(db_path=db)
+    expected = len(_select_committees(None, db))
+
+    con = sqlite3.connect(db)
+    con.execute("ALTER TABLE policy_committee DROP COLUMN archived")  # simulate pre-migration
+    con.commit()
+    assert "archived" not in {r[1] for r in con.execute("PRAGMA table_info(policy_committee)")}
+    con.close()
+
+    _db._INITIALIZED.discard(db)  # init_db is once-per-path; force the migration to re-run
+    init_db(db)
+
+    con = sqlite3.connect(db)
+    assert "archived" in {r[1] for r in con.execute("PRAGMA table_info(policy_committee)")}
+    assert {r[0] for r in con.execute("SELECT archived FROM policy_committee")} == {0}
+    con.close()
+    assert len(_select_committees(None, db)) == expected

@@ -483,6 +483,16 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "key required"})
             ok = set_committee_enabled(key, enabled, db_path=self.db_path)
             return self._send(200 if ok else 404, {"ok": ok, "key": key, "enabled": enabled})
+        if path == "/api/policy/archive":
+            # Archiving is a *fetch* exclusion (detect + both backfills skip the
+            # committee), orthogonal to /track, which gates summarisation only.
+            from repower.policy.store import set_committee_archived
+            key = body.get("key")
+            archived = bool(body.get("archived"))
+            if not key:
+                return self._send(400, {"error": "key required"})
+            ok = set_committee_archived(key, archived, db_path=self.db_path)
+            return self._send(200 if ok else 404, {"ok": ok, "key": key, "archived": archived})
         if path == "/api/policy/priority":
             from repower.policy.store import set_committee_priority
             key = body.get("key")

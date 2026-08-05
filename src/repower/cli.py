@@ -341,6 +341,66 @@ def init_db_cmd():
     typer.echo("Database initialized")
 
 
+# ── HTTP cache maintenance ───────────────────────────────────────────────────
+cache_app = typer.Typer(name="cache", help="Conditional-GET HTTP cache maintenance")
+app.add_typer(cache_app, name="cache")
+
+
+@cache_app.command("status")
+def cache_status_cmd():
+    """Per-host cache summary: entries, last success, and how many are failing.
+
+    Answers "which hosts are still succeeding?" and "when did this host last
+    work?" — the questions that had to be hand-queried while diagnosing the METI
+    WAF blocks.
+    """
+    from repower.scrapers.http_cache import cache_status
+
+    rows = cache_status()
+    if not rows:
+        typer.echo("http_cache is empty")
+        return
+    typer.echo(f"{'HOST':38} {'ENTRIES':>7} {'FAILING':>7}  LAST SUCCESS")
+    for r in rows:
+        last = r["last_success"].strftime("%Y-%m-%d %H:%M") if r["last_success"] else "never"
+        typer.echo(f"{r['host'][:38]:38} {r['entries']:>7} {r['failing']:>7}  {last}")
+    typer.echo(f"\n{sum(r['entries'] for r in rows)} entries across {len(rows)} hosts")
+
+
+@cache_app.command("prune")
+def cache_prune_cmd(
+    days: int = typer.Option(90, help="Drop entries not seen in this many days"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would be dropped"),
+):
+    """Evict stale cache entries so the HF-synced DB stops growing forever.
+
+    Safe: a missing entry costs one unconditional re-fetch, never data.
+    """
+    from repower.scrapers.http_cache import cache_status, prune_cache
+
+    if dry_run:
+        from datetime import UTC, datetime, timedelta
+
+        from repower.db import HttpCache, get_session, init_db
+
+        init_db()
+        s = get_session()
+        try:
+            cutoff = datetime.now(UTC) - timedelta(days=days)
+            n = (
+                s.query(HttpCache)
+                .filter((HttpCache.last_checked.is_(None)) | (HttpCache.last_checked < cutoff))
+                .count()
+            )
+        finally:
+            s.close()
+        typer.echo(f"would prune {n} entries not seen in {days} days")
+        return
+    before = sum(r["entries"] for r in cache_status())
+    n = prune_cache(days)
+    typer.echo(f"pruned {n} of {before} entries not seen in {days} days")
+
+
 # ── Policy observer ──────────────────────────────────────────────────────────
 policy_app = typer.Typer(name="policy", help="Japanese energy-policy committee observer")
 app.add_typer(policy_app, name="policy")
@@ -563,7 +623,10 @@ def policy_enable(key: str = typer.Argument(..., help="Committee key to start tr
 
 @policy_app.command("disable")
 def policy_disable(key: str = typer.Argument(..., help="Committee key to stop tracking")):
-    """Disable tracking of a committee (kept in the DB, skipped by detect/run)."""
+    """Disable tracking of a committee (kept in the DB, skipped by summarisation).
+
+    Detection still scans it — use ``policy archive`` to stop fetching entirely.
+    """
     from repower.policy.store import set_committee_enabled
 
     set_committee_enabled(key, False)
@@ -589,12 +652,57 @@ def policy_track(
 def policy_untrack(
     committee: str = typer.Argument(..., help="Committee key to stop tracking"),
 ):
-    """Disable a committee — kept in the catalog but skipped by detect/summarise."""
+    """Disable a committee — kept in the catalog and still *detected*, but skipped
+    by summarisation.
+
+    Untracking does **not** stop the fetch passes: detection deliberately scans the
+    whole catalog so a newly-discovered committee's meetings are recorded right
+    away. To stop fetching a concluded committee, use ``policy archive``.
+    """
     from repower.policy.store import set_committee_enabled, sync_committees
 
     sync_committees()
     if set_committee_enabled(committee, False):
         typer.echo(f"untracked {committee}")
+    else:
+        typer.echo(f"unknown committee: {committee} (run `policy list` to see keys)", err=True)
+        raise typer.Exit(1)
+
+
+@policy_app.command("archive")
+def policy_archive(
+    committee: str = typer.Argument(..., help="Committee key to archive (concluded)"),
+):
+    """Mark a concluded committee as archived so every fetch pass skips it.
+
+    Detection and both backfills stop crawling its index, which is the only way to
+    stop a closed committee consuming the daily budget — untracking does not, since
+    detection scans the whole catalog by design. Stored meetings and materials are
+    kept and still render in the dashboard.
+
+    Naming the committee explicitly (``--committee``) still overrides the skip, so a
+    one-off re-crawl works without un-archiving.
+    """
+    from repower.policy.store import set_committee_archived, sync_committees
+
+    sync_committees()
+    if set_committee_archived(committee, True):
+        typer.echo(f"archived {committee} (fetch passes will skip it)")
+    else:
+        typer.echo(f"unknown committee: {committee} (run `policy list` to see keys)", err=True)
+        raise typer.Exit(1)
+
+
+@policy_app.command("unarchive")
+def policy_unarchive(
+    committee: str = typer.Argument(..., help="Committee key to un-archive (resumed)"),
+):
+    """Un-archive a committee so the fetch passes crawl it again."""
+    from repower.policy.store import set_committee_archived, sync_committees
+
+    sync_committees()
+    if set_committee_archived(committee, False):
+        typer.echo(f"unarchived {committee}")
     else:
         typer.echo(f"unknown committee: {committee} (run `policy list` to see keys)", err=True)
         raise typer.Exit(1)

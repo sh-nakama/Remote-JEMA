@@ -55,6 +55,32 @@ fixed.
   with hardcoded version suffixes and may silently go stale.
 - Upserts are idempotent everywhere (`on_conflict_do_update/nothing` on the real unique
   constraints; Parquet merge-dedup for EPRX). Keep new writers idempotent — the crons re-run.
+- **`allow_curl_fallback` now defaults to `True`.** It is a no-op unless the plain request
+  returns 403/202 or raises, so leaving it on is free; leaving it *off* is how JEPX and EPRX
+  ended up with no fallback at all. Opt out explicitly (with a comment) only if you genuinely
+  want fast, unambiguous failure.
+- **Cache-layer failures are typed** — `HttpCacheError` and its subclasses (`BlockedError`,
+  `ChallengeNotClearedError`, `CircuitOpenError`, `UnexpectedStatusError`,
+  `DeadlineExceededError`). Classify with `except`, never by string-matching a message.
+  Genuine server faults (5xx surviving retry) still raise `httpx.HTTPStatusError`, which
+  `jepx_spot` relies on — don't "unify" that away without checking its callers.
+- **A host that blocks us repeatedly trips a per-host circuit breaker** (3 strikes, 5-minute
+  cooldown). Subsequent calls raise `CircuitOpenError` *without* issuing a request. If a scrape
+  reports far fewer requests than expected, check for an open circuit before suspecting the
+  parser. One success closes it immediately.
+- **`_pace_host` claims its slot at the *intended send time* (`now + wait`), not `now`.** That
+  is what makes concurrent callers queue rather than all read the same stale timestamp and fire
+  together. Preserve this if you touch the pacer — the bug it prevents is invisible in
+  single-threaded tests, and `web_api` runs catch-up on a background thread.
+- **Anything issuing its own requests outside `conditional_get` must still call `pace_host`.**
+  The OCCTO `_exists` probes do; they run in tight loops against the most bot-sensitive hosts.
+- **A faked `time.sleep` in tests must also advance `time.monotonic`.** Otherwise the pacer sees
+  no time pass between retries and piles up waits that don't exist in production — an artefact
+  of the fake, not a real regression. `_fake_curl_cffi` installs a coherent clock; reuse it.
+- **The `http_cache` table is pruned by the daily run** (`repower cache prune --days 90`), since
+  it is synced to HF and otherwise grows forever. Eviction is safe — a missing entry costs one
+  unconditional re-fetch — and anything still being requested is re-touched every run.
+  `repower cache status` reports per-host entries/last-success/failures.
 
 ## The HF dataset sync (shared mutable state)
 
@@ -192,6 +218,42 @@ fixed.
   hijacks `known_latest` (all real committee pages, incl. cross-dir joint meetings under a sibling
   `/shingikai/.../` committee, stay under `/shingikai/`). Meeting numbers use the *URL* file number,
   so a joint `第15回` linking to `.../suiso_seisaku/014.html` is recorded as 14 — expected, not a bug.
+- **A meeting with no `meeting_date` renders as `検出 YYYY-MM-DD`** (the detection timestamp), not
+  as the date it was held — `build_policy_snapshot` falls back to `updated_at`/`detected_at` and
+  sets `dateReal: false`, which `PolicyDeepDive.tsx` labels `検出` / `detected`. So a "wrong date"
+  report is really a *missing date*, never a display bug: check
+  `SELECT meeting_num, meeting_date FROM policy_meeting WHERE committee_key=…` first.
+- Meeting dates are recorded by **`detect`**, off the same index body it parses for meeting URLs
+  (`Discovery.dates`) — METI/EGC indexes print the date right next to the link, so it costs
+  nothing. `backfill_dates` is only the *repair* pass (OCCTO subpages, plus METI/EGC indexes that
+  304'd or were WAF-blocked during detection). It has to stay that way: meti.go.jp answers a
+  **202 WAF challenge** whose retry backoff (5→15→30 s) can cost minutes *per committee*, so a
+  second full crawl over ~85 committees frequently doesn't finish in one run — which is how
+  原子力小委員会 and ~15 other committees sat with **zero** dated meetings for weeks
+  (fixed 2026-08-05). For the same reason `backfill_dates(only_missing=True)` must **skip a
+  committee whose meetings are all dated before fetching anything** — it used to fetch first and
+  filter after, spending the WAF budget on settled committees and starving the ones that needed it.
+- **A 304 index used to make dateless committees permanently un-repairable.** Dates live in the
+  index body, so once an index settles and reliably 304s, `detect` never sees a body again.
+  `detect` now re-requests the index with `force=True` when — and only when — that committee still
+  has dateless meetings, so the cost is bounded by the shrinking set that actually needs repair
+  rather than by the committee count. Don't "optimise" that forced re-fetch away.
+- **`enabled` (tracked) does not gate detection — only summarisation.** Untracking a committee
+  leaves it in the detect/backfill crawl by design, so a newly-discovered committee's meetings get
+  recorded before anyone tracks it (`_select_committees` passes `include_disabled=True`). To stop
+  *fetching* a concluded committee, mark it **`archived`** (`repower policy archive <key>`, or the
+  archive-box toggle in the Manage modal). Archived committees are skipped by all three passes —
+  detect, `backfill_dates`, `backfill_materials` — which is the only way to stop a dead committee
+  burning the daily WAF budget on every run. `denryoku_jukyu` / `denryoku_kaikaku` are the
+  motivating cases: closed, all-dateless, and re-crawled forever for nothing.
+  - `archived` is deliberately **orthogonal to `enabled`**: a committee can stay tracked (so its
+    already-detected meetings still summarise) while archived (so nothing new is fetched). Don't
+    collapse the two flags, and don't infer archiving from meeting dates — the motivating
+    committees have *no* dates, and `emsc_system` is dormant yet legitimately enabled.
+  - Naming a committee explicitly (`--committee <key>`) **overrides the skip**, so a one-off
+    re-crawl works without un-archiving.
+  - Archiving only stops *fetching*: rows, meetings and materials are kept and still render in the
+    Deep Dive. It is also a **DB-only change**, so it reaches CI via the HF dataset push, not git.
 
 ## Streamlit dashboard
 

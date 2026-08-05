@@ -623,6 +623,9 @@ const I_STAR_O =
 const I_CHECK = '<polyline points="20 6 9 17 4 12"></polyline>'
 const I_PLAY = '<polygon points="5 3 19 12 5 21 5 3"></polygon>'
 const I_REWIND = '<polyline points="11 19 2 12 11 5"></polyline><polyline points="22 19 13 12 22 5"></polyline>'
+// Archive box: a lid over a body with a pull slot.
+const I_ARCHIVE =
+  '<rect x="2" y="4" width="20" height="5" rx="1"></rect><path d="M4 9v10a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1V9"></path><line x1="10" y1="13" x2="14" y2="13"></line>'
 
 interface CatalogCommittee {
   key: string
@@ -631,6 +634,8 @@ interface CatalogCommittee {
   ja: string
   tier: string
   tracked: boolean
+  /** Concluded: every fetch pass skips it. Orthogonal to `tracked`. */
+  archived?: boolean
   discovered?: boolean
   priority?: number
   last: string
@@ -699,6 +704,33 @@ function CommitteesManage() {
       .catch(() => {
         setRows((rs) => rs.map((r) => (r.key === key ? { ...r, tracked: !enabled } : r))) // revert
         app.toast(pick('Could not update tracking', '追跡を更新できませんでした'))
+      })
+      .finally(() => setBusy((b) => ({ ...b, [key]: false })))
+  }
+
+  // Archiving is a *fetch* exclusion: detection and both backfills stop crawling a
+  // concluded committee's index. Separate from tracking, which gates summarisation
+  // only — untracking never stops detection.
+  const setArchived = (key: string, archived: boolean) => {
+    if (!app.interactive || busy[key]) return
+    setBusy((b) => ({ ...b, [key]: true }))
+    setRows((rs) => rs.map((r) => (r.key === key ? { ...r, archived } : r))) // optimistic
+    fetch('/api/policy/archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, archived }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
+      .then(() => {
+        app.toast(
+          archived
+            ? pick('Archived — skipped by every fetch pass', 'アーカイブ済み — 取得対象外')
+            : pick('Un-archived — fetched again from the next run', 'アーカイブ解除 — 次回から取得再開'),
+        )
+      })
+      .catch(() => {
+        setRows((rs) => rs.map((r) => (r.key === key ? { ...r, archived: !archived } : r))) // revert
+        app.toast(pick('Could not update archive state', 'アーカイブ状態を更新できませんでした'))
       })
       .finally(() => setBusy((b) => ({ ...b, [key]: false })))
   }
@@ -1085,6 +1117,42 @@ function CommitteesManage() {
                             >
                               {c.tracked && icon(I_CHECK, 12, 'currentColor')}
                               {c.tracked ? pick('Tracked', '追跡中') : pick('Not tracked', '未追跡')}
+                            </span>
+                          )}
+                          {app.interactive && (
+                            <Hoverable
+                              as="span"
+                              base={`display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;flex-shrink:0;cursor:pointer;${
+                                c.archived
+                                  ? 'border:1px solid var(--warnTx);background:var(--warnBg);color:var(--warnTx)'
+                                  : 'border:1px solid var(--bd2);color:var(--mut)'
+                              }`}
+                              hover={c.archived ? 'background:var(--bg1)' : 'border-color:var(--warnTx);color:var(--warnTx)'}
+                              onClick={() => setArchived(c.key, !c.archived)}
+                              title={
+                                c.archived
+                                  ? pick(
+                                      'Archived (concluded) — every fetch pass skips it. Click to resume fetching.',
+                                      'アーカイブ済み（終了）— 取得対象外。クリックで取得再開',
+                                    )
+                                  : pick(
+                                      'Archive: stop fetching this concluded committee. Existing meetings are kept.',
+                                      'アーカイブ：終了した委員会の取得を停止。既存の会合は保持されます',
+                                    )
+                              }
+                              aria-label={c.archived ? 'Un-archive committee' : 'Archive committee'}
+                            >
+                              {icon(I_ARCHIVE, 12, 'currentColor')}
+                            </Hoverable>
+                          )}
+                          {!app.interactive && c.archived && (
+                            <span
+                              style={s(
+                                "display:inline-flex;align-items:center;gap:4px;font-size:11px;font-weight:600;border-radius:999px;padding:3px 10px;flex-shrink:0;white-space:nowrap;background:var(--warnBg);color:var(--warnTx)",
+                              )}
+                            >
+                              {icon(I_ARCHIVE, 11, 'currentColor')}
+                              {pick('Archived', 'アーカイブ済み')}
                             </span>
                           )}
                           {app.interactive && c.tracked && (

@@ -7,6 +7,7 @@ a temporary SQLite path holds the policy tables; POLICY_DIR is redirected to tmp
 
 from __future__ import annotations
 
+import datetime
 import subprocess
 from pathlib import Path
 
@@ -15,8 +16,8 @@ import pytest
 from repower.policy import detect as detect_mod
 from repower.policy import discover as discover_mod
 from repower.policy import notebook as nb_mod
-from repower.policy import pipeline, store
-from repower.policy.committees import COMMITTEES, committee_by_key
+from repower.policy import pipeline, scraper, store
+from repower.policy.committees import COMMITTEES, Committee, committee_by_key
 from repower.policy.scraper import (
     Discovery,
     Material,
@@ -466,6 +467,74 @@ def test_backfill_materials_defers_when_index_unreachable(monkeypatch, tmp_path)
     assert called["list"] == 0  # never fell through to per-meeting index fetches
     # Meetings stay pending so the next run retries them.
     assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
+
+
+# ── Meeting dates recorded during detection ──────────────────────────────────
+def test_detect_records_meeting_dates_from_the_index(monkeypatch, tmp_path):
+    """METI/EGC indexes print the meeting date next to the meeting link, so
+    detection must persist it from the body it already parsed — otherwise the date
+    depends on a second full crawl that routinely doesn't finish, and the Deep
+    Dive falls back to showing the detection date instead of the date held."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"  # METI
+    store.record_meeting(key, 1, None, db_path=db)  # known, and dateless
+
+    disc = scraper.Discovery(
+        "ok", [2, 1],
+        {1: datetime.date(2026, 1, 20), 2: datetime.date(2026, 2, 2)},
+    )
+    monkeypatch.setattr(detect_mod, "discover_meetings", lambda c, **kw: disc)
+    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
+
+    results = detect_mod.detect([key], db_path=db)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["new"] == 1 and row["dated"] == 2
+    # Both the newly-detected and the already-known meeting got their real date.
+    assert store.meetings_missing_date(key, db_path=db) == []
+
+
+def test_detect_dry_run_does_not_write_dates(monkeypatch, tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    store.record_meeting(key, 1, None, db_path=db)
+
+    disc = scraper.Discovery("ok", [1], {1: datetime.date(2026, 1, 20)})
+    monkeypatch.setattr(detect_mod, "discover_meetings", lambda c, **kw: disc)
+    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
+
+    results = detect_mod.detect([key], db_path=db, dry_run=True)
+
+    assert next(r for r in results if r["key"] == key)["dated"] == 0
+    assert store.meetings_missing_date(key, db_path=db) == [1]
+
+
+def test_discover_meetings_carries_meti_index_dates(monkeypatch):
+    """The METI index body yields numbers *and* dates in one parse."""
+    html = (
+        "<ul>"
+        "<li><a href='/shingikai/enecho/denryoku_gas/genshiryoku/049.html'>"
+        "2026年6月25日　第49回</a></li>"
+        "<li><a href='/shingikai/enecho/denryoku_gas/genshiryoku/048.html'>"
+        "2026年3月24日　第48回</a></li>"
+        # Footer/nav link outside /shingikai/ must not register as a meeting.
+        "<li><a href='/main/31.html'>2026年1月1日</a></li>"
+        "</ul>"
+    ).encode()
+    committee = Committee(
+        key="genshiryoku", name_ja="原子力小委員会", name_en="Nuclear Subcommittee",
+        url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/genshiryoku/",
+        source="METI",
+    )
+    monkeypatch.setattr(scraper, "_fetch", lambda url, **kw: ("ok", html))
+
+    disc = scraper.discover_meetings(committee)
+
+    assert disc.status == "ok"
+    assert disc.meeting_nums == [49, 48]
+    assert disc.dates == {49: datetime.date(2026, 6, 25), 48: datetime.date(2026, 3, 24)}
 
 
 # ── Running document regeneration ────────────────────────────────────────────
