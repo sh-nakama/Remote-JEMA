@@ -55,6 +55,32 @@ fixed.
   with hardcoded version suffixes and may silently go stale.
 - Upserts are idempotent everywhere (`on_conflict_do_update/nothing` on the real unique
   constraints; Parquet merge-dedup for EPRX). Keep new writers idempotent — the crons re-run.
+- **`allow_curl_fallback` now defaults to `True`.** It is a no-op unless the plain request
+  returns 403/202 or raises, so leaving it on is free; leaving it *off* is how JEPX and EPRX
+  ended up with no fallback at all. Opt out explicitly (with a comment) only if you genuinely
+  want fast, unambiguous failure.
+- **Cache-layer failures are typed** — `HttpCacheError` and its subclasses (`BlockedError`,
+  `ChallengeNotClearedError`, `CircuitOpenError`, `UnexpectedStatusError`,
+  `DeadlineExceededError`). Classify with `except`, never by string-matching a message.
+  Genuine server faults (5xx surviving retry) still raise `httpx.HTTPStatusError`, which
+  `jepx_spot` relies on — don't "unify" that away without checking its callers.
+- **A host that blocks us repeatedly trips a per-host circuit breaker** (3 strikes, 5-minute
+  cooldown). Subsequent calls raise `CircuitOpenError` *without* issuing a request. If a scrape
+  reports far fewer requests than expected, check for an open circuit before suspecting the
+  parser. One success closes it immediately.
+- **`_pace_host` claims its slot at the *intended send time* (`now + wait`), not `now`.** That
+  is what makes concurrent callers queue rather than all read the same stale timestamp and fire
+  together. Preserve this if you touch the pacer — the bug it prevents is invisible in
+  single-threaded tests, and `web_api` runs catch-up on a background thread.
+- **Anything issuing its own requests outside `conditional_get` must still call `pace_host`.**
+  The OCCTO `_exists` probes do; they run in tight loops against the most bot-sensitive hosts.
+- **A faked `time.sleep` in tests must also advance `time.monotonic`.** Otherwise the pacer sees
+  no time pass between retries and piles up waits that don't exist in production — an artefact
+  of the fake, not a real regression. `_fake_curl_cffi` installs a coherent clock; reuse it.
+- **The `http_cache` table is pruned by the daily run** (`repower cache prune --days 90`), since
+  it is synced to HF and otherwise grows forever. Eviction is safe — a missing entry costs one
+  unconditional re-fetch — and anything still being requested is re-touched every run.
+  `repower cache status` reports per-host entries/last-success/failures.
 
 ## The HF dataset sync (shared mutable state)
 
@@ -207,6 +233,11 @@ fixed.
   (fixed 2026-08-05). For the same reason `backfill_dates(only_missing=True)` must **skip a
   committee whose meetings are all dated before fetching anything** — it used to fetch first and
   filter after, spending the WAF budget on settled committees and starving the ones that needed it.
+- **A 304 index used to make dateless committees permanently un-repairable.** Dates live in the
+  index body, so once an index settles and reliably 304s, `detect` never sees a body again.
+  `detect` now re-requests the index with `force=True` when — and only when — that committee still
+  has dateless meetings, so the cost is bounded by the shrinking set that actually needs repair
+  rather than by the committee count. Don't "optimise" that forced re-fetch away.
 
 ## Streamlit dashboard
 

@@ -47,6 +47,13 @@ jobs:
         # workflow re-validates a deeper window to catch late upstream revisions.
         run: python -m repower.cli run-all --months-back 1
 
+      - name: Prune stale HTTP cache entries
+        # The cache table is synced to Hugging Face, so without eviction it grows
+        # forever — every URL ever fetched, including superseded month/year files.
+        # Dropping an entry only costs one unconditional re-fetch, never data, and
+        # anything the scrapers still request is re-touched every run.
+        run: python -m repower.cli cache prune --days 90
+
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf
 

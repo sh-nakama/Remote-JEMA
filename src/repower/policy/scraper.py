@@ -29,7 +29,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from repower.policy.committees import EGC_ACTIVITY_BASE, Committee
-from repower.scrapers.http_cache import conditional_get
+from repower.scrapers.http_cache import conditional_get, pace_host
 
 logger = logging.getLogger(__name__)
 
@@ -398,9 +398,15 @@ def _exists(url: str) -> bool:
     Prefer a cheap HEAD; if the host rejects plain Python TLS (some gov sites
     behind Akamai answer 403, as meti.go.jp does), fall back to a curl_cffi
     Chrome-impersonation GET — the same fallback the shared HTTP cache uses.
+
+    These probes bypass ``conditional_get`` but must not bypass its politeness:
+    this is the meeting-number probe, so it runs in tight loops against exactly
+    the hosts most sensitive to unpaced bursts. Every request below therefore
+    goes through the shared per-host pacing gate.
     """
     headers = {"User-Agent": _UA, "Accept-Language": "ja,en;q=0.9"}
     try:
+        pace_host(url)
         r = httpx.head(url, timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers)
         if r.status_code == 200:
             return True
@@ -413,11 +419,13 @@ def _exists(url: str) -> bool:
     try:
         from curl_cffi import requests as cr  # type: ignore
 
+        pace_host(url)
         r = cr.get(url, impersonate="chrome", timeout=REQUEST_TIMEOUT, headers=headers)
         return r.status_code == 200
     except Exception as e:  # noqa: BLE001
         logger.debug("curl_cffi probe failed %s: %s", url, e)
     try:
+        pace_host(url)
         r = httpx.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers)
         return r.status_code == 200
     except Exception as e:  # noqa: BLE001

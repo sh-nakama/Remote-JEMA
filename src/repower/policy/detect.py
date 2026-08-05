@@ -77,7 +77,9 @@ def detect(
     indexes print them next to the meeting link, and a full second pass over the
     WAF-throttled committee pages (:func:`backfill_dates`) often doesn't finish,
     which used to leave meetings permanently dateless — the Deep Dive then shows
-    a 検出 (detection) date instead of the date the meeting was held.
+    a 検出 (detection) date instead of the date the meeting was held. A committee
+    whose index 304s but still has dateless meetings gets one scoped forced
+    re-fetch, so settled committees can still self-heal.
     """
     if not dry_run:
         sync_committees(db_path)
@@ -96,6 +98,21 @@ def detect(
         known_latest = max(known) if known else None
 
         disc = discover_meetings(c, db_path=db_path, known_latest=known_latest)
+
+        # A 304 index means "no new meetings", but the meeting *dates* also live in
+        # that body — so a committee whose index has settled can never repair
+        # missing dates through the cheap path, and stays dateless forever (this is
+        # what left 原子力小委員会 showing 検出 dates). Re-request the index once,
+        # scoped to committees that actually lack dates, so the repair cost is
+        # bounded by that shrinking set rather than by the committee count.
+        if disc.status == "unchanged" and not c.is_occto and meetings_missing_date(c.key, db_path):
+            logger.info("policy detect %-26s 304 but dates missing; re-fetching index", c.key)
+            forced = discover_meetings(
+                c, db_path=db_path, known_latest=known_latest, force=True
+            )
+            if forced.status == "ok":
+                disc = forced
+
         res = {
             "key": c.key,
             "source": c.source,
