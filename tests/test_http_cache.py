@@ -124,11 +124,21 @@ def test_invalidate_forces_refetch(tmp_path, monkeypatch):
 
 def _fake_curl_cffi(monkeypatch, status_sequence):
     """Install a fake ``curl_cffi`` module whose Session.get yields the given
-    statuses in order, and stub out ``time.sleep`` (recording each delay)."""
+    statuses in order, and stub out ``time.sleep`` (recording each delay).
+
+    Returns ``(sleeps, made, calls)``: recorded sleep durations, every Session
+    constructed, and every ``get`` as ``{"session", "url", "headers"}``.
+
+    The session registries are replaced with fresh dicts via monkeypatch (so they
+    are restored afterwards) — module-level sessions would otherwise leak between
+    tests, and a stale fake would be reused by the next case.
+    """
     import sys
     import types
 
     seq = iter(status_sequence)
+    made: list = []
+    calls: list[dict] = []
 
     class _FakeResp:
         def __init__(self, status):
@@ -137,22 +147,32 @@ def _fake_curl_cffi(monkeypatch, status_sequence):
             self.headers = {"ETag": "e1", "Last-Modified": "lm1"}
 
     class _FakeSession:
+        def __init__(self):
+            self.closed = False
+            made.append(self)
+
         def get(self, url, **kwargs):
+            calls.append({"session": self, "url": url, "headers": dict(kwargs.get("headers") or {})})
             return _FakeResp(next(seq))
+
+        def close(self):
+            self.closed = True
 
     fake_curl = types.ModuleType("curl_cffi")
     fake_curl.requests = types.SimpleNamespace(Session=_FakeSession)  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "curl_cffi", fake_curl)
+    monkeypatch.setattr(http_cache, "_curl_sessions", {})
+    monkeypatch.setattr(http_cache, "_curl_host_locks", {})
 
     sleeps: list[float] = []
     monkeypatch.setattr(http_cache.time, "sleep", lambda s: sleeps.append(s))
-    return sleeps
+    return sleeps, made, calls
 
 
 def test_curl_202_challenge_retries_then_succeeds(monkeypatch):
     # Two 202 WAF challenges then a 200: a short warm-up gap precedes the first
-    # attempt, then the persistent session backs off (5s, 15s) and clears.
-    sleeps = _fake_curl_cffi(monkeypatch, [202, 202, 200])
+    # attempt, then the session backs off (5s, 15s) and clears.
+    sleeps, _made, _calls = _fake_curl_cffi(monkeypatch, [202, 202, 200])
 
     result = http_cache._curl_get("http://x/f", {}, 30.0)
 
@@ -163,12 +183,116 @@ def test_curl_202_challenge_retries_then_succeeds(monkeypatch):
 def test_curl_202_challenge_gives_up_after_budget(monkeypatch):
     # Persistent 202: warm-up gap, then the full backoff schedule, then give up
     # (None) so the caller surfaces the failure rather than looping forever.
-    sleeps = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202, 202])
+    sleeps, _made, _calls = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202, 202])
 
     result = http_cache._curl_get("http://x/f", {}, 30.0)
 
     assert result is None
     assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY, *http_cache._CHALLENGE_RETRY_DELAYS]
+
+
+def test_curl_reuses_one_session_per_host(monkeypatch):
+    """Two fetches from the same host must share a session, so a WAF clearance
+    cookie earned by the first is replayed by the second instead of being
+    re-earned (minutes of challenge backoff) per URL."""
+    _sleeps, made, calls = _fake_curl_cffi(monkeypatch, [200, 200])
+
+    http_cache._curl_get("https://meti.example/a", {}, 30.0)
+    http_cache._curl_get("https://meti.example/b", {}, 30.0)
+
+    assert len(made) == 1, "a second Session means the cleared cookie jar was thrown away"
+    assert calls[0]["session"] is calls[1]["session"]
+
+
+def test_curl_sessions_are_per_host(monkeypatch):
+    # Distinct hosts must not share a cookie jar (cookies are per-domain, and one
+    # hostile host shouldn't disturb another).
+    _sleeps, made, calls = _fake_curl_cffi(monkeypatch, [200, 200])
+
+    http_cache._curl_get("https://a.example/1", {}, 30.0)
+    http_cache._curl_get("https://b.example/1", {}, 30.0)
+
+    assert len(made) == 2
+    assert calls[0]["session"] is not calls[1]["session"]
+
+
+def test_curl_drops_session_after_exhausted_challenge(monkeypatch):
+    """Once the challenge budget is spent the cookies have demonstrably failed to
+    clear, so the jar must be discarded rather than carried into the next call."""
+    _sleeps, made, _calls = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202, 200])
+
+    assert http_cache._curl_get("https://meti.example/a", {}, 30.0) is None
+    assert made[0].closed is True
+    assert http_cache._curl_sessions == {}
+
+    # The next call starts from a fresh session rather than the poisoned one.
+    assert http_cache._curl_get("https://meti.example/b", {}, 30.0) is not None
+    assert len(made) == 2
+
+
+def test_curl_does_not_send_our_default_user_agent(monkeypatch):
+    """impersonate="chrome" supplies a UA matching the TLS fingerprint it
+    presents. Overriding it with our own (older, different-platform) string is
+    the exact mismatch a WAF fingerprints on, so the curl path must not carry it."""
+    _sleeps, _made, calls = _fake_curl_cffi(monkeypatch, [200])
+
+    http_cache._curl_get("https://meti.example/a", {"Accept-Language": "ja"}, 30.0)
+
+    assert "User-Agent" not in calls[0]["headers"]
+    assert calls[0]["headers"]["Accept-Language"] == "ja"
+
+
+def test_curl_forwards_a_caller_supplied_user_agent(monkeypatch):
+    # Suppressing the *default* UA must not silence a caller that deliberately
+    # set one.
+    _sleeps, _made, calls = _fake_curl_cffi(monkeypatch, [200])
+
+    http_cache._curl_get("https://meti.example/a", {"User-Agent": "custom/1.0"}, 30.0)
+
+    assert calls[0]["headers"]["User-Agent"] == "custom/1.0"
+
+
+def test_httpx_path_still_sends_the_default_user_agent(monkeypatch):
+    # The default UA is transport-specific, not dropped altogether: plain httpx
+    # (which has no impersonation to supply one) must still send it.
+    sent: dict = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"body"
+        headers: dict = {}
+
+    def fake_get(url, **kwargs):
+        sent.update(kwargs.get("headers") or {})
+        return _Resp()
+
+    monkeypatch.setattr(http_cache.httpx, "get", fake_get)
+    monkeypatch.setattr(http_cache, "_pace_host", lambda url: None)
+
+    http_cache._do_get("https://a.example/1", {"Accept-Language": "ja"}, False, 30.0)
+
+    assert sent["User-Agent"] == http_cache._DEFAULT_UA
+    assert sent["Accept-Language"] == "ja"
+
+
+def test_caller_user_agent_overrides_the_default_on_the_httpx_path(monkeypatch):
+    sent: dict = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"body"
+        headers: dict = {}
+
+    def fake_get(url, **kwargs):
+        sent.update(kwargs.get("headers") or {})
+        return _Resp()
+
+    monkeypatch.setattr(http_cache.httpx, "get", fake_get)
+    monkeypatch.setattr(http_cache, "_pace_host", lambda url: None)
+
+    http_cache._do_get("https://a.example/1", {"User-Agent": "custom/1.0"}, False, 30.0)
+
+    assert sent["User-Agent"] == "custom/1.0"
 
 
 def _fake_clock(monkeypatch):
