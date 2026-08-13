@@ -29,6 +29,7 @@ from repower.policy.store import (
     meetings_missing_materials,
     record_meeting,
     set_committee_checked,
+    set_committee_fetch_result,
     set_meeting_dates,
     sync_committees,
     tracked_committees,
@@ -74,12 +75,18 @@ def detect(
 
     Returns one result dict per committee::
 
-        {"key", "source", "status", "latest_online", "known_latest", "new",
-         "enumerated", "dated"}
+        {"key", "source", "status", "error_kind", "error_detail", "latest_online",
+         "known_latest", "new", "enumerated", "dated"}
 
-    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``. ``progress``, if
-    given, is called as ``progress(done, total, key)`` at the start of each committee
-    so a UI can show live "committee i of N" feedback during the (slow) scan.
+    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``, and on error
+    ``error_kind`` is a :data:`repower.scrapers.http_cache.FETCH_KINDS` slug naming
+    the cause (blocked, challenge never cleared, circuit open, moved URL, …). Each
+    outcome is persisted per committee — see
+    :func:`repower.policy.store.set_committee_fetch_result` — because nothing else
+    records it: the HTTP cache stores no row at all for these failures.
+    ``progress``, if given, is called as ``progress(done, total, key)`` at the
+    start of each committee so a UI can show live "committee i of N" feedback
+    during the (slow) scan.
 
     Meeting *dates* are recorded here too, from the same index body discovery
     already parsed (``dated``). Dates are not a separate crawl's job: METI/EGC
@@ -126,6 +133,8 @@ def detect(
             "key": c.key,
             "source": c.source,
             "status": disc.status,
+            "error_kind": disc.error_kind,
+            "error_detail": disc.error_detail,
             "latest_online": disc.meeting_nums[0] if disc.meeting_nums else None,
             "known_latest": known_latest,
             "new": 0,
@@ -133,11 +142,25 @@ def detect(
             "dated": 0,
         }
 
+        if not dry_run:
+            # Record the outcome for *every* committee, including failures. This is
+            # the only durable record of why a committee could not be fetched: the
+            # http_cache table stores nothing for a 403/202/circuit-open, since
+            # those raise before a row is written.
+            set_committee_fetch_result(
+                c.key, disc.status, kind=disc.error_kind, detail=disc.error_detail,
+                url=disc.error_url or c.url, db_path=db_path,
+            )
+
         if disc.status != "ok":
             if disc.status == "unchanged" and not dry_run:
                 set_committee_checked(c.key, db_path=db_path)
             results.append(res)
-            logger.info("policy detect %-26s %s", c.key, disc.status)
+            if disc.status == "error":
+                logger.warning("policy detect %-26s error kind=%s %s",
+                               c.key, disc.error_kind, disc.error_detail or "")
+            else:
+                logger.info("policy detect %-26s %s", c.key, disc.status)
             continue
 
         new_nums = [n for n in disc.meeting_nums if n not in known]

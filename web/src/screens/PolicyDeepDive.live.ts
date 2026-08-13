@@ -33,6 +33,12 @@ interface CommitteeSnap {
   done?: number
   pending?: number
   error?: number
+  fetchStatus?: string | null
+  fetchKind?: string | null
+  fetchDetail?: string | null
+  fetchAt?: string | null
+  lastOkAt?: string | null
+  fetchFailures?: number
 }
 
 interface MeetingSnap {
@@ -113,6 +119,12 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
     done: x.done ?? 0,
     pending: x.pending ?? 0,
     error: x.error ?? 0,
+    fetchStatus: x.fetchStatus ?? null,
+    fetchKind: x.fetchKind ?? null,
+    fetchDetail: x.fetchDetail ?? null,
+    fetchAt: x.fetchAt ?? null,
+    lastOkAt: x.lastOkAt ?? null,
+    fetchFailures: x.fetchFailures ?? 0,
   }))
   const meetings: Meeting[] = (raw.meetings || []).map((x) => ({
     key: x.key,

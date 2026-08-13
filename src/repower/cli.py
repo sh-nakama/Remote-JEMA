@@ -3,11 +3,24 @@
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import date
 
 import typer
 
 from repower.timeutil import today_jst, yesterday_jst
+
+# This CLI prints Japanese committee names, box-drawing banners and typographic
+# dashes. On a Japanese Windows console stdout defaults to cp932, which cannot
+# encode any of them — the command then dies with a UnicodeEncodeError partway
+# through its own output, which reads as a crash in the scrape rather than in the
+# printing. Force UTF-8 and replace anything still unmappable, so output is never
+# the thing that fails.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    except (AttributeError, ValueError):  # already wrapped, or not a text stream
+        pass
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -579,15 +592,126 @@ def policy_status():
 
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}")
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}  {'FETCH':<22}")
     for c in list_committees():
         latest = c["latest_meeting"] if c["latest_meeting"] else "-"
         on = "y" if c["enabled"] else "-"
         tag = "*" if c["user_added"] else ""
         typer.echo(
             f"{c['committee_key'] + tag:<28}{c['source']:<6}{on:>3}{c['priority']:>5}"
-            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}"
+            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}  {_fetch_label(c):<22}"
         )
+
+
+def _fetch_label(c: dict) -> str:
+    """One-column summary of a committee's last fetch: kind + failure streak."""
+    st = c.get("last_fetch_status")
+    if not st:
+        return "never fetched"
+    if st != "error":
+        return st
+    n = c.get("consecutive_failures") or 0
+    return f"{c.get('last_fetch_kind') or 'error'} x{n}"
+
+
+# Why each failure kind happens and what actually fixes it. Printed by `doctor`
+# so a failing committee comes with its remedy instead of just a slug.
+_FETCH_REMEDIES: dict[str, str] = {
+    "blocked_403": "Host refused the client. Check curl_cffi is installed "
+                   "(`pip install curl_cffi`); if it is, the impersonation profile may be stale.",
+    "challenge_unresolved": "WAF JS challenge never cleared within the retry ladder. "
+                            "Re-run later, or widen _CHALLENGE_RETRY_DELAYS / pass a larger budget.",
+    "circuit_open": "Short-circuited: another committee on this host tripped the breaker. "
+                    "Re-run after the cooldown, or slow the pass down.",
+    "deadline_exceeded": "The per-call time budget ran out. Raise the budget for this pass.",
+    "not_found": "404 — the committee page has moved or been retired. "
+                 "Fix the URL (`policy add --url ...`) or archive it (`policy archive <key>`).",
+    "server_error": "The host returned 5xx/429 past the transient retries. Usually temporary.",
+    "network_error": "DNS/TLS/connection failure. Check connectivity to the host.",
+    "unexpected_status": "An HTTP status this layer has no handling for — inspect the detail.",
+    "parse_error": "Fetched fine but the body could not be parsed — the page layout likely changed.",
+}
+
+
+@policy_app.command("doctor")
+def policy_doctor(
+    failing_only: bool = typer.Option(True, "--failing-only/--all",
+                                      help="Only show committees whose last fetch failed"),
+    history: bool = typer.Option(False, "--history", help="Show recent attempts per committee"),
+):
+    """Diagnose per-committee fetch failures — what broke, for how long, and the fix.
+
+    Reads the status persisted by each detection pass. The HTTP cache cannot answer
+    this: a 403, an uncleared WAF challenge, an open circuit breaker and an
+    exhausted budget all raise before a cache row is written, so a committee we
+    can no longer fetch leaves no trace there at all.
+    """
+    from collections import defaultdict
+
+    from repower.policy.store import fetch_events, list_committees, sync_committees
+
+    sync_committees()
+    rows = list_committees()
+
+    by_kind: dict[str, list[dict]] = defaultdict(list)
+    unknown: list[dict] = []
+    for c in rows:
+        st = c.get("last_fetch_status")
+        if st == "error":
+            by_kind[c.get("last_fetch_kind") or "unknown"].append(c)
+        elif st is None:
+            # No recorded outcome yet — either a fresh install or a DB that predates
+            # this tracking. That is every committee until the first pass runs, so
+            # listing them in full would bury the actual failures.
+            unknown.append(c)
+        elif not failing_only:
+            by_kind[st].append(c)
+
+    def _stamp(v) -> str:
+        return str(v)[:16] if v else "-"
+
+    if not by_kind:
+        if unknown and len(unknown) == len(rows):
+            typer.echo(
+                f"No fetch outcomes recorded yet for any of {len(rows)} committees.\n"
+                "Run `repower policy detect` (or the catch-up job): each pass records "
+                "per-committee status, and this command then explains any failures."
+            )
+        else:
+            typer.echo("All committees fetched successfully on their last pass.")
+            if unknown:
+                typer.echo(f"({len(unknown)} not yet attempted.)")
+        return
+
+    # Failures first, then the informational buckets.
+    order = sorted(by_kind, key=lambda k: (k in ("ok", "unchanged"), k))
+    for kind in order:
+        group = sorted(by_kind[kind], key=lambda c: (-(c.get("consecutive_failures") or 0), c["key"]))
+        typer.echo(f"\n### {kind}  ({len(group)} committee(s))")
+        remedy = _FETCH_REMEDIES.get(kind)
+        if remedy:
+            typer.echo(f"    → {remedy}")
+        typer.echo(f"    {'KEY':<28}{'SRC':<6}{'TRK':<4}{'FAILS':>6}  {'LAST TRY':<17}{'LAST OK':<17}DETAIL")
+        for c in group:
+            trk = "yes" if c["enabled"] else "no"
+            typer.echo(
+                f"    {c['key']:<28}{c['source']:<6}{trk:<4}"
+                f"{c.get('consecutive_failures') or 0:>6}  "
+                f"{_stamp(c.get('last_fetch_at')):<17}{_stamp(c.get('last_ok_at')):<17}"
+                f"{(c.get('last_fetch_detail') or '')[:70]}"
+            )
+            if history:
+                for e in fetch_events(c["key"], limit=5):
+                    typer.echo(f"        {_stamp(e['at']):<17}{e['status']:<10}{e['kind'] or ''}")
+
+    if unknown:
+        typer.echo(f"\n{len(unknown)} committee(s) have no recorded outcome yet"
+                   f"{' (run `repower policy doctor --all` to list them)' if failing_only else ''}.")
+        if not failing_only:
+            typer.echo("    " + ", ".join(sorted(c["key"] for c in unknown)))
+
+    n_bad = sum(len(v) for k, v in by_kind.items() if k not in ("ok", "unchanged"))
+    typer.echo(f"\n-- {n_bad}/{len(rows)} committee(s) need attention --")
 
 
 @policy_app.command("add")
@@ -742,15 +866,19 @@ def policy_list():
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
     rows = list_committees()
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'TRACK':<6}{'PRIO':>5}{'LATEST':>7}{'PEND':>6}")
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'TRACK':<6}{'PRIO':>5}{'LATEST':>7}{'PEND':>6}  {'FETCH':<22}")
     for r in rows:
         latest = r["latest_meeting"] if r["latest_meeting"] else "-"
         track = "yes" if r["enabled"] else "no"
         typer.echo(
-            f"{r['key']:<28}{r['source']:<6}{track:<6}{r['priority']:>5}{str(latest):>7}{pend.get(r['key'], 0):>6}"
+            f"{r['key']:<28}{r['source']:<6}{track:<6}{r['priority']:>5}{str(latest):>7}"
+            f"{pend.get(r['key'], 0):>6}  {_fetch_label(r):<22}"
         )
     n_tracked = sum(1 for r in rows if r["enabled"])
+    n_bad = sum(1 for r in rows if r.get("last_fetch_status") == "error")
     typer.echo(f"-- {n_tracked}/{len(rows)} tracked --")
+    if n_bad:
+        typer.echo(f"-- {n_bad} committee(s) failing to fetch; run `repower policy doctor` --")
 
 
 @policy_app.command("discover")

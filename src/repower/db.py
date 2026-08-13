@@ -107,6 +107,20 @@ class HttpCache(Base):
     last_modified = Column(String(64))
     last_status = Column(Integer)
     last_checked = Column(DateTime)
+    # Failure observability. `last_status`/`last_checked` only ever describe a
+    # *cacheable* response (200/304) — every other outcome (403, a WAF 202 that
+    # never cleared, an open circuit, an exhausted budget) raises before the row
+    # is written, so a URL we can no longer fetch is indistinguishable from one
+    # never tried. These three record that separately.
+    #
+    # Deliberately kept apart from the validator columns: a failure must never
+    # overwrite `etag`/`last_modified` (the next success would then re-download a
+    # file that had not changed) and must never bump `last_checked` (prune_cache
+    # keys on it, so failure writes would keep dead URLs alive forever in a table
+    # that is synced to Hugging Face).
+    last_error_kind = Column(String(32))  # repower.scrapers.http_cache.FETCH_KINDS
+    last_error_at = Column(DateTime)
+    last_error_detail = Column(Text)
 
 
 # ── News items ─────────────────────────────────────────────────────────────
@@ -177,6 +191,45 @@ class PolicyCommittee(Base):
     prefix = Column(String(64))
     log_pages = Column(Text)
     min_meeting = Column(Integer)
+    # Fetch observability (see repower.policy.detect). `last_checked` marks that a
+    # detection pass *ran*; it says nothing about whether the committee's pages
+    # were actually reachable, and historically was not written at all on the
+    # error path — so a blocked committee looked identical to one never scheduled.
+    #   last_fetch_status  — ok | unchanged | error (the Discovery outcome)
+    #   last_fetch_kind    — http_cache.FETCH_KINDS slug; NULL when successful
+    #   last_fetch_detail  — truncated human message for the failure
+    #   last_fetch_url     — which URL failed (EGC committees have several pages)
+    #   last_fetch_at      — written on *every* pass, success or failure
+    #   last_ok_at         — last genuinely successful fetch (200/304)
+    #   consecutive_failures — reset to 0 on success; separates flaky from dead
+    last_fetch_status = Column(String(16))
+    last_fetch_kind = Column(String(32))
+    last_fetch_detail = Column(Text)
+    last_fetch_url = Column(Text)
+    last_fetch_at = Column(DateTime)
+    last_ok_at = Column(DateTime)
+    consecutive_failures = Column(Integer, default=0, nullable=False)
+
+
+class PolicyFetchEvent(Base):
+    """Append-only log of one committee fetch attempt.
+
+    The columns on :class:`PolicyCommittee` carry only the *current* state, which
+    cannot distinguish "this host blocks us roughly a third of the time" from
+    "this URL has been gone since June" — and that distinction decides whether the
+    fix is a wider retry budget or a corrected URL. Capped by
+    :func:`repower.policy.store.prune_fetch_events`, so the table stays small
+    enough to ride the Hugging Face sync alongside the rest of ``repower.db``.
+    """
+
+    __tablename__ = "policy_fetch_event"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    committee_key = Column(String(64), nullable=False, index=True)
+    at = Column(DateTime, nullable=False)
+    status = Column(String(16), nullable=False)  # ok | unchanged | error
+    kind = Column(String(32))  # http_cache.FETCH_KINDS slug; NULL when successful
+    detail = Column(Text)
+    url = Column(Text)
 
 
 class PolicyMeeting(Base):
@@ -295,6 +348,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_area_column(engine)
             _migrate_add_policy_synth_done(engine)
             _migrate_add_policy_registry(engine)
+            _migrate_add_fetch_observability(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -413,6 +467,47 @@ def _migrate_add_policy_registry(engine) -> None:
                 conn.execute(sql_text(
                     "ALTER TABLE policy_meeting ADD COLUMN gen_requested BOOLEAN DEFAULT 0"
                 ))
+
+
+def _migrate_add_fetch_observability(engine) -> None:
+    """Add the fetch-status columns to ``http_cache`` / ``policy_committee`` (additive).
+
+    Existing rows get NULLs, which read as "never recorded" rather than "healthy" —
+    the first detection pass fills them in. ``consecutive_failures`` defaults to 0
+    so the "is this committee failing repeatedly?" query works before any pass runs.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    names = insp.get_table_names()
+
+    tables = {
+        "http_cache": [
+            ("last_error_kind", "ALTER TABLE http_cache ADD COLUMN last_error_kind VARCHAR(32)"),
+            ("last_error_at", "ALTER TABLE http_cache ADD COLUMN last_error_at DATETIME"),
+            ("last_error_detail", "ALTER TABLE http_cache ADD COLUMN last_error_detail TEXT"),
+        ],
+        "policy_committee": [
+            ("last_fetch_status", "ALTER TABLE policy_committee ADD COLUMN last_fetch_status VARCHAR(16)"),
+            ("last_fetch_kind", "ALTER TABLE policy_committee ADD COLUMN last_fetch_kind VARCHAR(32)"),
+            ("last_fetch_detail", "ALTER TABLE policy_committee ADD COLUMN last_fetch_detail TEXT"),
+            ("last_fetch_url", "ALTER TABLE policy_committee ADD COLUMN last_fetch_url TEXT"),
+            ("last_fetch_at", "ALTER TABLE policy_committee ADD COLUMN last_fetch_at DATETIME"),
+            ("last_ok_at", "ALTER TABLE policy_committee ADD COLUMN last_ok_at DATETIME"),
+            ("consecutive_failures",
+             "ALTER TABLE policy_committee ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"),
+        ],
+    }
+    for table, adds in tables.items():
+        if table not in names:
+            continue
+        cols = {c["name"] for c in insp.get_columns(table)}
+        missing = [ddl for col, ddl in adds if col not in cols]
+        if not missing:
+            continue
+        with engine.begin() as conn:
+            for ddl in missing:
+                conn.execute(sql_text(ddl))
 
 
 def get_session(db_path: str | None = None) -> Session:

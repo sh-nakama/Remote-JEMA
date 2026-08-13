@@ -19,6 +19,7 @@ from sqlalchemy import func, or_
 from repower.config import POLICY_DIR
 from repower.db import (
     PolicyCommittee,
+    PolicyFetchEvent,
     PolicyMaterial,
     PolicyMeeting,
     PolicyUpcoming,
@@ -300,6 +301,14 @@ def list_committees(db_path: str | None = None) -> list[dict]:
                 "priority": r.priority if r.priority is not None else 100,
                 "latest_meeting": r.latest_meeting,
                 "url": r.url or "",
+                # Fetch health (see set_committee_fetch_result). None = never recorded.
+                "last_fetch_status": r.last_fetch_status,
+                "last_fetch_kind": r.last_fetch_kind,
+                "last_fetch_detail": r.last_fetch_detail,
+                "last_fetch_url": r.last_fetch_url,
+                "last_fetch_at": r.last_fetch_at,
+                "last_ok_at": r.last_ok_at,
+                "consecutive_failures": r.consecutive_failures or 0,
             }
             for r in rows
         ]
@@ -501,6 +510,114 @@ def set_committee_checked(key: str, db_path: str | None = None) -> None:
             row = PolicyCommittee(committee_key=key)
             session.add(row)
         row.last_checked = _now()
+
+
+# Keep the event log bounded: it rides the Hugging Face sync with the rest of the
+# DB, and only the recent shape of a committee's failures is decision-relevant.
+FETCH_EVENTS_PER_COMMITTEE = 20
+
+
+def set_committee_fetch_result(
+    key: str,
+    status: str,
+    *,
+    kind: str | None = None,
+    detail: str | None = None,
+    url: str | None = None,
+    db_path: str | None = None,
+) -> None:
+    """Record the outcome of one fetch attempt for *key* — success **or** failure.
+
+    Called on every detection path. ``last_checked`` alone could not express this:
+    it was written only when a committee succeeded or 304'd, so a blocked
+    committee's timestamp simply went stale, which reads identically to one that
+    was never scheduled. Here an error still stamps ``last_fetch_at``, so
+    "attempted and failed at T" and "never attempted" are finally distinct.
+
+    ``consecutive_failures`` separates a flaky host from a dead URL, and
+    ``last_ok_at`` preserves the last time the committee genuinely worked (which
+    an error must not overwrite). Also appends to ``policy_fetch_event``.
+    """
+    now = _now()
+    ok = status != "error"
+    with session_scope(db_path) as session:
+        row = session.get(PolicyCommittee, key)
+        if row is None:
+            row = PolicyCommittee(committee_key=key)
+            session.add(row)
+        row.last_fetch_status = status
+        row.last_fetch_kind = None if ok else kind
+        row.last_fetch_detail = None if ok else (detail or "")[:500]
+        row.last_fetch_url = None if ok else url
+        row.last_fetch_at = now
+        if ok:
+            row.last_ok_at = now
+            row.consecutive_failures = 0
+        else:
+            row.consecutive_failures = (row.consecutive_failures or 0) + 1
+
+        session.add(PolicyFetchEvent(
+            committee_key=key, at=now, status=status,
+            kind=None if ok else kind,
+            detail=None if ok else (detail or "")[:500],
+            url=url,
+        ))
+        _trim_fetch_events(session, key)
+
+
+def _trim_fetch_events(session, key: str) -> None:
+    """Keep only the newest :data:`FETCH_EVENTS_PER_COMMITTEE` events for *key*."""
+    ids = [
+        r.id for r in session.query(PolicyFetchEvent.id)
+        .filter(PolicyFetchEvent.committee_key == key)
+        .order_by(PolicyFetchEvent.at.desc(), PolicyFetchEvent.id.desc())
+        .offset(FETCH_EVENTS_PER_COMMITTEE)
+        .all()
+    ]
+    if ids:
+        (session.query(PolicyFetchEvent)
+         .filter(PolicyFetchEvent.id.in_(ids))
+         .delete(synchronize_session=False))
+
+
+def fetch_events(key: str | None = None, limit: int = 50,
+                 db_path: str | None = None) -> list[dict]:
+    """Recent fetch attempts, newest first — the history behind a committee's
+    current status (is this host flaky, or has this URL been dead for weeks?)."""
+    with session_scope(db_path, commit=False) as session:
+        q = session.query(PolicyFetchEvent)
+        if key:
+            q = q.filter(PolicyFetchEvent.committee_key == key)
+        rows = q.order_by(PolicyFetchEvent.at.desc(), PolicyFetchEvent.id.desc()).limit(limit).all()
+        return [
+            {
+                "committee_key": r.committee_key,
+                "at": r.at,
+                "status": r.status,
+                "kind": r.kind,
+                "detail": r.detail,
+                "url": r.url,
+            }
+            for r in rows
+        ]
+
+
+def prune_fetch_events(older_than_days: float = 90, db_path: str | None = None) -> int:
+    """Drop fetch events older than *older_than_days*. Returns rows deleted.
+
+    Mirrors ``http_cache.prune_cache``'s retention so the two observability
+    stores age out together and neither grows without bound in the synced DB.
+    """
+    from datetime import timedelta
+
+    cutoff = _now() - timedelta(days=older_than_days)
+    with session_scope(db_path) as session:
+        n = (session.query(PolicyFetchEvent)
+             .filter(PolicyFetchEvent.at < cutoff)
+             .delete(synchronize_session=False))
+        if n:
+            logger.info("policy: pruned %d fetch event(s) older than %s days", n, older_than_days)
+        return n
 
 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────

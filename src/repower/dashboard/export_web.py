@@ -610,6 +610,10 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
         """Read a column that may be absent from the caller's SELECT."""
         return c[col] if col in c.keys() else None
 
+    def _iso_or_none(v):
+        """Timestamps must be JSON-serialisable — these columns are DATETIME."""
+        return str(v) if v else None
+
     data = [
         {
             "key": c["committee_key"],
@@ -639,6 +643,16 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             "done": rollup.get(c["committee_key"], {}).get("done", 0),
             "pending": rollup.get(c["committee_key"], {}).get("pending", 0),
             "error": rollup.get(c["committee_key"], {}).get("error", 0),
+            # Fetch health. Distinct from the `error` rollup above (which counts
+            # meetings whose *summarisation* failed): this is whether the
+            # committee's own pages could be reached at all. Without it a blocked
+            # committee renders as merely quiet.
+            "fetchStatus": _opt(c, "last_fetch_status"),
+            "fetchKind": _opt(c, "last_fetch_kind"),
+            "fetchDetail": _opt(c, "last_fetch_detail"),
+            "fetchAt": _iso_or_none(_opt(c, "last_fetch_at")),
+            "lastOkAt": _iso_or_none(_opt(c, "last_ok_at")),
+            "fetchFailures": _opt(c, "consecutive_failures") or 0,
         }
         for c in committees
     ]
@@ -654,7 +668,9 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
         committees = con.execute(text(
             "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
             "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
-            "last_synth_meeting, archived FROM policy_committee"
+            "last_synth_meeting, archived, last_fetch_status, last_fetch_kind, "
+            "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures "
+            "FROM policy_committee"
         )).mappings().all()
         meetings = con.execute(text(
             "SELECT committee_key, meeting_date, state FROM policy_meeting"
@@ -686,7 +702,9 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
                 "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
-                "last_synth_meeting, archived FROM policy_committee"
+                "last_synth_meeting, archived, last_fetch_status, last_fetch_kind, "
+                "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures "
+                "FROM policy_committee"
             )
         ).mappings().all()
         meetings = con.execute(

@@ -776,3 +776,124 @@ def test_prune_cutoff_is_timezone_correct(tmp_path):
         s.close()
     assert deleted == 1
     assert remaining == ["age_10h", "age_2h", "age_8h"]
+
+# --- error classification + durable error recording --------------------------
+# Before this, a failed fetch raised past `_store()` and left no trace anywhere:
+# the committee simply looked quiet. These lock in that the cause survives.
+
+
+def test_classify_maps_each_typed_exception_to_a_stable_kind():
+    cases = [
+        (http_cache.BlockedError("http://h/f", 403), "blocked_403"),
+        (http_cache.ChallengeNotClearedError("http://h/f", 4), "challenge_unresolved"),
+        (http_cache.CircuitOpenError("http://h/f", 60.0), "circuit_open"),
+        (http_cache.DeadlineExceededError("http://h/f", 30.0), "deadline_exceeded"),
+        (http_cache.UnexpectedStatusError("http://h/f", 206), "unexpected_status"),
+        (httpx.ConnectError("boom"), "network_error"),
+    ]
+    for exc, expected in cases:
+        assert http_cache.classify(exc) == expected, exc
+    # Every slug it can emit must be one the rest of the system knows about.
+    for _, expected in cases:
+        assert expected in http_cache.FETCH_KINDS
+    # HTTP status errors are split by code rather than lumped together, so a
+    # moved page (404) is never mistaken for a host refusing us (403).
+    def _status(code):
+        req = httpx.Request("GET", "http://h/f")
+        return httpx.HTTPStatusError("s", request=req, response=httpx.Response(code, request=req))
+
+    assert http_cache.classify(_status(404)) == "not_found"
+    assert http_cache.classify(_status(403)) == "blocked_403"
+    assert http_cache.classify(_status(503)) == "server_error"
+    # Must never raise on the failure path — a second failure would mask the first.
+    assert http_cache.classify(ValueError("nonsense")) in http_cache.FETCH_KINDS
+
+
+def test_failed_fetch_records_the_kind_without_clobbering_validators(tmp_path, monkeypatch):
+    """The two invariants of `_store_error`.
+
+    Writing NULL over etag/last_modified would force a full re-download of a
+    large PDF the next time the host lets us in; bumping `last_checked` would
+    keep a permanently dead URL alive forever against `prune_cache`.
+    """
+    db = str(tmp_path / "e.db")
+    init_db(db)
+    _patch(monkeypatch, [(200, b"hello", "etag1", "Mon, 01 Jan 2026")])
+    http_cache.conditional_get("http://x/f", db_path=db)
+    before = _cache_entry(db, "http://x/f")
+    checked_before = before.last_checked
+
+    def boom(*a, **k):
+        raise http_cache.BlockedError("http://x/f", 403)
+
+    monkeypatch.setattr(http_cache, "_do_get", boom)
+    with pytest.raises(http_cache.BlockedError):
+        http_cache.conditional_get("http://x/f", db_path=db)
+
+    entry = _cache_entry(db, "http://x/f")
+    assert entry.last_error_kind == "blocked_403"
+    assert entry.last_error_at is not None
+    assert "403" in (entry.last_error_detail or "")
+    assert entry.etag == "etag1"
+    assert entry.last_modified == "Mon, 01 Jan 2026"
+    assert entry.last_checked == checked_before
+
+
+def test_failed_fetch_records_a_kind_even_with_no_prior_cache_row(tmp_path, monkeypatch):
+    """A committee blocked on its very first visit is the case we most need."""
+    db = str(tmp_path / "e2.db")
+    init_db(db)
+
+    def boom(*a, **k):
+        raise http_cache.ChallengeNotClearedError("http://x/new", 4)
+
+    monkeypatch.setattr(http_cache, "_do_get", boom)
+    with pytest.raises(http_cache.ChallengeNotClearedError):
+        http_cache.conditional_get("http://x/new", db_path=db)
+
+    entry = _cache_entry(db, "http://x/new")
+    assert entry is not None
+    assert entry.last_error_kind == "challenge_unresolved"
+    # Never fetched, so there is nothing to protect and nothing to prune against.
+    assert entry.etag is None
+
+
+def test_success_clears_a_previously_recorded_error(tmp_path, monkeypatch):
+    db = str(tmp_path / "e3.db")
+    init_db(db)
+
+    def boom(*a, **k):
+        raise http_cache.BlockedError("http://x/f", 403)
+
+    monkeypatch.setattr(http_cache, "_do_get", boom)
+    with pytest.raises(http_cache.BlockedError):
+        http_cache.conditional_get("http://x/f", db_path=db)
+    assert _cache_entry(db, "http://x/f").last_error_kind == "blocked_403"
+
+    _patch(monkeypatch, [(200, b"ok", "e", "lm")])
+    http_cache.conditional_get("http://x/f", db_path=db)
+
+    entry = _cache_entry(db, "http://x/f")
+    assert entry.last_error_kind is None
+    assert entry.last_error_at is None
+
+
+def test_cache_status_breaks_down_errors_by_kind(tmp_path, monkeypatch):
+    db = str(tmp_path / "e4.db")
+    init_db(db)
+    _patch(monkeypatch, [(200, b"a", "e", "lm")])
+    http_cache.conditional_get("http://x/good", db_path=db)
+
+    def boom(*a, **k):
+        raise http_cache.BlockedError("http://x/f", 403)
+
+    monkeypatch.setattr(http_cache, "_do_get", boom)
+    for u in ("http://x/b1", "http://x/b2"):
+        with pytest.raises(http_cache.BlockedError):
+            http_cache.conditional_get(u, db_path=db)
+
+    # cache_status is per host; all three URLs share one.
+    st = {r["host"]: r for r in http_cache.cache_status(db_path=db)}["x"]
+    assert st["entries"] == 3
+    assert st["errors"] == 2
+    assert st["error_kinds"]["blocked_403"] == 2

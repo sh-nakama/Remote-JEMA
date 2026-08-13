@@ -29,6 +29,16 @@ export interface Committee {
   done?: number
   pending?: number
   error?: number
+  /** Fetch health of the committee's own pages (live rows). Distinct from
+   * `error`, which counts meetings whose *summarisation* failed — these say
+   * whether the source pages could be reached at all. `fetchKind` is a slug
+   * (blocked_403, challenge_unresolved, circuit_open, not_found, …). */
+  fetchStatus?: string | null
+  fetchKind?: string | null
+  fetchDetail?: string | null
+  fetchAt?: string | null
+  lastOkAt?: string | null
+  fetchFailures?: number
 }
 
 export interface DigestSection {

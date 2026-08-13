@@ -254,6 +254,29 @@ fixed.
     re-crawl works without un-archiving.
   - Archiving only stops *fetching*: rows, meetings and materials are kept and still render in the
     Deep Dive. It is also a **DB-only change**, so it reaches CI via the HF dataset push, not git.
+- **A failed fetch used to leave no trace anywhere** — `http_cache._store()` is only reached on
+  200/304, so 403 / uncleared-202 / circuit-open / deadline all raise past it and never write a
+  row. The only evidence was the console, and `web-api`'s in-process catch-up narrates straight
+  to a terminal nobody keeps. Every failure path now records: `http_cache` gets
+  `last_error_kind/at/detail`, `policy_committee` gets `last_fetch_*` + `consecutive_failures` +
+  `last_ok_at`, and `policy_fetch_event` keeps the last 20 attempts per committee.
+  `repower policy doctor` groups them by cause and prints the remedy.
+  - `_store_error()` must **never** touch `etag`/`last_modified` (writing NULL on a 403 forces a
+    full re-download of every PDF on the next success) or `last_checked` (`prune_cache` keys on
+    it, so error writes would keep permanently dead URLs alive forever in an HF-synced table).
+  - `set_committee_fetch_result` is called on **every** path including failures. Previously
+    `set_committee_checked` was skipped on error, so a blocked committee's `last_checked` merely
+    went stale — indistinguishable from "never scheduled".
+- **`_exists()` is tri-state (`True`/`False`/`None`) and must stay that way.** It used to
+  `return r.status_code == 200`, so a blocked probe was indistinguishable from a real 404.
+  `probe_occto_latest` counted that toward `PROBE_GAP_TOLERANCE`, stopped early, and returned a
+  **silently truncated** meeting list that `detect()` recorded as `status="ok"`. That is data
+  loss, not just lost observability: a reported error gets retried, a missing meeting never does.
+  An indeterminate probe now aborts the scan and returns `(None, "blocked_403")`.
+- Committee `fetchStatus` in the web payload is **not** the same as the `error` rollup next to it:
+  `error` counts meetings whose *summarisation* failed, `fetchStatus` says whether the
+  committee's own pages could be reached. Both `build_policy_catalog` and `build_policy_snapshot`
+  have their own SELECTs — adding a column to one silently omits it from the other.
 
 ## Streamlit dashboard
 
@@ -283,6 +306,14 @@ fixed.
 - There is **no conftest.py**; DB-setup boilerplate is duplicated ~30× across the policy test
   files `(open — P3)`. Tests are hermetic by monkeypatching the lowest-level I/O boundary
   (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
+  wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
+  I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both
+  seams. The same hazard appears whenever a patched hot path grows a new inner function.
+- The CLI reconfigures `stdout`/`stderr` to UTF-8 at import (`cli.py`). Without it the `═`
+  banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
+  Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
+  the printing.
 - `ruff` runs near-default rules (E4/E7/E9 + F only) and there is no type checker `(open — P2)`
   — a clean lint proves little.
 - Local dev: use `.venv` (Python 3.12) — the PATH `python` is 3.9 without deps.

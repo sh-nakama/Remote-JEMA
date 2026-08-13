@@ -391,3 +391,92 @@ def test_migration_adds_archived_to_an_existing_db(tmp_path):
     assert {r[0] for r in con.execute("SELECT archived FROM policy_committee")} == {0}
     con.close()
     assert len(_select_committees(None, db)) == expected
+
+# -- Fetch health in the web payloads -----------------------------------------
+# The Deep Dive badge is the only place a non-CLI user learns a committee is
+# blocked; without these fields it renders identically to one that is merely quiet.
+
+
+def test_catalog_payload_carries_fetch_health(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_fetch_result(
+        key, "error", kind="blocked_403", detail="blocked with status 403",
+        url="https://x/f", db_path=db,
+    )
+
+    row = next(c for c in export_web.build_policy_catalog(db) if c["key"] == key)
+
+    assert row["fetchStatus"] == "error"
+    assert row["fetchKind"] == "blocked_403"
+    assert row["fetchFailures"] == 1
+    assert row["lastOkAt"] is None
+    # DATETIME columns are not JSON-serialisable; the payload must already be a str.
+    assert isinstance(row["fetchAt"], str)
+
+
+def test_snapshot_payload_carries_fetch_health(tmp_path):
+    """`build_policy_snapshot` feeds the live API and has its own SELECT, so it
+    can silently omit columns the static export includes."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_fetch_result(key, "error", kind="circuit_open", db_path=db)
+
+    snap = export_web.build_policy_snapshot(db)
+    row = next(c for c in snap["committees"] if c["key"] == key)
+
+    assert row["fetchKind"] == "circuit_open"
+    assert row["fetchFailures"] == 1
+
+
+def test_committees_payload_defaults_fetch_health_when_columns_absent():
+    """Shared with callers whose SELECT predates the columns -- must degrade, not raise."""
+    committees = [{
+        "committee_key": "x", "name_ja": "x", "name_en": "X", "url": "", "source": "METI",
+        "latest_meeting": 1, "source_count": 0, "enabled": 1, "priority": 100,
+    }]
+    out = export_web.build_committees_payload(committees, [])
+    assert out[0]["fetchStatus"] is None
+    assert out[0]["fetchFailures"] == 0
+
+
+def test_migration_adds_fetch_observability_to_an_existing_db(tmp_path):
+    import sqlite3
+
+    import repower.db as _db
+    from repower.db import init_db
+
+    db = str(tmp_path / "t.db")
+    init_db(db)
+    store.sync_committees(db_path=db)
+
+    con = sqlite3.connect(db)
+    for col in ("last_fetch_status", "last_fetch_kind", "last_fetch_detail",
+                "last_fetch_url", "last_fetch_at", "last_ok_at", "consecutive_failures"):
+        con.execute(f"ALTER TABLE policy_committee DROP COLUMN {col}")
+    con.execute("DROP TABLE IF EXISTS policy_fetch_event")
+    con.commit()
+    con.close()
+
+    _db._INITIALIZED.discard(db)  # init_db is once-per-path; force the migration to re-run
+    init_db(db)
+
+    con = sqlite3.connect(db)
+    cols = {r[1] for r in con.execute("PRAGMA table_info(policy_committee)")}
+    assert {"last_fetch_status", "last_fetch_kind", "last_ok_at",
+            "consecutive_failures"} <= cols
+    # Existing rows must start at zero failures, not NULL -- the column is NOT NULL
+    # and every later increment reads it.
+    assert {r[0] for r in con.execute("SELECT consecutive_failures FROM policy_committee")} == {0}
+    assert con.execute(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='policy_fetch_event'"
+    ).fetchone()[0] == 1
+    con.close()
+
+    # And the store still works against the migrated DB.
+    key = store.enabled_committee_keys(db_path=db)[0]
+    store.set_committee_fetch_result(key, "error", kind="blocked_403", db_path=db)
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["consecutive_failures"] == 1

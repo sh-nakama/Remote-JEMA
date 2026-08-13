@@ -528,13 +528,159 @@ def test_discover_meetings_carries_meti_index_dates(monkeypatch):
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/genshiryoku/",
         source="METI",
     )
-    monkeypatch.setattr(scraper, "_fetch", lambda url, **kw: ("ok", html))
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", html))
 
     disc = scraper.discover_meetings(committee)
 
     assert disc.status == "ok"
     assert disc.meeting_nums == [49, 48]
     assert disc.dates == {49: datetime.date(2026, 6, 25), 48: datetime.date(2026, 3, 24)}
+
+
+# ── Fetch-failure observability ──────────────────────────────────────────────
+# A committee that cannot be fetched used to leave no trace: no cache row (the
+# error raised before the store), no status on the committee, and — for OCCTO —
+# a silently *truncated* meeting list reported as a clean success.
+
+
+def test_blocked_index_reports_the_cause_instead_of_a_bare_error(monkeypatch):
+    """`discover_meetings` must carry the reason out, not collapse it to "error"."""
+    committee = committee_by_key("system_review")
+    monkeypatch.setattr(
+        scraper, "_fetch_ex",
+        lambda url, **kw: scraper.FetchResult(
+            "error", None, kind="challenge_unresolved", detail="WAF challenge", url=url,
+        ),
+    )
+
+    disc = scraper.discover_meetings(committee)
+
+    assert disc.status == "error"
+    assert disc.error_kind == "challenge_unresolved"
+    assert "WAF" in (disc.error_detail or "")
+    assert disc.error_url
+
+
+def test_occto_probe_aborts_rather_than_truncating_when_blocked(monkeypatch):
+    """The data-corruption case, not just an observability one.
+
+    A blocked probe used to look exactly like a 404, so the scan counted it as a
+    miss, stopped, and returned a meeting list missing everything above the block
+    — which detection then recorded as authoritative. Aborting is the only safe
+    answer: a reported error can be retried, a lost meeting is never noticed.
+    """
+    committee = Committee(
+        key="occto_x", name_ja="X", name_en="X",
+        url="https://www.occto.or.jp/iinkai/x/index.html", source="OCCTO",
+    )
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    # 11 and 12 exist; the host then starts blocking us at 13.
+    monkeypatch.setattr(
+        scraper, "_exists",
+        lambda url: True if url.rsplit("/", 1)[-1] in ("11.html", "12.html") else None,
+    )
+
+    latest, kind = scraper.probe_occto_latest(committee, start_from=10)
+
+    assert latest is None, "a partial scan must not be passed off as the frontier"
+    assert kind == "blocked_403"
+
+
+def test_occto_probe_still_tolerates_a_real_gap(monkeypatch):
+    """The tri-state must not make genuine 404s abort the scan."""
+    committee = Committee(
+        key="occto_y", name_ja="Y", name_en="Y",
+        url="https://www.occto.or.jp/iinkai/y/index.html", source="OCCTO",
+    )
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    present = {"11.html", "13.html"}
+    monkeypatch.setattr(
+        scraper, "_exists", lambda url: url.rsplit("/", 1)[-1] in present,
+    )
+
+    latest, kind = scraper.probe_occto_latest(committee, start_from=10)
+
+    assert kind is None
+    assert latest == 13
+
+
+def test_detect_persists_the_failure_so_it_can_be_diagnosed_later(monkeypatch, tmp_path):
+    """Terminal output is ephemeral; the committee row is what survives a run."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(
+        detect_mod, "discover_meetings",
+        lambda c, **kw: Discovery(
+            status="error", meeting_nums=[],
+            error_kind="blocked_403", error_detail="blocked with status 403",
+            error_url=c.url,
+        ),
+    )
+
+    results = detect_mod.detect(keys=[key], db_path=db)
+
+    assert next(r for r in results if r["key"] == key)["error_kind"] == "blocked_403"
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["last_fetch_status"] == "error"
+    assert row["last_fetch_kind"] == "blocked_403"
+    # Stamped even though it failed: "attempted and failed" must be
+    # distinguishable from "never scheduled".
+    assert row["last_fetch_at"] is not None
+    assert row["consecutive_failures"] == 1
+    assert row["last_ok_at"] is None
+
+
+def test_consecutive_failures_accumulate_then_reset_on_success(tmp_path):
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    for _ in range(3):
+        store.set_committee_fetch_result(
+            key, "error", kind="blocked_403", detail="nope", url="u", db_path=db,
+        )
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["consecutive_failures"] == 3
+
+    store.set_committee_fetch_result(key, "ok", url="u", db_path=db)
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["consecutive_failures"] == 0
+    assert row["last_fetch_kind"] is None
+    assert row["last_ok_at"] is not None
+
+
+def test_a_later_failure_preserves_the_last_known_good_time(tmp_path):
+    """`last_ok_at` answers "how long has this been broken?" — an error must not
+    overwrite it, or the answer becomes unrecoverable."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    store.set_committee_fetch_result(key, "ok", url="u", db_path=db)
+    ok_at = next(c for c in store.list_committees(db_path=db) if c["key"] == key)["last_ok_at"]
+    store.set_committee_fetch_result(key, "error", kind="circuit_open", db_path=db)
+
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["last_ok_at"] == ok_at
+    assert row["last_fetch_status"] == "error"
+
+
+def test_fetch_event_history_is_capped_per_committee(tmp_path):
+    """The log rides the Hugging Face sync, so it must not grow without bound."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    for i in range(store.FETCH_EVENTS_PER_COMMITTEE + 7):
+        store.set_committee_fetch_result(
+            key, "error", kind="blocked_403", detail=f"attempt {i}", db_path=db,
+        )
+
+    events = store.fetch_events(key, limit=200, db_path=db)
+    assert len(events) == store.FETCH_EVENTS_PER_COMMITTEE
+    # Newest kept, oldest dropped.
+    assert "attempt 26" in (events[0]["detail"] or "")
 
 
 # ── Running document regeneration ────────────────────────────────────────────

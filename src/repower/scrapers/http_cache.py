@@ -107,6 +107,56 @@ class DeadlineExceededError(HttpCacheError):
         super().__init__(f"time budget of {budget:.0f}s exhausted for {url}", url=url)
         self.budget = budget
 
+
+# ── Failure classification ───────────────────────────────────────────────────
+# Stable slugs for *why* a fetch failed. The typed exceptions above already carry
+# the distinction; this maps them to short identifiers that can be persisted,
+# grouped and compared — so nothing downstream ever has to string-match a message
+# to decide whether a committee is blocked, challenged, or simply gone.
+FETCH_KINDS: tuple[str, ...] = (
+    "ok",                    # 200, body returned
+    "unchanged",             # 304, cache validators still good
+    "not_found",             # 404
+    "blocked_403",           # host refused the client outright
+    "challenge_unresolved",  # WAF 202 never cleared within the retry ladder
+    "circuit_open",          # host recently blocked us repeatedly; cooling down
+    "deadline_exceeded",     # per-call time budget ran out
+    "unexpected_status",     # a status this layer has no handling for
+    "server_error",          # 5xx/429 surviving the transient retries
+    "network_error",         # DNS/TLS/connection/timeout
+    "parse_error",           # fetched fine, but the body made no sense
+)
+
+
+def classify(exc: BaseException) -> str:
+    """Map an exception raised by this layer to a stable :data:`FETCH_KINDS` slug.
+
+    Callers use this to record *why* a URL could not be fetched. Unknown
+    exceptions degrade to ``network_error`` rather than raising, since this runs
+    on failure paths where a second failure would mask the original one.
+    """
+    if isinstance(exc, ChallengeNotClearedError):
+        return "challenge_unresolved"
+    if isinstance(exc, BlockedError):
+        return "blocked_403"
+    if isinstance(exc, CircuitOpenError):
+        return "circuit_open"
+    if isinstance(exc, DeadlineExceededError):
+        return "deadline_exceeded"
+    if isinstance(exc, UnexpectedStatusError):
+        return "unexpected_status"
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == 404:
+            return "not_found"
+        if code == 403:
+            return "blocked_403"
+        if code == 429 or 500 <= code < 600:
+            return "server_error"
+        return "unexpected_status"
+    return "network_error"
+
+
 # Politeness: keep at least this many seconds between consecutive requests to the
 # same host so a multi-file scrape (version-probing months, EPRX product ZIPs,
 # JEPX year files) drips out at a human pace instead of machine-gunning a single
@@ -461,6 +511,9 @@ def conditional_get(
             _store(session, url, etag, last_modified, 200)
             return ("ok", content)
         raise UnexpectedStatusError(url, status_code)
+    except Exception as exc:  # noqa: BLE001 — record, then re-raise unchanged
+        _store_error(session, url, classify(exc), str(exc))
+        raise
     finally:
         session.close()
 
@@ -526,7 +579,12 @@ def cache_status(db_path: str | None = None) -> list[dict]:
     which hosts are still succeeding, when each was last seen, and how many of
     its entries last came back as something other than 200.
 
-    Each row: ``{host, entries, last_success, last_checked, failing}``.
+    ``errors`` counts entries currently carrying an unresolved failure and
+    ``error_kinds`` breaks those down by :data:`FETCH_KINDS` slug — the states
+    that never reach ``last_status`` because they raise before the row is stored.
+
+    Each row: ``{host, entries, last_success, last_checked, failing, errors,
+    error_kinds}``.
     """
     init_db(db_path)
     session = get_session(db_path)
@@ -542,6 +600,8 @@ def cache_status(db_path: str | None = None) -> list[dict]:
                     "last_success": None,
                     "last_checked": None,
                     "failing": 0,
+                    "errors": 0,
+                    "error_kinds": {},
                 },
             )
             row["entries"] += 1
@@ -555,6 +615,10 @@ def cache_status(db_path: str | None = None) -> list[dict]:
                     row["last_success"] = checked
             if entry.last_status not in (200, 304):
                 row["failing"] += 1
+            if entry.last_error_kind:
+                row["errors"] += 1
+                kinds = row["error_kinds"]
+                kinds[entry.last_error_kind] = kinds.get(entry.last_error_kind, 0) + 1
         return sorted(
             hosts.values(),
             key=lambda r: (r["last_checked"] is not None, r["last_checked"]),
@@ -582,7 +646,42 @@ def _store(session, url: str, etag, last_modified, status: int) -> None:
         entry.last_modified = last_modified
     entry.last_status = status
     entry.last_checked = datetime.now(UTC)
+    # A success clears any recorded failure, so `last_error_kind` always answers
+    # "why is this URL currently unfetchable?" rather than "did it ever fail?".
+    entry.last_error_kind = None
+    entry.last_error_at = None
+    entry.last_error_detail = None
     session.commit()
+
+
+def _store_error(session, url: str, kind: str, detail: str) -> None:
+    """Record *why* a URL could not be fetched, without disturbing the cache state.
+
+    Two invariants make this safe to call on every failure path:
+
+    - ``etag``/``last_modified`` are left untouched. Clearing them on a 403 would
+      make the next successful fetch re-download a file that never changed.
+    - ``last_checked`` is left untouched. :func:`prune_cache` keys on it, so
+      bumping it here would keep permanently-dead URLs alive forever in a table
+      that is synced to Hugging Face.
+
+    Best-effort: a failure to record a failure must never replace the original
+    exception the caller is about to see.
+    """
+    try:
+        entry = session.get(HttpCache, url)
+        if entry is None:
+            # No validators to protect yet; the row exists purely to carry the
+            # error. last_checked stays NULL so prune_cache treats it as stale.
+            entry = HttpCache(url=url)
+            session.add(entry)
+        entry.last_error_kind = kind
+        entry.last_error_at = datetime.now(UTC)
+        entry.last_error_detail = detail[:500]
+        session.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.debug("http_cache: could not record error for %s: %s", url, e)
+        session.rollback()
 
 
 def _parse_retry_after(value: str | None) -> float | None:
