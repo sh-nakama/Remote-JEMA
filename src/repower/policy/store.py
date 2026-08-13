@@ -164,7 +164,7 @@ def enabled_committees(db_path: str | None = None) -> list[Committee]:
 
 def tracked_committees(
     db_path: str | None = None, *, include_disabled: bool = False, sync: bool = True,
-    include_archived: bool = False,
+    include_archived: bool = False, order: str = "code",
 ) -> list[Committee]:
     """The committees to detect/summarise, as :class:`Committee` objects.
 
@@ -176,6 +176,10 @@ def tracked_committees(
     ``archived`` committees (concluded, no longer meeting) are excluded unless
     ``include_archived=True`` — they are a *fetch* exclusion, orthogonal to the
     ``enabled`` tracking flag. Their stored meetings are untouched and still render.
+
+    ``order`` is ``"code"`` (registry order — stable, what UIs and reports want) or
+    ``"rotate"`` (least-recently-*succeeded* first). Use ``"rotate"`` for fetch
+    passes: see :func:`_rotation_key` for why fixed order starves committees.
     """
     if sync:
         sync_committees(db_path)
@@ -192,8 +196,55 @@ def tracked_committees(
             return list(COMMITTEES)
         # Preserve the code ordering for code committees; append user-added ones.
         code_order = {c.key: i for i, c in enumerate(COMMITTEES)}
-        rows.sort(key=lambda r: (code_order.get(r.committee_key, len(code_order)), r.committee_key))
+
+        def _code_key(r):
+            return (code_order.get(r.committee_key, len(code_order)), r.committee_key)
+
+        if order == "rotate":
+            rows.sort(key=lambda r: _rotation_key(r, _code_key(r)))
+        else:
+            rows.sort(key=_code_key)
         return [_row_to_committee(r) for r in rows]
+
+
+# Sorts before any real timestamp, so "never" always outranks "long ago".
+_NEVER = ""
+
+
+def _rotation_key(row, tiebreak):
+    """Sort key putting the most *starved* committee first.
+
+    A fetch pass against meti.go.jp gets roughly four committees through before the
+    WAF starts challenging and the circuit breaker opens; everything after that is
+    collateral that is never actually attempted. With a fixed registry order the
+    same alphabetically-early committees consume that budget on every single run
+    and the same later ones starve forever — which is why committees like `santeii`
+    showed no meetings despite their index being perfectly reachable when fetched
+    on its own.
+
+    Ordering:
+
+    1. ``last_ok_at`` ascending, never-succeeded first — longest without a good
+       fetch gets first claim on the budget.
+    2. ``last_fetch_at`` ascending, never-attempted first. This is what makes the
+       rotation actually rotate: every committee is stamped on every pass
+       (including the ones that only fast-failed on an open circuit), so a
+       committee that just consumed the budget carries the newest timestamp and
+       falls to the back of its group next run. Without it, a committee that can
+       *never* succeed would hold first place forever and simply relocate the
+       starvation.
+    3. Registry order, so the result is deterministic.
+
+    Timestamps are compared as strings deliberately: SQLite has no timezone type,
+    so a column can read back naive even though ``_now()`` is UTC-aware, and
+    comparing a naive to an aware ``datetime`` raises. The stored format is
+    lexicographically ordered anyway.
+    """
+    return (
+        str(row.last_ok_at) if row.last_ok_at else _NEVER,
+        str(row.last_fetch_at) if row.last_fetch_at else _NEVER,
+        tiebreak,
+    )
 
 
 def enabled_committee_keys(db_path: str | None = None) -> list[str]:

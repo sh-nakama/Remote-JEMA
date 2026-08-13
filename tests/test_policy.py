@@ -650,6 +650,124 @@ def test_consecutive_failures_accumulate_then_reset_on_success(tmp_path):
     assert row["last_ok_at"] is not None
 
 
+# ── Fetch rotation ───────────────────────────────────────────────────────────
+# A sweep only gets a handful of committees past the WAF per host before the
+# circuit opens. With fixed registry order the same few consumed that budget every
+# run and the rest starved permanently.
+
+
+def _keys_in_fetch_order(db):
+    from repower.policy.detect import _select_committees
+
+    return [c.key for c in _select_committees(None, db)]
+
+
+def test_sweep_puts_the_least_recently_succeeded_first(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    first, second, third = order[0], order[1], order[2]
+
+    # `first` and `second` succeed, so they should drop behind everyone still
+    # carrying no successful fetch at all.
+    store.set_committee_fetch_result(first, "ok", db_path=db)
+    store.set_committee_fetch_result(second, "ok", db_path=db)
+
+    rotated = _keys_in_fetch_order(db)
+
+    assert rotated[0] == third, "a never-succeeded committee must outrank a fresh success"
+    assert rotated.index(first) > rotated.index(third)
+    assert rotated.index(second) > rotated.index(third)
+    # Rotation reorders, it must never drop or duplicate committees.
+    assert sorted(rotated) == sorted(order)
+
+
+def test_rotation_actually_rotates_when_nothing_succeeds(tmp_path):
+    """The property that makes this a rotation rather than a reshuffle.
+
+    A committee that can never succeed keeps `last_ok_at` NULL forever. If only
+    that were consulted it would hold first place on every run and simply move the
+    starvation onto a different victim, so the pass would still only ever touch the
+    same committees. Being *attempted* has to cost it its place.
+    """
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    budget = order[:3]
+
+    # Simulate one pass where the whole budget was spent and every attempt failed.
+    for k in budget:
+        store.set_committee_fetch_result(k, "error", kind="challenge_unresolved", db_path=db)
+
+    nxt = _keys_in_fetch_order(db)
+
+    assert set(nxt[:3]).isdisjoint(budget), (
+        "committees just attempted must not immediately reclaim the budget"
+    )
+    assert nxt[:3] == order[3:6], "the next-starved committees should be up"
+
+
+def test_rotation_covers_every_committee_over_successive_passes(tmp_path):
+    """End-to-end fairness under production semantics.
+
+    Mirrors a real sweep: the first few committees per pass get through, then the
+    circuit opens and *every remaining committee is still stamped* as collateral.
+    That full stamping is what previously made this hard to get right — it means
+    "was attempted" cannot be inferred from having a timestamp, so the rotation has
+    to survive every row moving on every pass.
+    """
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    total = len(order)
+    budget = 3
+
+    reached: set[str] = set()
+    for _ in range(-(-total // budget)):  # ceil: just enough passes to cover all
+        sweep = _keys_in_fetch_order(db)
+        for i, k in enumerate(sweep):
+            if i < budget:
+                reached.add(k)
+                store.set_committee_fetch_result(k, "ok", db_path=db)
+            else:
+                # Collateral: never actually fetched, but still recorded.
+                store.set_committee_fetch_result(
+                    k, "error", kind="circuit_open", db_path=db,
+                )
+
+    assert reached == set(order), (
+        f"only {len(reached)}/{total} committees were ever reached — starvation"
+    )
+
+
+def test_registry_order_is_unchanged_for_non_sweep_callers(tmp_path):
+    """Rotation is opt-in: listings and the UI must stay in stable registry order,
+    or committees would appear to jump around between page loads."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    before = [c.key for c in store.tracked_committees(db_path=db, sync=False,
+                                                      include_disabled=True)]
+    store.set_committee_fetch_result(before[0], "ok", db_path=db)
+    after = [c.key for c in store.tracked_committees(db_path=db, sync=False,
+                                                     include_disabled=True)]
+
+    assert after == before
+
+
+def test_explicit_keys_keep_the_callers_order(tmp_path):
+    """`--committee a --committee b` is user intent, not a sweep to be reordered."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    keys = _keys_in_fetch_order(db)[:3]
+    store.set_committee_fetch_result(keys[0], "ok", db_path=db)
+
+    from repower.policy.detect import _select_committees
+
+    picked = [c.key for c in _select_committees(list(reversed(keys)), db)]
+
+    assert picked == list(reversed(keys))
+
+
 def test_a_later_failure_preserves_the_last_known_good_time(tmp_path):
     """`last_ok_at` answers "how long has this been broken?" — an error must not
     overwrite it, or the answer becomes unrecoverable."""
@@ -1179,3 +1297,89 @@ def test_generation_request_orders_first(tmp_path):
 
     store.clear_generation_request("santeii", 5, db_path=db)
     assert store.pending_meetings(db_path=db)[0]["committee_key"] == "system_review"
+
+
+# ── Fetch-failure attribution (`policy doctor`) ──────────────────────────────
+def test_collateral_failures_are_grouped_by_host_not_committee():
+    """`circuit_open` means "some *other* committee on this host tripped the
+    breaker" — it is fallout, not a fault. A pass where one host goes hostile
+    produced 32 of these, and counting them as 32 problems hid the 2 that were
+    real. They must be attributed to the host and excluded from the count."""
+    from repower.cli import _COLLATERAL_KINDS, _fetch_host
+
+    assert "circuit_open" in _COLLATERAL_KINDS
+    # The kinds that describe a committee's *own* failure must not be swept in.
+    assert not _COLLATERAL_KINDS & {"not_found", "parse_error", "blocked_403"}
+
+    rows = [
+        {"last_fetch_url": "https://www.meti.go.jp/shingikai/a/index.html", "url": ""},
+        {"last_fetch_url": "https://WWW.METI.GO.JP:443/other.html", "url": ""},
+        {"last_fetch_url": "https://www.egc.meti.go.jp/x.html", "url": ""},
+    ]
+    hosts = [_fetch_host(r) for r in rows]
+    # Case and an explicit default port are the same server — grouping must agree,
+    # or one hostile host reports as two.
+    assert hosts == ["www.meti.go.jp", "www.meti.go.jp", "www.egc.meti.go.jp"]
+
+
+def test_fetch_host_falls_back_to_the_configured_url():
+    """A pass can fail before any request is issued (open circuit), leaving
+    last_fetch_url empty. The committee's homepage still identifies the host, so
+    the row is attributed rather than dumped into an unhelpful '?' bucket."""
+    from repower.cli import _fetch_host
+
+    assert _fetch_host({"last_fetch_url": None, "url": "https://www.meti.go.jp/a.html"}) == (
+        "www.meti.go.jp"
+    )
+    assert _fetch_host({"last_fetch_url": "", "url": ""}) == "?"
+
+
+def test_remedies_do_not_advise_slowing_down():
+    """Measured: 6s spacing got fewer committees through than 1s (1/12 vs 4/43),
+    because METI's WAF is stateful rather than rate-based. Advice to 'slow the
+    pass down' or 'widen the retry delays' is therefore actively wrong, and this
+    pins it so it can't drift back in."""
+    from repower.cli import _FETCH_REMEDIES
+
+    joined = " ".join(_FETCH_REMEDIES.values()).lower()
+    for phrase in ("slow the pass down", "widen _challenge_retry_delays"):
+        assert phrase not in joined
+    assert "circuit_open" in _FETCH_REMEDIES
+    assert "collateral" in _FETCH_REMEDIES["circuit_open"].lower()
+
+
+def test_archived_committees_are_not_reported_as_failing(monkeypatch, capsys):
+    """`doctor`'s own remedy for a retired committee is `policy archive`. Archiving
+    stops it being fetched, so its last recorded failure never changes — reporting
+    it forever would mean following the advice never clears the warning.
+
+    ``list_committees`` is stubbed rather than backed by a temp DB because
+    ``policy_doctor`` resolves its own DB path; the field names used here match the
+    real return shape (verified against the live DB).
+    """
+    import repower.cli as cli_mod
+
+    def _row(key, archived, kind="not_found"):
+        return {
+            "key": key, "committee_key": key, "source": "OCCTO", "enabled": 0,
+            "archived": archived, "url": f"https://www.occto.or.jp/iinkai/{key}/",
+            "last_fetch_status": "error", "last_fetch_kind": kind,
+            "last_fetch_detail": "gone", "last_fetch_url": None,
+            "last_fetch_at": "2026-01-01", "last_ok_at": None, "consecutive_failures": 3,
+        }
+
+    monkeypatch.setattr(store, "sync_committees", lambda *a, **k: None)
+    monkeypatch.setattr(
+        store, "list_committees", lambda *a, **k: [_row("dead_one", 1), _row("live_one", 0)]
+    )
+
+    cli_mod.policy_doctor(failing_only=True, history=False)
+    out = capsys.readouterr().out
+
+    head, _, tail = out.partition("archived committee(s) excluded")
+    assert "live_one" in head, "a non-archived failure must still be reported"
+    assert "dead_one" not in head, "an archived committee must not be listed as failing"
+    assert "1 archived committee(s) excluded" in out
+    assert "dead_one" in tail
+    # Denominator excludes it too, so the ratio doesn't imply a fetch that never happens.
+    assert "1/1 committee(s) need attention" in out

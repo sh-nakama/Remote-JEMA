@@ -616,13 +616,21 @@ def _fetch_label(c: dict) -> str:
 
 # Why each failure kind happens and what actually fixes it. Printed by `doctor`
 # so a failing committee comes with its remedy instead of just a slug.
+#
+# These are calibrated against measurement, not intuition. Notably, "back off and
+# be gentler" is *not* the fix for METI's WAF: spacing requests 6s apart got fewer
+# committees through than 1s did (1/12 vs 4/43), because that edge is stateful —
+# once it flags the client, waiting does not un-flag it. So the remedies below say
+# "come back later", not "go slower".
 _FETCH_REMEDIES: dict[str, str] = {
     "blocked_403": "Host refused the client. Check curl_cffi is installed "
                    "(`pip install curl_cffi`); if it is, the impersonation profile may be stale.",
-    "challenge_unresolved": "WAF JS challenge never cleared within the retry ladder. "
-                            "Re-run later, or widen _CHALLENGE_RETRY_DELAYS / pass a larger budget.",
-    "circuit_open": "Short-circuited: another committee on this host tripped the breaker. "
-                    "Re-run after the cooldown, or slow the pass down.",
+    "challenge_unresolved": "WAF JS challenge never cleared. The ladder is walked once per host "
+                            "per pass, so this is the host that paid it. Widening the delays does "
+                            "not help (measured); the host clears on its own — re-run later.",
+    "circuit_open": "Collateral, not a fault of this committee: another committee on the same "
+                    "host tripped the breaker and the rest of the pass short-circuited. Fix the "
+                    "host's root failure above; these recover with it.",
     "deadline_exceeded": "The per-call time budget ran out. Raise the budget for this pass.",
     "not_found": "404 — the committee page has moved or been retired. "
                  "Fix the URL (`policy add --url ...`) or archive it (`policy archive <key>`).",
@@ -631,6 +639,28 @@ _FETCH_REMEDIES: dict[str, str] = {
     "unexpected_status": "An HTTP status this layer has no handling for — inspect the detail.",
     "parse_error": "Fetched fine but the body could not be parsed — the page layout likely changed.",
 }
+
+# Kinds that are always downstream of some *other* committee's failure. They are
+# reported, but summarised per host rather than itemised, and excluded from the
+# "needs attention" count: a pass where one host goes hostile would otherwise
+# report ~35 problems when there is one.
+_COLLATERAL_KINDS = frozenset({"circuit_open"})
+
+
+def _fetch_host(c: dict) -> str:
+    """Host a committee's last fetch was aimed at, for grouping collateral damage.
+
+    Prefers the URL actually fetched (which may be a sub-page) and falls back to
+    the committee's configured homepage when a pass failed before issuing one.
+    """
+    from urllib.parse import urlsplit
+
+    for candidate in (c.get("last_fetch_url"), c.get("url")):
+        if candidate:
+            host = (urlsplit(candidate).hostname or "").casefold()
+            if host:
+                return host
+    return "?"
 
 
 @policy_app.command("doctor")
@@ -652,6 +682,12 @@ def policy_doctor(
 
     sync_committees()
     rows = list_committees()
+
+    # An archived committee is never fetched again, so whatever failure was recorded
+    # on its last pass is frozen — reporting it forever would mean archiving a dead
+    # committee (the remedy this command recommends) never clears the warning.
+    archived = [c for c in rows if c.get("archived")]
+    rows = [c for c in rows if not c.get("archived")]
 
     by_kind: dict[str, list[dict]] = defaultdict(list)
     unknown: list[dict] = []
@@ -691,6 +727,18 @@ def policy_doctor(
         remedy = _FETCH_REMEDIES.get(kind)
         if remedy:
             typer.echo(f"    → {remedy}")
+        if kind in _COLLATERAL_KINDS and not history:
+            # One line per host, not per committee: these all share a single cause,
+            # and itemising them buries the real failure in its own fallout.
+            by_host: dict[str, list[dict]] = defaultdict(list)
+            for c in group:
+                by_host[_fetch_host(c)].append(c)
+            for host in sorted(by_host):
+                members = sorted(c["key"] for c in by_host[host])
+                shown = ", ".join(members[:6])
+                more = f", +{len(members) - 6} more" if len(members) > 6 else ""
+                typer.echo(f"    {host}  ({len(members)}): {shown}{more}")
+            continue
         typer.echo(f"    {'KEY':<28}{'SRC':<6}{'TRK':<4}{'FAILS':>6}  {'LAST TRY':<17}{'LAST OK':<17}DETAIL")
         for c in group:
             trk = "yes" if c["enabled"] else "no"
@@ -710,8 +758,16 @@ def policy_doctor(
         if not failing_only:
             typer.echo("    " + ", ".join(sorted(c["key"] for c in unknown)))
 
-    n_bad = sum(len(v) for k, v in by_kind.items() if k not in ("ok", "unchanged"))
-    typer.echo(f"\n-- {n_bad}/{len(rows)} committee(s) need attention --")
+    n_bad = sum(
+        len(v) for k, v in by_kind.items()
+        if k not in ("ok", "unchanged") and k not in _COLLATERAL_KINDS
+    )
+    n_collateral = sum(len(v) for k, v in by_kind.items() if k in _COLLATERAL_KINDS)
+    tail = f" (+{n_collateral} collateral)" if n_collateral else ""
+    typer.echo(f"\n-- {n_bad}/{len(rows)} committee(s) need attention{tail} --")
+    if archived:
+        typer.echo(f"({len(archived)} archived committee(s) excluded: "
+                   f"{', '.join(sorted(c['key'] for c in archived))})")
 
 
 @policy_app.command("add")

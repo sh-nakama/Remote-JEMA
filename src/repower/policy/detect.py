@@ -52,11 +52,18 @@ def _select_committees(keys: list[str] | None, db_path: str | None):
     explicitly overrides this, so a deliberate re-crawl of an archived committee
     still works without un-archiving it.
 
+    A full sweep is ordered **least-recently-succeeded first** (``order="rotate"``),
+    not by registry order: the WAF budget only covers a handful of committees per
+    host per run, so a fixed order spends it on the same few every time and starves
+    the rest permanently. Explicit *keys* keep the caller's order — that is
+    deliberate user intent, not a sweep.
+
     Callers sync beforehand, so no second sync here."""
     if keys:
         return [c for c in (committee_or_config(k, db_path=db_path) for k in keys) if c is not None]
     return tracked_committees(
         db_path=db_path, sync=False, include_disabled=True, include_archived=False,
+        order="rotate",
     )
 
 logger = logging.getLogger(__name__)

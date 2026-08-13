@@ -68,6 +68,34 @@ fixed.
   cooldown). Subsequent calls raise `CircuitOpenError` *without* issuing a request. If a scrape
   reports far fewer requests than expected, check for an open circuit before suspecting the
   parser. One success closes it immediately.
+- **METI's WAF is stateful, not rate-based — going slower makes it worse.** This is the single
+  most counter-intuitive thing in the codebase, and it was measured, twice: at 1s spacing 4 of 43
+  committees got through; after a 5-minute cooldown at 6s spacing, 1 of 12 did. Once the edge
+  flags the client, waiting does not un-flag it; it clears on its own schedule. So:
+  - `_MIN_HOST_INTERVAL` (2.0s) is a **politeness** choice only. Do not "tune" it hoping to
+    appease a WAF, and do not lower it below 1s (there is a test pinning that).
+  - The right response to a hostile host is to **stop asking**, not to ask more gently. Hence
+    `_challenge_exhausted`: the 2+50s challenge ladder is walked at most once per host per
+    healthy period, not once per URL. A sweep used to burn ~165s on three committees to learn
+    one fact; it now spends ~55s once and every later URL on that host gets a single
+    unbacked-off attempt (which still succeeds the moment the WAF relents).
+  - Any success — including a plain 200 that never touched the fallback — clears the flag via
+    `_circuit_record_success`.
+- **`ChallengeNotClearedError.attempts` must reflect the ladder actually walked**, not
+  `len(_CHALLENGE_RETRY_DELAYS) + 1`. It is snapshotted *before* the fallback runs, because the
+  fallback marks the host exhausted on its way out — asking afterwards reports 1 for everyone.
+  This number is surfaced in `last_error_detail` and `policy doctor`, so a constant here makes
+  the diagnostics lie.
+- **`circuit_open` is collateral, not a diagnosis.** One hostile host produces one root failure
+  plus ~35 short-circuited committees. `policy doctor` groups those per host and excludes them
+  from the "needs attention" count (`_COLLATERAL_KINDS`) — otherwise the two committees that are
+  genuinely broken are invisible among the fallout. Keep that distinction when adding kinds.
+- **Detection sweeps committees in rotation** (`tracked_committees(order="rotate")`), least
+  recently *succeeded* first. Fixed registry order meant the small pre-WAF budget was always
+  spent on the same alphabetically-early committees, permanently starving the rest. The
+  tiebreak on `last_fetch_at` matters: every committee is stamped on every pass (including
+  circuit_open collateral), so without it a permanently-failing committee would hold first place
+  forever and merely relocate the starvation.
 - **`_pace_host` claims its slot at the *intended send time* (`now + wait`), not `now`.** That
   is what makes concurrent callers queue rather than all read the same stale timestamp and fire
   together. Preserve this if you touch the pacer — the bug it prevents is invisible in

@@ -163,12 +163,20 @@ def classify(exc: BaseException) -> str:
 # server. Keyed per host, so unrelated hosts aren't needlessly serialised and a
 # host's first hit never waits.
 #
+# This is a *courtesy* floor, not a throttle-avoidance measure, and the two should
+# not be conflated. Measured against meti.go.jp: widening the gap from 1s to 6s
+# made things strictly worse (1/12 committees through instead of 4/43), because
+# that WAF is stateful rather than rate-based — once it flags the client, waiting
+# longer between requests does not appease it. So spacing buys good manners, and
+# nothing else; the fix for a hostile host is to stop hammering it (see the
+# challenge budget below), not to tiptoe.
+#
 # _last_request_at is shared mutable state and web_api runs the policy catch-up on
 # a background thread, so it is guarded by _pace_lock. The lock covers the
 # read/decide/write only — never the sleep itself — and the stored timestamp is the
 # *intended* send time, so concurrent callers for one host queue up behind each
 # other instead of all observing the same stale `prev` and firing together.
-_MIN_HOST_INTERVAL: float = 1.0
+_MIN_HOST_INTERVAL: float = 2.0
 _last_request_at: dict[str, float] = {}
 _pace_lock = threading.Lock()
 
@@ -229,16 +237,34 @@ def reset_pacing() -> None:
 
 # Per-host circuit breaker. Once a host has blocked/challenged us this many times
 # in a row, every further request to it short-circuits for a cooldown window
-# instead of paying the full 2 + 50s challenge ladder again to rediscover the
-# same fact. One success closes the circuit immediately.
+# instead of paying the round-trip again to rediscover the same fact. One success
+# closes the circuit immediately.
 #
-# This is what stops a hostile host from turning an ~85-committee pass into hours:
-# the first few committees pay the ladder, the rest fail fast.
+# This is what stops a hostile host from turning an ~85-committee pass into hours.
+# It works together with _challenge_exhausted below: that caps the expensive
+# challenge ladder at one walk per host, and this then stops issuing requests at
+# all once the host has made its position clear.
 _CIRCUIT_FAILURE_THRESHOLD = 3
 _CIRCUIT_COOLDOWN: float = 300.0
 _circuit_failures: dict[str, int] = {}
 _circuit_open_until: dict[str, float] = {}
 _circuit_lock = threading.Lock()
+
+# Hosts whose 202 challenge ladder (see _CHALLENGE_RETRY_DELAYS) has already been
+# walked to exhaustion since their last success. The ladder exists to give a *cold*
+# WAF time to arm its clearance cookie, which is worth ~50s once. It is not worth
+# paying per URL: a sweep of 43 METI committees used to spend the full ladder on
+# each of the first three — ~165s to arrive at the same answer three times — before
+# the circuit opened.
+#
+# So the ladder is spent at most once per host per healthy period. Afterwards that
+# host still gets a real request (the plain path can return 200/304 the moment the
+# WAF relents, and a success clears this flag) — it just no longer waits around
+# through a full backoff to be told "no" again.
+#
+# Lives here, under _circuit_lock: this and the counters above are both per-host
+# hostility state, cleared by the same success.
+_challenge_exhausted: set[str] = set()
 
 
 def _circuit_retry_after(url: str) -> float:
@@ -285,8 +311,35 @@ def _circuit_record_success(url: str) -> None:
     if not host:
         return
     with _circuit_lock:
+        # Unconditional: the host is demonstrably serving us again, so it has
+        # earned a fresh challenge ladder even if no failure was ever counted
+        # (a ladder can exhaust without the circuit reaching its threshold).
+        _challenge_exhausted.discard(host)
         if _circuit_failures.pop(host, None) is not None:
             _circuit_open_until.pop(host, None)
+
+
+def _challenge_ladder_for(url: str) -> tuple[float, ...]:
+    """Backoff delays to use for *url*'s next 202 challenge.
+
+    Full ladder for a host that hasn't yet failed one, empty afterwards — see
+    ``_challenge_exhausted``.
+    """
+    host = _host_key(url)
+    if not host:
+        return _CHALLENGE_RETRY_DELAYS
+    with _circuit_lock:
+        return () if host in _challenge_exhausted else _CHALLENGE_RETRY_DELAYS
+
+
+def _mark_challenge_exhausted(url: str) -> None:
+    """Record that *url*'s host ran out of challenge retries, so later URLs on
+    that host don't each re-pay the ladder to learn the same thing."""
+    host = _host_key(url)
+    if not host:
+        return
+    with _circuit_lock:
+        _challenge_exhausted.add(host)
 
 
 def reset_circuits() -> None:
@@ -294,6 +347,7 @@ def reset_circuits() -> None:
     with _circuit_lock:
         _circuit_failures.clear()
         _circuit_open_until.clear()
+        _challenge_exhausted.clear()
 
 
 class _Deadline:
@@ -769,6 +823,10 @@ def _do_get(
         # behind CloudFront + WAF and answers plain HTTP stacks with either). Both
         # yield to the browser-impersonating fallback.
         if resp.status_code in (403, 202):
+            # Snapshot before the fallback: it marks the host exhausted on failure,
+            # so asking afterwards would report 1 attempt even for the full ladder.
+            # This number reaches last_error_detail, so it has to be the truth.
+            attempts = len(_challenge_ladder_for(url)) + 1
             if allow_curl_fallback:
                 r = _curl_get(url, headers, timeout, deadline)
                 if r is not None:
@@ -777,7 +835,7 @@ def _do_get(
             # Fallback unavailable, or it could not clear the block either.
             _circuit_record_failure(url)
             if resp.status_code == 202:
-                raise ChallengeNotClearedError(url, len(_CHALLENGE_RETRY_DELAYS) + 1)
+                raise ChallengeNotClearedError(url, attempts)
             raise BlockedError(url, resp.status_code)
         if resp.status_code in (200, 304, 404):
             _circuit_record_success(url)
@@ -829,9 +887,11 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
 
     The host's session is reused across calls (see ``_curl_sessions``), so a
     WAF/Akamai clearance cookie earned once is replayed by the host's later URLs
-    rather than being re-earned per URL. Within a call, a 202 is retried with the
-    lengthening ``_CHALLENGE_RETRY_DELAYS`` backoff; if the budget is exhausted the
-    cookie jar has failed to clear, so it is discarded rather than carried forward.
+    rather than being re-earned per URL. A 202 is retried with the lengthening
+    ``_CHALLENGE_RETRY_DELAYS`` backoff — but only until that ladder fails once for
+    the host (see ``_challenge_exhausted``), after which its URLs get a single
+    unbacked-off attempt each. If the budget is exhausted the cookie jar has failed
+    to clear, so it is discarded rather than carried forward.
 
     Retries are paced like any other request, and the whole ladder is bounded by
     *deadline* so a hostile host can't consume the run.
@@ -854,7 +914,10 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
         if not deadline.allows(_CHALLENGE_INITIAL_DELAY):
             return None
         time.sleep(_CHALLENGE_INITIAL_DELAY)
-        for attempt in range(len(_CHALLENGE_RETRY_DELAYS) + 1):
+        # Empty once this host has already failed a ladder: one real attempt is
+        # still made (the WAF may have relented), but without the long backoff.
+        delays = _challenge_ladder_for(url)
+        for attempt in range(len(delays) + 1):
             if deadline.expired():
                 # Out of time: the jar hasn't cleared, so don't carry it forward.
                 reset_curl_sessions(host)
@@ -880,9 +943,10 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
                 return (r.status_code, body, r.headers.get("ETag"), r.headers.get("Last-Modified"))
             # 202 = WAF challenge not yet cleared. Wait (respectfully) for the cookie
             # to arm on this session, then retry — unless we've exhausted the budget.
-            if r.status_code == 202 and attempt < len(_CHALLENGE_RETRY_DELAYS):
-                delay = _CHALLENGE_RETRY_DELAYS[attempt]
+            if r.status_code == 202 and attempt < len(delays):
+                delay = delays[attempt]
                 if not deadline.allows(delay):
+                    _mark_challenge_exhausted(url)
                     reset_curl_sessions(host)
                     return None
                 logger.info(
@@ -890,10 +954,12 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
                     url,
                     delay,
                     attempt + 1,
-                    len(_CHALLENGE_RETRY_DELAYS),
+                    len(delays),
                 )
                 time.sleep(delay)
                 continue
             # Out of retries (or an unusable status): these cookies aren't working.
+            if r.status_code == 202:
+                _mark_challenge_exhausted(url)
             reset_curl_sessions(host)
             return None

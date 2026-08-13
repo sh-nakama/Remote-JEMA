@@ -178,6 +178,7 @@ def _fake_curl_cffi(monkeypatch, status_sequence):
     monkeypatch.setattr(http_cache, "_last_request_at", {})
     monkeypatch.setattr(http_cache, "_circuit_failures", {})
     monkeypatch.setattr(http_cache, "_circuit_open_until", {})
+    monkeypatch.setattr(http_cache, "_challenge_exhausted", set())
 
     # A coherent fake clock: sleeping advances monotonic time. Without this the
     # host pacer would see no time pass between retries and pile up spurious
@@ -213,6 +214,57 @@ def test_curl_202_challenge_gives_up_after_budget(monkeypatch):
     result = http_cache._curl_get("http://x/f", {}, 30.0)
 
     assert result is None
+    assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY, *http_cache._CHALLENGE_RETRY_DELAYS]
+
+
+def test_curl_challenge_ladder_is_spent_once_per_host(monkeypatch):
+    """The ladder buys a cold WAF time to arm its cookie — worth ~50s once, not
+    once per URL. After it has failed for a host, that host's later URLs still get
+    a real attempt but skip the backoff.
+
+    This is the difference between a sweep spending 165s on three committees to
+    learn one fact and spending 55s on one.
+    """
+    sleeps, _made, calls = _fake_curl_cffi(monkeypatch, [202] * 10)
+
+    assert http_cache._curl_get("https://meti.example/a", {}, 30.0) is None
+    assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY, *http_cache._CHALLENGE_RETRY_DELAYS]
+    attempts_first = len(calls)
+
+    sleeps.clear()
+    assert http_cache._curl_get("https://meti.example/b", {}, 30.0) is None
+
+    # Only the warm-up gap — none of the 5/15/30s ladder.
+    assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY]
+    assert len(calls) - attempts_first == 1, "the second URL should get exactly one attempt"
+
+
+def test_shortened_ladder_reports_its_real_attempt_count(monkeypatch):
+    """``ChallengeNotClearedError.attempts`` reaches ``last_error_detail`` and the
+    `policy doctor` report, so it must reflect the ladder actually walked. Reporting
+    the full 4 for a 1-attempt fast-fail would make the diagnostics lie."""
+    _fake_curl_cffi(monkeypatch, [202] * 10)
+    _fake_httpx(monkeypatch, [(202, {}, b""), (202, {}, b"")])
+    monkeypatch.setattr(http_cache, "_challenge_exhausted", set())
+
+    with pytest.raises(http_cache.ChallengeNotClearedError) as first:
+        http_cache._do_get("https://meti.example/a", {}, True, 30.0)
+    assert first.value.attempts == len(http_cache._CHALLENGE_RETRY_DELAYS) + 1
+
+    with pytest.raises(http_cache.ChallengeNotClearedError) as second:
+        http_cache._do_get("https://meti.example/b", {}, True, 30.0)
+    assert second.value.attempts == 1
+
+
+def test_curl_challenge_exhaustion_is_per_host(monkeypatch):
+    """One hostile host must not shorten an unrelated host's ladder — they have
+    separate WAFs, cookie jars and moods."""
+    sleeps, _made, _calls = _fake_curl_cffi(monkeypatch, [202] * 10)
+
+    assert http_cache._curl_get("https://hostile.example/a", {}, 30.0) is None
+    sleeps.clear()
+
+    assert http_cache._curl_get("https://other.example/a", {}, 30.0) is None
     assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY, *http_cache._CHALLENGE_RETRY_DELAYS]
 
 
@@ -253,6 +305,39 @@ def test_curl_drops_session_after_exhausted_challenge(monkeypatch):
     # The next call starts from a fresh session rather than the poisoned one.
     assert http_cache._curl_get("https://meti.example/b", {}, 30.0) is not None
     assert len(made) == 2
+
+
+def test_success_restores_the_full_challenge_ladder(monkeypatch):
+    """A host that starts serving us again has earned a fresh ladder.
+
+    Driven through ``_do_get`` rather than ``_curl_get`` because the clearing
+    happens in ``_circuit_record_success``, which only the former calls — and the
+    signal that matters most is a *plain* 200, i.e. the WAF relenting without the
+    fallback being involved at all.
+    """
+    sleeps, _made, _calls = _fake_curl_cffi(monkeypatch, [202] * 10)
+    _fake_httpx(monkeypatch, [(200, {}, b"ok"), (202, {}, b"")])
+    # _fake_httpx installs its own empty state dicts; re-isolate so the two fakes
+    # agree on one set of per-host state.
+    monkeypatch.setattr(http_cache, "_challenge_exhausted", set())
+
+    assert http_cache._curl_get("https://meti.example/a", {}, 30.0) is None
+    assert "meti.example" in http_cache._challenge_exhausted
+
+    # A clean 200 straight from httpx: no challenge, host is healthy again.
+    http_cache._do_get("https://meti.example/b", {}, True, 30.0)
+    assert "meti.example" not in http_cache._challenge_exhausted
+
+    # So the next challenge is met with the full ladder, not the short-circuit.
+    sleeps.clear()
+    with pytest.raises(http_cache.ChallengeNotClearedError) as exc:
+        http_cache._do_get("https://meti.example/c", {}, True, 30.0)
+
+    assert sleeps[-len(http_cache._CHALLENGE_RETRY_DELAYS) :] == list(
+        http_cache._CHALLENGE_RETRY_DELAYS
+    ), "the full backoff ladder should be back"
+    # The reported attempt count is the ladder we actually walked, not a constant.
+    assert exc.value.attempts == len(http_cache._CHALLENGE_RETRY_DELAYS) + 1
 
 
 def test_curl_does_not_send_our_default_user_agent(monkeypatch):
@@ -358,6 +443,17 @@ def test_pace_host_does_not_serialise_distinct_hosts(monkeypatch):
     assert sleeps == []
 
 
+def test_politeness_floor_stays_above_one_second():
+    """The other pacing tests read the constant symbolically, so they would still
+    pass if it were tuned to zero. This pins the *policy*: we deliberately stay
+    slower than one request per second per host.
+
+    Note this is courtesy, not throttle-avoidance — widening the gap measurably
+    does *not* appease meti.go.jp's WAF (6s performed worse than 1s). So there is
+    no performance argument for lowering it; only politeness rides on this number.
+    """
+    assert http_cache._MIN_HOST_INTERVAL > 1.0
+
 
 
 # ── httpx-level fakes: the failure/fallback paths inside _do_get ─────────────
@@ -394,6 +490,7 @@ def _fake_httpx(monkeypatch, responses):
     monkeypatch.setattr(http_cache, "_last_request_at", {})
     monkeypatch.setattr(http_cache, "_circuit_failures", {})
     monkeypatch.setattr(http_cache, "_circuit_open_until", {})
+    monkeypatch.setattr(http_cache, "_challenge_exhausted", set())
     return calls
 
 
