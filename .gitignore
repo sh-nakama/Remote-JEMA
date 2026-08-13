@@ -23,3 +23,10 @@ Reference/
 
 # /test-jema bug-hunt drafts (working artifacts; real output is filed GH issues)
 test-runs/
+
+# uv lockfile. This project installs with pip (`pip install -e ".[dev]"`; CI and
+# the Dockerfile do the same), so a uv.lock here is a stray artifact of running
+# uv locally rather than a dependency source of truth. Ignored so it can't be
+# committed and start competing with pyproject.toml. If the project ever adopts
+# uv properly, drop this line — lockfiles belong in version control.
+uv.lock
