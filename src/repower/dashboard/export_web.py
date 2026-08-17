@@ -807,10 +807,12 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             reason = {
                 "no_sources": "no source documents could be found for this meeting",
                 "download_failed": "the source documents could not be downloaded",
+                "download_blocked": "the source site blocked the download — will be retried",
             }.get(flag or "", "summarisation failed — will be retried")
             reason_ja = {
                 "no_sources": "資料が見つかりませんでした",
                 "download_failed": "資料をダウンロードできませんでした",
+                "download_blocked": "配信元にブロックされました（再試行されます）",
             }.get(flag or "", "要約に失敗しました（再試行されます）")
             out_m["emptyTitle"] = "Not summarised — errored · 要約エラー"
             out_m["emptySub"] = f"Last attempt: {reason} · {reason_ja}"

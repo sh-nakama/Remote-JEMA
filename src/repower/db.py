@@ -166,7 +166,7 @@ class PolicyCommittee(Base):
     latest_meeting = Column(Integer)  # highest meeting reaching state='done'
     synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
     last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
-    archive_watermark_meeting = Column(Integer)  # summaries ≤ this rolled into an archive source
+    archive_watermark_meeting = Column(Integer)  # meetings ≤ this live in a superseded notebook
     source_count = Column(Integer)  # live sources in the synthesis notebook
     running_summary_md = Column(Text)  # Japanese running document (regenerated from DB)
     running_digest_en_md = Column(Text)  # compact English running digest

@@ -102,6 +102,14 @@ fixed.
   single-threaded tests, and `web_api` runs catch-up on a background thread.
 - **Anything issuing its own requests outside `conditional_get` must still call `pace_host`.**
   The OCCTO `_exists` probes do; they run in tight loops against the most bot-sensitive hosts.
+- **Fetching a *file* by hand loses the WAF clearance the index fetch just earned.** The
+  curl_cffi session is cached per host precisely so a cookie bought once is replayed; a
+  hand-rolled `httpx`/`curl_cffi` call opens a fresh connection and re-earns it from zero — and
+  gets no challenge ladder, no pacing and no circuit breaker either. Policy PDF downloads used
+  to do this, so a 202 on a PDF was a one-shot give-up while the index page beside it patiently
+  retried (~half of a catch-up round's meetings lost on a bad METI day). `_download_pdf` now
+  goes through `conditional_get` with `force=True` — forced because we keep no persistent copy
+  of the bytes, so a 304 would leave nothing to ingest.
 - **A faked `time.sleep` in tests must also advance `time.monotonic`.** Otherwise the pacer sees
   no time pass between retries and piles up waits that don't exist in production — an artefact
   of the fake, not a real regression. `_fake_curl_cffi` installs a coherent clock; reuse it.
@@ -225,8 +233,62 @@ fixed.
 - `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
   timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
   paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.
-- The per-committee synthesis notebook approaches `NOTEBOOKLM_SOURCE_CAP` with **no roll-up
-  implemented** — long-lived committees will eventually fail to synthesize `(open — P4)`.
+- **A `create_notebook` timeout does not mean no notebook was created.** NotebookLM answers
+  the RPC and makes one while the client gives up waiting, so a bare `raise` leaks an
+  untracked notebook — the 2026-08-16 crash took the account from 13 to 14 notebooks with
+  nothing in the DB pointing at the extra one, and `policy resume` found nothing to
+  reconcile because the row was never written. `notebook.create_notebook` now looks the
+  notebook up by title on timeout and adopts it. It adopts **only an empty match**: a create
+  can only time out *before* any source is added, so a populated same-titled notebook belongs
+  to some earlier attempt (typically one whose own `delete_notebook` also timed out) and
+  reusing it would duplicate its sources. Any lookup failure — including the expired session
+  that probably caused the timeout — means don't adopt, so the timeout stands.
+  - Adoption only reclaims a notebook the *same* create retries into. Anything already leaked
+    stays leaked, so `repower policy notebooks` diffs the account against the DB. It is
+    **read-only by design**: an untracked notebook is usually a leak, but the shared account
+    also holds notebooks a human made by hand, so nothing here may auto-delete.
+  - **A rollover archive is untracked on purpose and must not be deleted.** The rollover keeps
+    the full notebook and stores only `archive_watermark_meeting` — the archive's *id* is
+    written nowhere, so it is indistinguishable from a leak by id alone. `policy notebooks`
+    flags `<key> synthesis…` for any committee with a watermark set; those hold meetings below
+    the watermark that the synthesis narrative no longer covers. (`chousei_jukyu` rolled over
+    at 第120回 on 2026-08-17 and its 07-03 notebook is exactly this case.)
+- **`require_auth` gates only the *start* of a run.** The browser cookie can lapse an hour in,
+  and the CLI reports that as an ordinary exit-1 failure, not as an auth error — so
+  `notebook._AUTH_MARKERS` sniffs stderr and raises `NotebookLMAuthError`. Without it every
+  remaining meeting is charged a `retry_count` for what is really one dead session.
+- **Rate limit, lapsed session and timeout are one category (`pipeline._HALTING`), not three.**
+  All are properties of the *account*, so the next meeting would fail identically; `run` stops
+  the round and names the cause in the summary's `stopped_early`
+  (`rate_limited` | `auth_expired` | `timed_out`), and `summarize_meeting` resets the row to
+  `detected` without burning a retry. Before this, a mid-run `NotebookLMTimeout` out of
+  `_rollover_synthesis`'s `create_notebook` was uncaught and killed the process with a
+  traceback (exit 1), losing the round's summary. `rate_limited` is kept in the summary dict
+  purely for callers that predate `stopped_early` — new code should read `stopped_early`, and
+  **any new NotebookLM error class that is account-wide belongs in `_HALTING`**, or it will
+  quietly burn the whole worklist's retry budget one meeting at a time.
+- **A full synthesis notebook rolls over to a new one, it does not compact.** At
+  `NOTEBOOKLM_SOURCE_CAP` the committee's synthesis continues in a fresh notebook titled
+  `<key> synthesis (第N回〜)`; the full one is left intact and `archive_watermark_meeting` records
+  the last meeting it covers. So the NotebookLM-generated *synthesis narrative* only spans
+  meetings above the watermark — the running document is regenerated from the DB's briefings and
+  stays complete, so don't "fix" a narrower narrative by re-adding old sources.
+- **The live notebook's size is derived from `synth_done` meetings above the watermark**, not
+  from `source_count` — that column is a cached mirror an interrupted run can leave NULL or
+  stale, and after a rollover the raw `synth_done` set spans every notebook the committee ever
+  used.
+- **Only *permanent* download failures burn a meeting's retry budget.** When no source PDF can
+  be staged, `summarize_meeting` splits the verdict by `FETCH_KINDS`: a host-hostility kind
+  (`_TRANSIENT_FETCH_KINDS` — circuit_open, challenge_unresolved, blocked_403, …) sets
+  `quality_flag='download_blocked'` and leaves `retry_count` alone, so the meeting is retried on
+  a calm day; anything else sets `'download_failed'` and bumps `retry_count`, so a genuinely
+  dead meeting leaves the worklist after `MAX_RETRIES`. A *mixed* outcome counts as blocked —
+  one transient kind is enough to make "these documents are gone" the wrong conclusion.
+- **`--max-per-run` counts NotebookLM attempts, not meetings tried.** `summarize_meeting`
+  returns `'blocked'` (DB state still `error`) when the host stopped it before anything reached
+  NotebookLM, and `run` doesn't charge those against the budget — otherwise a bad METI day
+  silently halves the round. A round still stops after `_MAX_BLOCKED_ATTEMPTS` blocked meetings
+  so a host-wide outage can't walk the whole backlog; that bound is logged when hit.
 - OCCTO meeting discovery is a **linear probe** (one request per meeting number, 1s delay) — a
   committee with `max_meeting` ≈ 150 means ~150 sequential requests on a cold cache.
 - NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only

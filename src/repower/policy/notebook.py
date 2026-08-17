@@ -47,6 +47,13 @@ class NotebookLMRateLimitError(NotebookLMError):
     than counting it against a per-meeting retry budget."""
 
 
+# A browser-cookie session can lapse *mid-run*, long after ``require_auth`` passed.
+# The CLI reports that as an ordinary exit-1 failure, so without these markers every
+# remaining meeting would be charged a retry for what is really one dead session.
+_AUTH_MARKERS = ("authentication expired", "token fetch failed", "not authenticated",
+                 "invalid_grant", "notebooklm login")
+
+
 def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXIT_OK,)) -> str:
     """Run ``notebooklm <args>`` and return stdout. Raise on disallowed exit codes."""
     cmd = [NOTEBOOKLM_BIN, *args]
@@ -59,10 +66,12 @@ def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXI
         raise NotebookLMError(f"`{NOTEBOOKLM_BIN}` not found on PATH — is notebooklm-py installed?") from e
     except subprocess.TimeoutExpired as e:
         raise NotebookLMTimeout(f"timeout after {timeout}s: notebooklm {' '.join(args)}") from e
+    stderr = proc.stderr.strip()
+    if proc.returncode != EXIT_OK and any(m in stderr.lower() for m in _AUTH_MARKERS):
+        raise NotebookLMAuthError(f"notebooklm {' '.join(args)}: session expired — {stderr[:300]}")
     if proc.returncode == EXIT_TIMEOUT and EXIT_TIMEOUT not in allow_codes:
-        raise NotebookLMTimeout(proc.stderr.strip() or "notebooklm timed out")
+        raise NotebookLMTimeout(stderr or "notebooklm timed out")
     if proc.returncode not in allow_codes:
-        stderr = proc.stderr.strip()
         # The CLI surfaces a server-side rate limit as exit 1 with a "RateLimitError"
         # in stderr (e.g. RPC CREATE_ARTIFACT). Classify it so the pipeline can back
         # off without burning a meeting's retry budget.
@@ -102,7 +111,47 @@ def require_auth(*, timeout: float = 60.0) -> None:
 
 # ── Notebooks ────────────────────────────────────────────────────────────────
 def create_notebook(title: str, *, timeout: float = 120.0) -> str:
-    return _json(["create", title], timeout=timeout)["notebook"]["id"]
+    """Create a notebook and return its id, reclaiming a timed-out create.
+
+    A client-side timeout does not mean the notebook wasn't created: NotebookLM
+    answers the RPC and makes one while we give up waiting, leaving it untracked
+    and counting against the shared account's quota forever. So on timeout, look
+    the notebook up by title and adopt it instead of orphaning it.
+    """
+    try:
+        return _json(["create", title], timeout=timeout)["notebook"]["id"]
+    except NotebookLMTimeout:
+        adopted = _adopt_orphan(title)
+        if adopted is None:
+            raise
+        return adopted
+
+
+def _adopt_orphan(title: str) -> str | None:
+    """The id of an empty, unused notebook named *title*, or None if there is none.
+
+    Only an *empty* match is adopted. A create can only time out before any source
+    is added, so a populated same-titled notebook belongs to some earlier attempt
+    (e.g. one whose ``delete_notebook`` also timed out) and reusing it would
+    duplicate its sources. Any lookup failure — including the expired session that
+    likely caused the timeout — means "don't adopt", so the caller re-raises.
+    """
+    try:
+        matches = sorted((n for n in list_notebooks() if n.get("title") == title),
+                         key=lambda n: n.get("created_at") or "")
+        nb_id = matches[-1].get("id") if matches else None
+        if not nb_id:
+            return None
+        if list_sources(nb_id):
+            logger.warning("notebook %r (%s) already holds sources — not adopting it after a "
+                           "create timeout", title, nb_id)
+            return None
+    except NotebookLMError as e:
+        logger.warning("could not look for an orphaned notebook %r: %s", title, e)
+        return None
+    logger.warning("create %r timed out but the notebook exists server-side — adopting %s "
+                   "rather than orphaning it", title, nb_id)
+    return nb_id
 
 
 def delete_notebook(notebook_id: str, *, timeout: float = 120.0) -> None:

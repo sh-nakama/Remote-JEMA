@@ -30,6 +30,7 @@ from repower.policy.scraper import (
     parse_meti_meeting_urls,
     parse_pdf_links,
 )
+from repower.scrapers.http_cache import ChallengeNotClearedError
 
 # ── Fixtures (small inline HTML) ─────────────────────────────────────────────
 METI_INDEX = """
@@ -262,6 +263,254 @@ def test_select_materials_prefers_minutes_and_caps(monkeypatch):
     assert len(chosen) <= 4
 
 
+# ── PDF download: WAF handling and retry accounting ──────────────────────────
+def _meeting_row(key: str, num: int, db):
+    """Read a meeting's persisted state/flag/retry_count straight from the DB —
+    ``pending_meetings`` deliberately doesn't expose the latter two."""
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db)
+    session = get_session(db)
+    try:
+        m = session.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
+        return {"state": m.state, "quality_flag": m.quality_flag,
+                "retry_count": m.retry_count or 0}
+    finally:
+        session.close()
+
+
+def _stage_meeting(db, key="doji_shijo", num=7):
+    """A committee + one meeting with a single material, ready to summarise."""
+    store.sync_committees(db_path=db)
+    store.record_meeting(
+        key, num,
+        [Material(num, f"{num:03d}_min", f"https://x/{num}_gijiroku.pdf", "議事録", "minutes")],
+        db_path=db,
+    )
+    return committee_by_key(key)
+
+
+def test_download_pdf_goes_through_http_cache_and_classifies_waf_block(monkeypatch, tmp_path):
+    """A 202 challenge that the shared layer could not clear is reported as such,
+    not swallowed into a bare False — the caller needs the kind to decide whether
+    the meeting or the host is at fault."""
+    def _blocked(url, **kwargs):
+        assert kwargs["force"] is True  # no persistent body store → a 304 is useless
+        assert kwargs["allow_curl_fallback"] is True
+        raise ChallengeNotClearedError(url, 4)
+
+    monkeypatch.setattr(pipeline, "conditional_get", _blocked)
+    dest = tmp_path / "x.pdf"
+    assert pipeline._download_pdf("https://www.meti.go.jp/a.pdf", dest) == "challenge_unresolved"
+    assert not dest.exists()
+
+
+def test_download_pdf_writes_body_and_reports_404(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "conditional_get", lambda url, **k: ("ok", b"%PDF-1.4 body"))
+    dest = tmp_path / "ok.pdf"
+    assert pipeline._download_pdf("https://x/a.pdf", dest) == "ok"
+    assert dest.read_bytes() == b"%PDF-1.4 body"
+
+    monkeypatch.setattr(pipeline, "conditional_get", lambda url, **k: ("not_found", None))
+    gone = tmp_path / "gone.pdf"
+    assert pipeline._download_pdf("https://x/b.pdf", gone) == "not_found"
+    assert not gone.exists()
+
+
+def test_blocked_download_does_not_burn_the_retry_budget(monkeypatch, tmp_path):
+    """A hostile host must not push a perfectly good meeting towards abandonment:
+    the same PDFs download fine on a calm day."""
+    db = str(tmp_path / "t.db")
+    committee = _stage_meeting(db)
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "circuit_open")
+
+    # 'blocked', not 'error': nothing reached NotebookLM, so the run's quota
+    # budget must not be charged for it.
+    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "blocked"
+    row = _meeting_row("doji_shijo", 7, db)
+    assert row["quality_flag"] == "download_blocked"
+    assert row["retry_count"] == 0
+    # Still queued, so a later run picks it up again.
+    assert any(m["meeting_num"] == 7 for m in store.pending_meetings("doji_shijo", db_path=db))
+
+
+def test_mixed_failures_count_as_blocked(monkeypatch, tmp_path):
+    """One transient kind is enough to make "these documents are gone" wrong."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 8
+    store.record_meeting(
+        key, num,
+        [Material(num, "008_min", "https://x/8_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "008_h1", "https://x/8_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+    kinds = iter(["not_found", "challenge_unresolved"])
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: next(kinds))
+
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "blocked"
+    row = _meeting_row(key, num, db)
+    assert row["quality_flag"] == "download_blocked"
+    assert row["retry_count"] == 0
+
+
+def test_missing_documents_burn_the_retry_budget_and_eventually_drop_out(monkeypatch, tmp_path):
+    """Documents that are genuinely gone must leave the worklist rather than be
+    re-attempted every run forever."""
+    db = str(tmp_path / "t.db")
+    committee = _stage_meeting(db)
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
+
+    for expected in range(1, store.MAX_RETRIES + 1):
+        assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+        row = _meeting_row("doji_shijo", 7, db)
+        assert row["quality_flag"] == "download_failed"
+        assert row["retry_count"] == expected
+
+    assert not any(m["meeting_num"] == 7
+                   for m in store.pending_meetings("doji_shijo", db_path=db))
+
+
+def test_blocked_meetings_do_not_consume_the_quota_budget(monkeypatch, tmp_path):
+    """``--max-per-run`` guards the NotebookLM quota, and a blocked meeting spends
+    none — so a run keeps looking until it has bought its budget in real work."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    for num in range(1, 7):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    seen: list[int] = []
+
+    def fake_summarize(committee, num, **kwargs):  # newest two are host-blocked
+        seen.append(num)
+        return "blocked" if num >= 5 else "done"
+
+    monkeypatch.setattr(pipeline, "summarize_meeting", fake_summarize)
+
+    summary = pipeline.run([key], max_per_run=2, db_path=db)
+    assert summary["done"] == 2  # the budget still bought two real summaries
+    assert summary["blocked"] == 2
+    assert summary["processed"] == 4  # attempted, not the whole worklist
+    assert seen == [6, 5, 4, 3]  # newest first, stopping once the budget is spent
+
+
+def test_run_stops_when_everything_is_blocked(monkeypatch, tmp_path):
+    """A host-wide outage must not walk the entire backlog looking for work."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(pipeline, "_MAX_BLOCKED_ATTEMPTS", 3)
+    for num in range(1, 21):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    monkeypatch.setattr(pipeline, "summarize_meeting", lambda *a, **k: "blocked")
+
+    summary = pipeline.run([key], max_per_run=5, db_path=db)
+    assert summary["blocked"] == 3  # stopped at the bound, not after all 20
+    assert summary["done"] == 0
+
+
+@pytest.mark.parametrize("exc,reason", [
+    (nb_mod.NotebookLMRateLimitError("quota"), "rate_limited"),
+    (nb_mod.NotebookLMAuthError("session expired"), "auth_expired"),
+    (nb_mod.NotebookLMTimeout("notebooklm timed out"), "timed_out"),
+])
+def test_run_stops_cleanly_when_the_account_or_session_gives_out(monkeypatch, tmp_path,
+                                                                 exc, reason):
+    """A spent quota, a lapsed cookie and an unresponsive NotebookLM are all
+    properties of the account, not of the meeting — the next meeting would fail
+    identically. The run ends with a partial summary rather than a traceback."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    for num in (1, 2, 3):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee",
+                        lambda *a, **k: pytest.fail("synthesis must be skipped after a halt"))
+    seen: list[int] = []
+
+    def fake_summarize(committee, num, **kwargs):
+        seen.append(num)
+        if len(seen) == 2:
+            raise exc
+        return "done"
+
+    monkeypatch.setattr(pipeline, "summarize_meeting", fake_summarize)
+
+    summary = pipeline.run([key], db_path=db)
+    assert summary["stopped_early"] == reason
+    assert summary["rate_limited"] is (reason == "rate_limited")
+    assert summary["done"] == 1  # the meeting that finished before the halt is kept
+    assert seen == [3, 2]  # stopped instead of walking on to 第1回
+
+
+def test_run_stops_when_synthesis_hits_a_create_timeout(monkeypatch, tmp_path):
+    """The crash this guards against: a synthesis rollover's ``create_notebook``
+    timing out on a lapsing session used to kill the whole process."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    store.record_meeting(key, 1, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "summarize_meeting", lambda *a, **k: "done")
+
+    def fake_synthesize(committee, **kwargs):
+        raise nb_mod.NotebookLMTimeout("notebooklm timed out")
+
+    monkeypatch.setattr(pipeline, "synthesize_committee", fake_synthesize)
+
+    summary = pipeline.run([key], db_path=db)
+    assert summary["stopped_early"] == "timed_out"
+    assert summary["done"] == 1
+    assert summary["synthesized"] == 0
+
+
+def test_summarize_meeting_defers_a_timeout_without_burning_a_retry(monkeypatch, tmp_path):
+    """A timeout is the session's fault, not the meeting's: the row goes back to
+    'detected' with its retry budget intact, and the notebook isn't leaked."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    store.record_meeting(key, 3, [Material(
+        meeting_num=3, pdf_id="p1", url="https://example.jp/a.pdf", title="議事録",
+        kind="minutes",
+    )], db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+
+    def fake_download(url, dest, **kwargs):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"pdf")
+        return "ok"
+
+    monkeypatch.setattr(pipeline, "_download_pdf", fake_download)
+    monkeypatch.setattr(nb_mod, "create_notebook", lambda *a, **k: "nb-1")
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "wait_source", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "source_fulltext", lambda *a, **k: {"char_count": 5000})
+    monkeypatch.setattr(nb_mod, "generate_report",
+                        lambda *a, **k: (_ for _ in ()).throw(nb_mod.NotebookLMTimeout("timed out")))
+    deleted: list[str] = []
+    monkeypatch.setattr(nb_mod, "delete_notebook", lambda nb_id, **k: deleted.append(nb_id))
+
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        pipeline.summarize_meeting(committee_by_key(key), 3, db_path=db)
+
+    row = next(m for m in store.pending_meetings(key, db_path=db) if m["id"] == mid)
+    assert row["state"] == "detected"  # back on the worklist, unblemished
+    assert pipeline._bump_retry(key, 3, db) == 1  # i.e. the stored count is still 0
+    assert deleted == ["nb-1"]  # the half-built notebook is not left behind
+
+
 # ── NotebookLM error classification ──────────────────────────────────────────
 class _FakeProc:
     def __init__(self, returncode: int, stderr: str = "", stdout: str = ""):
@@ -283,6 +532,45 @@ def test_run_classifies_rate_limit_vs_generic_error(monkeypatch):
     with pytest.raises(nb_mod.NotebookLMError) as ei:
         nb_mod._run(["create", "x"], timeout=5)
     assert not isinstance(ei.value, nb_mod.NotebookLMRateLimitError)
+
+
+def test_run_classifies_a_lapsed_session_as_an_auth_error(monkeypatch):
+    """``require_auth`` only gates the start of a run; a cookie that lapses an hour
+    in shows up as an ordinary exit-1 failure and must not be mistaken for one."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: _FakeProc(1, "Token fetch failed: Authentication expired or invalid"),
+    )
+    with pytest.raises(nb_mod.NotebookLMAuthError):
+        nb_mod._run(["create", "x"], timeout=5)
+
+
+def test_create_notebook_adopts_the_notebook_a_timed_out_create_left_behind(monkeypatch):
+    """The RPC can land server-side while the client gives up waiting. Adopting
+    the notebook by title keeps it tracked instead of leaking it against the
+    shared account's quota."""
+    monkeypatch.setattr(nb_mod, "_json",
+                        lambda *a, **k: (_ for _ in ()).throw(nb_mod.NotebookLMTimeout("timed out")))
+    monkeypatch.setattr(nb_mod, "list_notebooks", lambda **k: [
+        {"id": "nb-old", "title": "other", "created_at": "2026-08-01"},
+        {"id": "nb-orphan", "title": "x synthesis (第7回〜)", "created_at": "2026-08-16"},
+    ])
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [])
+    assert nb_mod.create_notebook("x synthesis (第7回〜)") == "nb-orphan"
+
+    # A same-titled notebook that already holds sources belongs to an earlier
+    # attempt (its own delete may have timed out) — reusing it would duplicate
+    # them, so the timeout stands and the caller stops the run.
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [{"id": "src-1"}])
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        nb_mod.create_notebook("x synthesis (第7回〜)")
+
+    # The lookup itself failing (the dead session that caused the timeout) is not
+    # a licence to guess.
+    monkeypatch.setattr(nb_mod, "list_notebooks",
+                        lambda **k: (_ for _ in ()).throw(nb_mod.NotebookLMAuthError("expired")))
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        nb_mod.create_notebook("x synthesis (第7回〜)")
 
 
 # ── Detection (network mocked) ───────────────────────────────────────────────
@@ -945,29 +1233,41 @@ def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
 
 
-def test_synthesize_committee_hard_gate_at_source_cap(monkeypatch, tmp_path):
-    """At the NotebookLM source cap, new briefings must NOT be added (they stay
-    unsynthesized, awaiting the archive roll-up) — but the report is still
-    regenerated from the notebook's existing sources."""
+def test_synthesize_committee_rolls_over_at_source_cap(monkeypatch, tmp_path):
+    """At the NotebookLM source cap the synthesis continues in a NEW notebook
+    instead of dropping the briefings: the full notebook is left untouched, the
+    watermark records where it stops, and new meetings land in the fresh one."""
     db = str(tmp_path / "t.db")
     key = "emissions_trading"
     store.sync_committees(db_path=db)
     monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
     monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
 
-    # One new done meeting, and a synthesis notebook already at the cap.
-    store.record_meeting(key, 7, None, db_path=db)
-    mid = store.pending_meetings(key, db_path=db)[0]["id"]
-    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 7")
-    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-9", source_count=2)
+    def _done(num, *, folded=False):
+        store.record_meeting(key, num, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                   if m["meeting_num"] == num)
+        store.update_meeting(mid, db_path=db, state="done",
+                             briefing_md=f"briefing {num}", synth_done=folded)
 
+    # Two briefings already folded in → the live notebook sits at the cap; one
+    # newly-done meeting is waiting to be synthesized.
+    _done(5, folded=True)
+    _done(6, folded=True)
+    _done(7)
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full", source_count=2)
+
+    created: list[str] = []
+    added: list[tuple[str, str]] = []
+    monkeypatch.setattr(nb_mod, "create_notebook",
+                        lambda title: (created.append(title), "nb-new")[1])
     monkeypatch.setattr(nb_mod, "add_source",
-                        lambda *a, **k: pytest.fail("must not add sources past the cap"))
+                        lambda nb_id, path: (added.append((nb_id, path)), "src-1")[1])
     monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
     monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
 
     def fake_download(nb_id, task_id, out):
-        Path(out).write_text("capped synthesis", encoding="utf-8")
+        Path(out).write_text("rolled-over synthesis", encoding="utf-8")
         return True
 
     monkeypatch.setattr(nb_mod, "download_report", fake_download)
@@ -975,10 +1275,49 @@ def test_synthesize_committee_hard_gate_at_source_cap(monkeypatch, tmp_path):
 
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
     row = store.get_committee(key, db_path=db)
-    assert row.running_summary_md == "capped synthesis"  # report still refreshed
-    assert row.source_count == 2  # nothing was added
-    # The skipped meeting stays selectable for a future (post-roll-up) pass.
-    assert [m["meeting_num"] for m in store.meetings_for_synthesis(key, db_path=db)] == [7]
+    assert row.synthesis_notebook_id == "nb-new"  # rolled over
+    assert row.archive_watermark_meeting == 6  # the full notebook stops here
+    assert created == ["emissions_trading synthesis (第7回〜)"]
+    assert [nb_id for nb_id, _ in added] == ["nb-new"]  # nothing added to the full one
+    assert row.source_count == 1  # fresh notebook holds just the new briefing
+    assert row.running_summary_md == "rolled-over synthesis"
+    # The briefing is no longer stranded: it is folded into the new notebook.
+    assert store.meetings_for_synthesis(key, db_path=db) == []
+
+
+def test_synthesis_source_count_survives_a_stale_cached_value(monkeypatch, tmp_path):
+    """``source_count`` is only a cached mirror — an interrupted run can leave it
+    stale, so the live notebook's size is derived from the synth_done meetings
+    above the watermark instead."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
+
+    for num in (5, 6):
+        store.record_meeting(key, num, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                   if m["meeting_num"] == num)
+        store.update_meeting(mid, db_path=db, state="done",
+                             briefing_md=f"briefing {num}", synth_done=True)
+    store.record_meeting(key, 7, None, db_path=db)
+    mid7 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                if m["meeting_num"] == 7)
+    store.update_meeting(mid7, db_path=db, state="done", briefing_md="briefing 7")
+    # NULL cached count, as an interrupted run leaves it — the cap must still bite.
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full", source_count=None)
+
+    monkeypatch.setattr(nb_mod, "create_notebook", lambda title: "nb-new")
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "download_report",
+                        lambda nb_id, task_id, out: Path(out).write_text("s", encoding="utf-8") or True)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+    assert store.get_committee(key, db_path=db).synthesis_notebook_id == "nb-new"
 
 
 # ── Web committee discovery (network injected) ───────────────────────────────

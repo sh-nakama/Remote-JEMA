@@ -92,6 +92,8 @@ _STRINGS: dict[str, dict[str, str]] = {
                                  "ja": "NotebookLMのサインインが失効しているため、即時実行せず要約待ちに登録しました。ローカルで `notebooklm login` 後に要約してください。"},
     "policy_gen_rate_limited":  {"en": "NotebookLM daily quota reached — remaining meetings stay queued; try again later.",
                                  "ja": "NotebookLMの1日の上限に達しました — 残りは待機のまま。後で再実行してください。"},
+    "policy_gen_stopped":       {"en": "NotebookLM stopped responding — this stays queued; try again later.",
+                                 "ja": "NotebookLMが応答しなくなりました — 待機のまま。後で再実行してください。"},
     "policy_gen_requested":     {"en": "queued",                   "ja": "要約待ち"},
     "policy_gen_error":         {"en": "Summarisation failed: {err}","ja": "要約に失敗しました: {err}"},
     "policy_gen_local_note":    {"en": "Summaries are generated on this machine and need `notebooklm login`. On the hosted dashboard, use the queue.",

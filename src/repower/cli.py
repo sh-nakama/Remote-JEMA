@@ -432,6 +432,28 @@ def _require_auth_or_exit() -> None:
         raise typer.Exit(code=2)
 
 
+def _warn_if_stopped_early(summary: dict, retry_hint: str) -> None:
+    """Explain a run that halted on the account/session rather than on its work.
+
+    ``_require_auth_or_exit`` only gates the *start* of a run, so a cookie that
+    lapses an hour in, a spent quota, or a NotebookLM that stops answering all
+    surface here instead — as a plain line, since the pipeline now stops cleanly
+    rather than raising.
+    """
+    reason = summary.get("stopped_early")
+    if reason is None:
+        return
+    if reason == "auth_expired":
+        typer.echo("WARNING: the NotebookLM session expired mid-run - stopped early. Run "
+                   f"`notebooklm login`, then {retry_hint}", err=True)
+    elif reason == "rate_limited":
+        typer.echo(f"WARNING: NotebookLM rate limit hit - stopped early; {retry_hint} "
+                   "(the cap resets over time).", err=True)
+    else:
+        typer.echo(f"WARNING: NotebookLM stopped responding - stopped early; {retry_hint}",
+                   err=True)
+
+
 @policy_app.command("detect")
 def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
@@ -541,11 +563,10 @@ def policy_run(
     summary = run(keys, max_per_run=max_per_run, breadth_first=breadth_first)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
-        f"errored={summary['errored']} synthesized={summary['synthesized']}"
+        f"errored={summary['errored']} blocked={summary.get('blocked', 0)} "
+        f"synthesized={summary['synthesized']}"
     )
-    if summary.get("rate_limited"):
-        typer.echo("WARNING: NotebookLM rate limit hit - run stopped early; remaining meetings "
-                   "stay pending (retry later; the cap resets over time).")
+    _warn_if_stopped_early(summary, "remaining meetings stay pending - retry later.")
 
 
 @policy_app.command("backfill")
@@ -566,9 +587,7 @@ def policy_backfill(
         f"backfilled {committee}: done={summary['done']} errored={summary['errored']} "
         f"synthesized={summary['synthesized']}"
     )
-    if summary.get("rate_limited"):
-        typer.echo("WARNING: NotebookLM rate limit hit - re-run this backfill later to continue "
-                   "(meetings left are still pending; the cap resets over time).")
+    _warn_if_stopped_early(summary, "re-run this backfill later to continue.")
 
 
 @policy_app.command("resume")
@@ -579,8 +598,63 @@ def policy_resume():
     _require_auth_or_exit()
     summary = resume()
     typer.echo(f"resumed: done={summary['done']} errored={summary['errored']}")
-    if summary.get("rate_limited"):
-        typer.echo("WARNING: NotebookLM rate limit hit - re-run `policy resume` later to finish.")
+    _warn_if_stopped_early(summary, "re-run `policy resume` later to finish.")
+
+
+@policy_app.command("notebooks")
+def policy_notebooks():
+    """Audit the NotebookLM account against the DB and list untracked notebooks.
+
+    Read-only on purpose. A notebook the DB doesn't reference is *usually* a leak
+    (a `create_notebook` whose response timed out, or a superseded synthesis), but
+    it can equally be one a human made in the same account — so this reports and
+    never deletes. Check a candidate in the NotebookLM UI first, then remove it
+    there.
+
+    Rollover archives are flagged rather than listed as plain leaks: when a
+    committee's synthesis fills up, the full notebook is deliberately left intact
+    and only ``archive_watermark_meeting`` records that it happened — the
+    archive's id is never stored, so it *looks* untracked. Deleting one destroys
+    older meetings the DB does not duplicate.
+    """
+    import sqlite3
+
+    from repower.config import DB_PATH
+    from repower.policy.notebook import list_notebooks
+
+    _require_auth_or_exit()
+    con = sqlite3.connect(DB_PATH)
+    try:
+        known = {r[0] for r in con.execute(
+            "SELECT synthesis_notebook_id FROM policy_committee "
+            "WHERE synthesis_notebook_id IS NOT NULL")}
+        known |= {r[0] for r in con.execute(
+            "SELECT notebook_id FROM policy_meeting WHERE notebook_id IS NOT NULL")}
+        rolled = {r[0] for r in con.execute(
+            "SELECT committee_key FROM policy_committee "
+            "WHERE archive_watermark_meeting IS NOT NULL")}
+    finally:
+        con.close()
+
+    live = list_notebooks()
+    untracked = [n for n in live if n.get("id") not in known]
+    typer.echo(f"{len(live)} notebook(s) in the account, {len(untracked)} not referenced by the DB")
+    archives = 0
+    for n in sorted(untracked, key=lambda n: n.get("created_at") or ""):
+        title = n.get("title") or ""
+        # "<key> synthesis…" for a committee that has since rolled over is the
+        # superseded notebook the rollover intentionally left behind.
+        note = ""
+        if "synthesis" in title and title.split(" ")[0] in rolled:
+            note = "  <- rollover archive, keep"
+            archives += 1
+        typer.echo(f"  {n.get('created_at', '?'):<26} {n.get('id')}  {title}{note}")
+    if untracked:
+        typer.echo("Untracked != safe to delete - confirm each one in the NotebookLM UI first.")
+    if archives:
+        plural = "archive holds" if archives == 1 else "archives hold"
+        typer.echo(f"{archives} rollover {plural} older meetings - deleting one loses "
+                   "history the DB does not duplicate.")
 
 
 @policy_app.command("status")

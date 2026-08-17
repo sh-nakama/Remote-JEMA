@@ -23,12 +23,10 @@ import tempfile
 import time
 from pathlib import Path
 
-import httpx
-
 from repower.config import NOTEBOOKLM_SOURCE_CAP
 from repower.policy import notebook as nb
 from repower.policy.committees import Committee
-from repower.policy.scraper import _UA, list_materials
+from repower.policy.scraper import list_materials
 from repower.policy.store import (
     clear_generation_request,
     committee_or_config,
@@ -44,6 +42,7 @@ from repower.policy.store import (
     update_committee,
     update_meeting,
 )
+from repower.scrapers.http_cache import classify, conditional_get
 
 logger = logging.getLogger(__name__)
 
@@ -86,39 +85,81 @@ def _scratch() -> Path:
     return base
 
 
-_DL_HEADERS = {"User-Agent": _UA, "Accept-Language": "ja,en;q=0.9", "Accept": "application/pdf,*/*"}
+# Fetch outcomes that mean "this host refused us today", as distinct from "this
+# document is gone". Only the latter should count against a meeting's retry
+# budget: a WAF block is a property of the host at that moment, and the very same
+# PDFs download fine on a calm day. Anything not listed here is treated as a
+# property of the document (see the verdict in ``summarize_meeting``).
+_TRANSIENT_FETCH_KINDS = frozenset({
+    "circuit_open",          # host is cooling down after repeated blocks
+    "challenge_unresolved",  # WAF 202 ladder ran out
+    "blocked_403",           # host refused this client outright
+    "deadline_exceeded",     # ran out of time, not out of document
+    "network_error",         # DNS/TLS/connection/timeout
+    "server_error",          # 5xx/429 that survived the transient retries
+})
+
+# Blocked meetings cost no NotebookLM quota, so they don't spend a slot of
+# ``max_per_run`` — but a run still has to stop looking eventually. This bounds one
+# round to roughly a single sweep of the tracked set (~85 committees) rather than
+# letting a host-wide outage walk a backlog of thousands. Hitting it is logged, not
+# silent.
+_MAX_BLOCKED_ATTEMPTS = 50
+
+# Errors that are properties of the *account or session*, not of the meeting being
+# worked on: the quota is spent, the browser cookie lapsed mid-run, or NotebookLM
+# stopped answering. The next meeting would fail identically, so these halt the run
+# instead of being retried down the worklist. Anything else is the meeting's own
+# problem and stays a per-meeting 'error'.
+_HALTING = (nb.NotebookLMRateLimitError, nb.NotebookLMAuthError, nb.NotebookLMTimeout)
 
 
-def _download_pdf(url: str, dest: Path, *, timeout: float = 180.0) -> bool:
-    """Download a committee PDF to *dest*.
+def _stop_reason(exc: nb.NotebookLMError) -> str:
+    """Which summary flag explains a run halted by *exc*."""
+    if isinstance(exc, nb.NotebookLMRateLimitError):
+        return "rate_limited"
+    if isinstance(exc, nb.NotebookLMAuthError):
+        return "auth_expired"
+    return "timed_out"
 
-    Gov hosts behind Akamai (meti.go.jp) reject/throttle plain Python TLS, so we
-    try httpx with a browser UA first, then fall back to a curl_cffi Chrome
-    impersonation — the same fallback the shared HTTP cache uses for the HTML.
+
+def _download_pdf(url: str, dest: Path, *, db_path: str | None = None,
+                  timeout: float = 180.0) -> str:
+    """Download a committee PDF to *dest*. Returns a :data:`FETCH_KINDS` slug.
+
+    Routed through :mod:`repower.scrapers.http_cache` rather than issuing its own
+    requests, so a PDF gets exactly what the committee index page beside it gets:
+    the host's reused curl_cffi session (replaying a WAF clearance cookie the
+    index fetch already earned, instead of re-earning it per file), the 202
+    challenge ladder, per-host pacing, and the circuit breaker. Fetching these by
+    hand was why a 202 on a PDF used to be a one-shot give-up while the index it
+    came from patiently retried.
+
+    ``force=True``: we keep no persistent copy of the bytes (the scratch dir is
+    wiped per run, and lives under RUNNER_TEMP in CI), so a 304 would leave
+    nothing to ingest. The other policy fetchers force for the same reason.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with httpx.stream("GET", url, follow_redirects=True, timeout=timeout, headers=_DL_HEADERS) as r:
-            if r.status_code == 200:
-                with open(dest, "wb") as f:
-                    for chunk in r.iter_bytes():
-                        f.write(chunk)
-                if dest.stat().st_size > 0:
-                    return True
-    except Exception as e:  # noqa: BLE001
-        logger.debug("httpx pdf download failed %s: %s", url, e)
-
-    try:
-        from curl_cffi import requests as cr  # type: ignore
-
-        r = cr.get(url, impersonate="chrome", timeout=timeout, headers=_DL_HEADERS)
-        if r.status_code == 200 and r.content:
-            dest.write_bytes(r.content)
-            return dest.stat().st_size > 0
-        logger.warning("policy pdf %s -> HTTP %s", url, r.status_code)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("policy pdf download failed %s: %s", url, e)
-    return False
+        status, content = conditional_get(
+            url, db_path=db_path, headers={"Accept-Language": "ja,en;q=0.9"},
+            allow_curl_fallback=True, force=True, timeout=timeout,
+        )
+    except Exception as e:  # noqa: BLE001 — typed by http_cache; classify and report
+        kind = classify(e)
+        logger.warning("policy pdf %s -> %s: %s", url, kind, e)
+        return kind
+    if status == "not_found":
+        logger.warning("policy pdf %s -> 404", url)
+        return "not_found"
+    if status != "ok" or not content:
+        logger.warning("policy pdf %s -> %s with no body", url, status)
+        return "parse_error"
+    dest.write_bytes(content)
+    if dest.stat().st_size <= 0:
+        logger.warning("policy pdf %s -> empty file", url)
+        return "parse_error"
+    return "ok"
 
 
 def _select_materials(materials: list[dict]) -> list[dict]:
@@ -135,7 +176,12 @@ def _select_materials(materials: list[dict]) -> list[dict]:
 
 
 def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> str:
-    """Summarise one meeting end-to-end. Returns the final state ('done'/'error').
+    """Summarise one meeting end-to-end. Returns the final state.
+
+    ``'done'`` | ``'error'`` | ``'generating'`` (left for resume) | ``'blocked'``.
+    ``'blocked'`` means the source host stopped us before anything reached
+    NotebookLM: the DB row is still marked errored, but no quota was spent, so the
+    caller must not charge it against the run's budget.
 
     Looks up the meeting by (committee, number); the caller ensures the row exists.
     """
@@ -161,12 +207,40 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
     try:
         update_meeting(meeting_row, db_path=db_path, state="downloading")
         staged: list[Path] = []
+        failures: list[str] = []
         for m in selected:
             dest = work / f"{m['pdf_id']}.pdf"
-            if _download_pdf(m["url"], dest):
+            kind = _download_pdf(m["url"], dest, db_path=db_path)
+            if kind == "ok":
                 staged.append(dest)
+            else:
+                failures.append(kind)
         if not staged:
-            update_meeting(meeting_row, db_path=db_path, state="error", quality_flag="download_failed")
+            # A host that blocked us is not a meeting beyond saving. Leave the
+            # retry budget alone so the same PDFs are tried again on a calm day —
+            # one mixed verdict counts as blocked, since a single transient kind
+            # is enough to make "these documents are gone" the wrong conclusion.
+            # Documents that are genuinely absent do burn a retry, so a dead
+            # meeting still leaves the worklist after MAX_RETRIES instead of being
+            # re-attempted every run forever.
+            detail = ",".join(sorted(set(failures))) or "no materials"
+            if any(k in _TRANSIENT_FETCH_KINDS for k in failures):
+                logger.warning(
+                    "policy %s 第%d回: no sources downloaded (host blocked: %s) — will retry "
+                    "on a later run without burning a retry",
+                    committee.key, meeting_num, detail,
+                )
+                update_meeting(meeting_row, db_path=db_path, state="error",
+                               quality_flag="download_blocked")
+                # Not "error" to the caller: nothing reached NotebookLM, so this
+                # must not spend a slot of the run's quota budget.
+                return "blocked"
+            else:
+                logger.error("policy %s 第%d回: no sources downloaded (%s)",
+                             committee.key, meeting_num, detail)
+                update_meeting(meeting_row, db_path=db_path, state="error",
+                               quality_flag="download_failed",
+                               retry_count=_bump_retry(committee.key, meeting_num, db_path))
             return "error"
 
         title = f"{committee.key} 第{meeting_num}回"
@@ -230,13 +304,15 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         return "done"
     except nb.NotebookLMAuthError:
         raise  # bubble up — the whole run should stop and alert
-    except nb.NotebookLMRateLimitError:
-        # Transient, account-wide limit — not a bad meeting. Don't burn this
-        # meeting's retry budget or leak its ephemeral notebook: delete it and
+    except (nb.NotebookLMRateLimitError, nb.NotebookLMTimeout) as e:
+        # Account-wide and transient — not a bad meeting. A rate limit says the
+        # quota is spent; a timeout says NotebookLM (or a lapsing session) stopped
+        # answering. Either way the *next* meeting would fail identically, so don't
+        # burn this one's retry budget or leak its ephemeral notebook: delete it and
         # reset to 'detected' so a later run reprocesses cleanly, then bubble up
         # so the whole run stops (continuing would only burn the next meetings).
-        logger.warning("summarize_meeting %s 第%d回 hit a NotebookLM rate limit — deferring",
-                       committee.key, meeting_num)
+        logger.warning("summarize_meeting %s 第%d回 deferred — NotebookLM %s",
+                       committee.key, meeting_num, e)
         if notebook_id:
             try:
                 nb.delete_notebook(notebook_id)
@@ -271,6 +347,33 @@ def _ocr_guard(notebook_id: str, source_ids: list[str]) -> str | None:
     return None
 
 
+def _rollover_synthesis(committee: Committee, watermark: int, *,
+                        db_path: str | None = None) -> str:
+    """Continue a full committee synthesis in a fresh notebook; return its id.
+
+    NotebookLM caps sources per notebook, so a long-running committee eventually
+    fills one (``chousei_jukyu`` reached 50/50 with 44 meetings still queued).
+    Rather than compacting the oldest briefings into an archive source, the
+    synthesis simply moves on: the full notebook is left intact and untouched, and
+    ``archive_watermark_meeting`` records the last meeting it covers so the new
+    notebook starts clean at the next one. The title carries that boundary too, so
+    a committee's notebooks stay tellable apart in the NotebookLM account.
+
+    Only the NotebookLM-generated *synthesis narrative* narrows to the new
+    notebook's meetings. The per-committee running document is regenerated from
+    the briefings held in the DB, so it stays complete across a rollover.
+    """
+    nb_id = nb.create_notebook(f"{committee.key} synthesis (第{watermark + 1}回〜)")
+    update_committee(committee.key, db_path=db_path, synthesis_notebook_id=nb_id,
+                     source_count=0, archive_watermark_meeting=watermark)
+    logger.warning(
+        "policy synthesis for %s hit the %d-source cap — continuing in a new notebook "
+        "(%s); meetings up to 第%d回 stay in the superseded one",
+        committee.key, NOTEBOOKLM_SOURCE_CAP, nb_id, watermark,
+    )
+    return nb_id
+
+
 def synthesize_committee(committee: Committee, *, db_path: str | None = None) -> bool:
     """Refresh the persistent per-committee synthesis notebook + running document.
 
@@ -298,39 +401,28 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         nb_id = nb.create_notebook(f"{committee.key} synthesis")
         update_committee(committee.key, db_path=db_path, synthesis_notebook_id=nb_id)
 
-    # source_count can be NULL after an interrupted run even though sources
-    # landed; the synth_done meetings are the ground truth for what's in the
-    # notebook.
-    src_count = (state.source_count if state and state.source_count else len(folded))
-    if src_count >= int(NOTEBOOKLM_SOURCE_CAP * 0.8):
-        # Roll-up of the oldest summaries into one archive source is deferred; warn
-        # so it can be handled before the cap is actually hit.
-        logger.warning(
-            "policy synthesis for %s near source cap (%d/%d) — archive roll-up needed",
-            committee.key, src_count, NOTEBOOKLM_SOURCE_CAP,
-        )
-    if src_count >= NOTEBOOKLM_SOURCE_CAP and new_meetings:
-        # Hard gate: at the cap, adding would only fail/duplicate on the NotebookLM
-        # side. Leave these meetings unsynthesized (synth_done stays unset, so a
-        # future archive roll-up can fold them in) but still regenerate the report
-        # below so the synthesis keeps refreshing from the existing sources.
-        logger.error(
-            "policy synthesis for %s AT source cap (%d/%d) — %d new briefing(s) NOT "
-            "added; archive roll-up required",
-            committee.key, src_count, NOTEBOOKLM_SOURCE_CAP, len(new_meetings),
-        )
-        new_meetings = []
+    # The synth_done meetings above the watermark are exactly the live notebook's
+    # sources, so count those rather than trusting the cached ``source_count`` —
+    # an interrupted run can leave that NULL or stale, and after a rollover
+    # ``folded`` spans every notebook the committee has ever used.
+    watermark = (state.archive_watermark_meeting if state else None) or 0
+    src_count = len([n for n in folded if n > watermark])
 
     work = _scratch() / committee.key / "synthesis"
     work.mkdir(parents=True, exist_ok=True)
     try:
         added_nums: list[int] = []
         for m in new_meetings:
+            if src_count >= NOTEBOOKLM_SOURCE_CAP:
+                nb_id = _rollover_synthesis(
+                    committee, max([*folded, *added_nums], default=0), db_path=db_path,
+                )
+                src_count = 0
             md = work / f"meeting_{m['meeting_num']:03d}.md"
             md.write_text(m["briefing_md"], encoding="utf-8")
             try:
                 nb.add_source(nb_id, str(md))
-            except nb.NotebookLMRateLimitError:
+            except _HALTING:
                 raise  # bubble up: stop synthesis, leave the rest for a later run
             except nb.NotebookLMError as e:
                 logger.warning("synthesis add_source failed (%s 第%d回): %s",
@@ -380,6 +472,11 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     ``breadth_first`` spreads the run across committees (newest meeting of each, in
     priority order) rather than draining one committee's backlog — see
     ``pending_meetings``. Returns a summary dict.
+
+    Past the opening ``require_auth`` gate, an ``_HALTING`` error stops the run
+    cleanly and names itself in the summary's ``stopped_early`` rather than
+    propagating — so a session that lapses mid-run ends the round with a partial
+    result, not a traceback.
     """
     nb.require_auth()
 
@@ -391,22 +488,41 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         work = [m for m in work if m["committee_key"] in keys]
     if states:
         work = [m for m in work if m["state"] in states]
-    if max_per_run:
-        work = work[:max_per_run]
 
-    done = errored = 0
-    rate_limited = False
+    # ``max_per_run`` exists to guard the NotebookLM daily quota, so it counts the
+    # attempts that actually reach NotebookLM. A meeting whose source host blocked
+    # the downloads never got that far and cost nothing, so it does not spend a
+    # slot — pre-slicing the worklist instead let a bad METI day silently halve the
+    # round (4 of 8 slots produced nothing on the day this was written).
+    done = errored = blocked = charged = 0
+    stop_reason: str | None = None
     touched_committees: set[str] = set()
     for item in work:
+        if max_per_run and charged >= max_per_run:
+            break
+        if blocked >= _MAX_BLOCKED_ATTEMPTS:
+            logger.warning(
+                "policy run: %d meetings blocked by their source hosts before reaching "
+                "NotebookLM — stopping this round early with %d meeting(s) still pending",
+                blocked, len(work) - charged - blocked,
+            )
+            break
         committee = committee_or_config(item["committee_key"], db_path=db_path)
         if committee is None:
             continue
         try:
             state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
-        except nb.NotebookLMRateLimitError:
-            logger.warning("NotebookLM rate limit reached — stopping run; remaining meetings stay pending")
-            rate_limited = True
+        except _HALTING as e:
+            stop_reason = _stop_reason(e)
+            logger.warning("NotebookLM %s — stopping run after %d meeting(s); the rest stay "
+                           "pending: %s", stop_reason, charged, e)
             break
+        if state == "blocked":
+            # Host trouble, not quota. Leave any queued dashboard request in place
+            # so the meeting stays at the front of the next round's worklist.
+            blocked += 1
+            continue
+        charged += 1
         touched_committees.add(item["committee_key"])
         # Clear any queued dashboard request once the meeting has been processed.
         if state in ("done", "error"):
@@ -416,9 +532,10 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         elif state == "error":
             errored += 1
 
-    # Skip synthesis once rate-limited (it also generates a report and would just fail).
+    # Skip synthesis once the account/session is the problem (it also generates a
+    # report and would just fail the same way).
     synthesized = 0
-    if not rate_limited:
+    if stop_reason is None:
         # Beyond committees touched this run, sweep committees whose synthesis
         # stalled mid-run earlier (sources folded in, report never generated) —
         # they may have nothing pending, so they'd never be touched again.
@@ -431,13 +548,17 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             try:
                 if synthesize_committee(committee, db_path=db_path):
                     synthesized += 1
-            except nb.NotebookLMRateLimitError:
-                logger.warning("NotebookLM rate limit during synthesis of %s — deferring", key)
-                rate_limited = True
+            except _HALTING as e:
+                stop_reason = _stop_reason(e)
+                logger.warning("NotebookLM %s during synthesis of %s — deferring: %s",
+                               stop_reason, key, e)
                 break
 
-    return {"processed": len(work), "done": done, "errored": errored,
-            "synthesized": synthesized, "rate_limited": rate_limited}
+    # 'processed' counts meetings actually attempted, not the whole worklist the
+    # run was free to draw from.
+    return {"processed": charged + blocked, "done": done, "errored": errored,
+            "blocked": blocked, "synthesized": synthesized,
+            "rate_limited": stop_reason == "rate_limited", "stopped_early": stop_reason}
 
 
 def resume(*, db_path: str | None = None) -> dict:
