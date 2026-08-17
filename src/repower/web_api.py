@@ -130,6 +130,8 @@ def _stage_progress(idx: int, detail: str | None, detail_ja: str | None) -> None
 
 
 def _run_catchup_job(db_path: str | None) -> None:
+    from collections import Counter
+
     from repower.policy.catalog import discover_committees
     from repower.policy.detect import backfill_dates, backfill_materials, detect
     from repower.policy.schedule import refresh_upcoming
@@ -146,9 +148,18 @@ def _run_catchup_job(db_path: str | None) -> None:
             ),
         )
         new = sum(r["new"] for r in det)
-        _stage_finish(i, "done",
-                      f"{new} new meeting(s)" if new else "no new meetings",
-                      f"新着{new}件" if new else "新着なし")
+        # Surface fetch failures alongside the new-meeting count: a pass where
+        # several committees were blocked otherwise reports "no new meetings",
+        # which reads as "nothing happened" rather than "we could not look".
+        failed = [r for r in det if r.get("status") == "error"]
+        bits = [f"{new} new meeting(s)" if new else "no new meetings"]
+        bits_ja = [f"新着{new}件" if new else "新着なし"]
+        if failed:
+            kinds = Counter(r.get("error_kind") or "error" for r in failed)
+            summary = ", ".join(f"{k} x{n}" for k, n in kinds.most_common())
+            bits.append(f"{len(failed)} failed ({summary})")
+            bits_ja.append(f"取得失敗{len(failed)}件")
+        _stage_finish(i, "error" if failed else "done", " · ".join(bits), " · ".join(bits_ja))
 
         # 1b) Populate materials for meetings detected without any (e.g. first seen
         #     while the committee page was unavailable) so tracked committees'
@@ -197,6 +208,12 @@ def _run_catchup_job(db_path: str | None) -> None:
             "upcoming": n_up,
             "discovered": n_disc,
             "pending": pending,
+            # Committees whose pages could not be fetched this pass, by cause.
+            # Persisted per committee too — `repower policy doctor` explains each.
+            "fetch_failures": len(failed),
+            "fetch_failure_kinds": dict(
+                Counter(r.get("error_kind") or "error" for r in failed)
+            ),
             "note": "Auth-free refresh done. Run `repower policy run` (or the "
                     "policy-catchup skill) to summarise the pending backlog via NotebookLM.",
         }

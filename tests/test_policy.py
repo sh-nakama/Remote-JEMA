@@ -30,6 +30,7 @@ from repower.policy.scraper import (
     parse_meti_meeting_urls,
     parse_pdf_links,
 )
+from repower.scrapers.http_cache import ChallengeNotClearedError
 
 # ── Fixtures (small inline HTML) ─────────────────────────────────────────────
 METI_INDEX = """
@@ -262,6 +263,254 @@ def test_select_materials_prefers_minutes_and_caps(monkeypatch):
     assert len(chosen) <= 4
 
 
+# ── PDF download: WAF handling and retry accounting ──────────────────────────
+def _meeting_row(key: str, num: int, db):
+    """Read a meeting's persisted state/flag/retry_count straight from the DB —
+    ``pending_meetings`` deliberately doesn't expose the latter two."""
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db)
+    session = get_session(db)
+    try:
+        m = session.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
+        return {"state": m.state, "quality_flag": m.quality_flag,
+                "retry_count": m.retry_count or 0}
+    finally:
+        session.close()
+
+
+def _stage_meeting(db, key="doji_shijo", num=7):
+    """A committee + one meeting with a single material, ready to summarise."""
+    store.sync_committees(db_path=db)
+    store.record_meeting(
+        key, num,
+        [Material(num, f"{num:03d}_min", f"https://x/{num}_gijiroku.pdf", "議事録", "minutes")],
+        db_path=db,
+    )
+    return committee_by_key(key)
+
+
+def test_download_pdf_goes_through_http_cache_and_classifies_waf_block(monkeypatch, tmp_path):
+    """A 202 challenge that the shared layer could not clear is reported as such,
+    not swallowed into a bare False — the caller needs the kind to decide whether
+    the meeting or the host is at fault."""
+    def _blocked(url, **kwargs):
+        assert kwargs["force"] is True  # no persistent body store → a 304 is useless
+        assert kwargs["allow_curl_fallback"] is True
+        raise ChallengeNotClearedError(url, 4)
+
+    monkeypatch.setattr(pipeline, "conditional_get", _blocked)
+    dest = tmp_path / "x.pdf"
+    assert pipeline._download_pdf("https://www.meti.go.jp/a.pdf", dest) == "challenge_unresolved"
+    assert not dest.exists()
+
+
+def test_download_pdf_writes_body_and_reports_404(monkeypatch, tmp_path):
+    monkeypatch.setattr(pipeline, "conditional_get", lambda url, **k: ("ok", b"%PDF-1.4 body"))
+    dest = tmp_path / "ok.pdf"
+    assert pipeline._download_pdf("https://x/a.pdf", dest) == "ok"
+    assert dest.read_bytes() == b"%PDF-1.4 body"
+
+    monkeypatch.setattr(pipeline, "conditional_get", lambda url, **k: ("not_found", None))
+    gone = tmp_path / "gone.pdf"
+    assert pipeline._download_pdf("https://x/b.pdf", gone) == "not_found"
+    assert not gone.exists()
+
+
+def test_blocked_download_does_not_burn_the_retry_budget(monkeypatch, tmp_path):
+    """A hostile host must not push a perfectly good meeting towards abandonment:
+    the same PDFs download fine on a calm day."""
+    db = str(tmp_path / "t.db")
+    committee = _stage_meeting(db)
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "circuit_open")
+
+    # 'blocked', not 'error': nothing reached NotebookLM, so the run's quota
+    # budget must not be charged for it.
+    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "blocked"
+    row = _meeting_row("doji_shijo", 7, db)
+    assert row["quality_flag"] == "download_blocked"
+    assert row["retry_count"] == 0
+    # Still queued, so a later run picks it up again.
+    assert any(m["meeting_num"] == 7 for m in store.pending_meetings("doji_shijo", db_path=db))
+
+
+def test_mixed_failures_count_as_blocked(monkeypatch, tmp_path):
+    """One transient kind is enough to make "these documents are gone" wrong."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 8
+    store.record_meeting(
+        key, num,
+        [Material(num, "008_min", "https://x/8_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "008_h1", "https://x/8_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+    kinds = iter(["not_found", "challenge_unresolved"])
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: next(kinds))
+
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "blocked"
+    row = _meeting_row(key, num, db)
+    assert row["quality_flag"] == "download_blocked"
+    assert row["retry_count"] == 0
+
+
+def test_missing_documents_burn_the_retry_budget_and_eventually_drop_out(monkeypatch, tmp_path):
+    """Documents that are genuinely gone must leave the worklist rather than be
+    re-attempted every run forever."""
+    db = str(tmp_path / "t.db")
+    committee = _stage_meeting(db)
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
+
+    for expected in range(1, store.MAX_RETRIES + 1):
+        assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+        row = _meeting_row("doji_shijo", 7, db)
+        assert row["quality_flag"] == "download_failed"
+        assert row["retry_count"] == expected
+
+    assert not any(m["meeting_num"] == 7
+                   for m in store.pending_meetings("doji_shijo", db_path=db))
+
+
+def test_blocked_meetings_do_not_consume_the_quota_budget(monkeypatch, tmp_path):
+    """``--max-per-run`` guards the NotebookLM quota, and a blocked meeting spends
+    none — so a run keeps looking until it has bought its budget in real work."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    for num in range(1, 7):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    seen: list[int] = []
+
+    def fake_summarize(committee, num, **kwargs):  # newest two are host-blocked
+        seen.append(num)
+        return "blocked" if num >= 5 else "done"
+
+    monkeypatch.setattr(pipeline, "summarize_meeting", fake_summarize)
+
+    summary = pipeline.run([key], max_per_run=2, db_path=db)
+    assert summary["done"] == 2  # the budget still bought two real summaries
+    assert summary["blocked"] == 2
+    assert summary["processed"] == 4  # attempted, not the whole worklist
+    assert seen == [6, 5, 4, 3]  # newest first, stopping once the budget is spent
+
+
+def test_run_stops_when_everything_is_blocked(monkeypatch, tmp_path):
+    """A host-wide outage must not walk the entire backlog looking for work."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(pipeline, "_MAX_BLOCKED_ATTEMPTS", 3)
+    for num in range(1, 21):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    monkeypatch.setattr(pipeline, "summarize_meeting", lambda *a, **k: "blocked")
+
+    summary = pipeline.run([key], max_per_run=5, db_path=db)
+    assert summary["blocked"] == 3  # stopped at the bound, not after all 20
+    assert summary["done"] == 0
+
+
+@pytest.mark.parametrize("exc,reason", [
+    (nb_mod.NotebookLMRateLimitError("quota"), "rate_limited"),
+    (nb_mod.NotebookLMAuthError("session expired"), "auth_expired"),
+    (nb_mod.NotebookLMTimeout("notebooklm timed out"), "timed_out"),
+])
+def test_run_stops_cleanly_when_the_account_or_session_gives_out(monkeypatch, tmp_path,
+                                                                 exc, reason):
+    """A spent quota, a lapsed cookie and an unresponsive NotebookLM are all
+    properties of the account, not of the meeting — the next meeting would fail
+    identically. The run ends with a partial summary rather than a traceback."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    for num in (1, 2, 3):
+        store.record_meeting(key, num, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee",
+                        lambda *a, **k: pytest.fail("synthesis must be skipped after a halt"))
+    seen: list[int] = []
+
+    def fake_summarize(committee, num, **kwargs):
+        seen.append(num)
+        if len(seen) == 2:
+            raise exc
+        return "done"
+
+    monkeypatch.setattr(pipeline, "summarize_meeting", fake_summarize)
+
+    summary = pipeline.run([key], db_path=db)
+    assert summary["stopped_early"] == reason
+    assert summary["rate_limited"] is (reason == "rate_limited")
+    assert summary["done"] == 1  # the meeting that finished before the halt is kept
+    assert seen == [3, 2]  # stopped instead of walking on to 第1回
+
+
+def test_run_stops_when_synthesis_hits_a_create_timeout(monkeypatch, tmp_path):
+    """The crash this guards against: a synthesis rollover's ``create_notebook``
+    timing out on a lapsing session used to kill the whole process."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    store.record_meeting(key, 1, None, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "summarize_meeting", lambda *a, **k: "done")
+
+    def fake_synthesize(committee, **kwargs):
+        raise nb_mod.NotebookLMTimeout("notebooklm timed out")
+
+    monkeypatch.setattr(pipeline, "synthesize_committee", fake_synthesize)
+
+    summary = pipeline.run([key], db_path=db)
+    assert summary["stopped_early"] == "timed_out"
+    assert summary["done"] == 1
+    assert summary["synthesized"] == 0
+
+
+def test_summarize_meeting_defers_a_timeout_without_burning_a_retry(monkeypatch, tmp_path):
+    """A timeout is the session's fault, not the meeting's: the row goes back to
+    'detected' with its retry budget intact, and the notebook isn't leaked."""
+    db = str(tmp_path / "t.db")
+    key = "doji_shijo"
+    store.sync_committees(db_path=db)
+    store.record_meeting(key, 3, [Material(
+        meeting_num=3, pdf_id="p1", url="https://example.jp/a.pdf", title="議事録",
+        kind="minutes",
+    )], db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+
+    def fake_download(url, dest, **kwargs):
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        Path(dest).write_bytes(b"pdf")
+        return "ok"
+
+    monkeypatch.setattr(pipeline, "_download_pdf", fake_download)
+    monkeypatch.setattr(nb_mod, "create_notebook", lambda *a, **k: "nb-1")
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "wait_source", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "source_fulltext", lambda *a, **k: {"char_count": 5000})
+    monkeypatch.setattr(nb_mod, "generate_report",
+                        lambda *a, **k: (_ for _ in ()).throw(nb_mod.NotebookLMTimeout("timed out")))
+    deleted: list[str] = []
+    monkeypatch.setattr(nb_mod, "delete_notebook", lambda nb_id, **k: deleted.append(nb_id))
+
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        pipeline.summarize_meeting(committee_by_key(key), 3, db_path=db)
+
+    row = next(m for m in store.pending_meetings(key, db_path=db) if m["id"] == mid)
+    assert row["state"] == "detected"  # back on the worklist, unblemished
+    assert pipeline._bump_retry(key, 3, db) == 1  # i.e. the stored count is still 0
+    assert deleted == ["nb-1"]  # the half-built notebook is not left behind
+
+
 # ── NotebookLM error classification ──────────────────────────────────────────
 class _FakeProc:
     def __init__(self, returncode: int, stderr: str = "", stdout: str = ""):
@@ -283,6 +532,45 @@ def test_run_classifies_rate_limit_vs_generic_error(monkeypatch):
     with pytest.raises(nb_mod.NotebookLMError) as ei:
         nb_mod._run(["create", "x"], timeout=5)
     assert not isinstance(ei.value, nb_mod.NotebookLMRateLimitError)
+
+
+def test_run_classifies_a_lapsed_session_as_an_auth_error(monkeypatch):
+    """``require_auth`` only gates the start of a run; a cookie that lapses an hour
+    in shows up as an ordinary exit-1 failure and must not be mistaken for one."""
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: _FakeProc(1, "Token fetch failed: Authentication expired or invalid"),
+    )
+    with pytest.raises(nb_mod.NotebookLMAuthError):
+        nb_mod._run(["create", "x"], timeout=5)
+
+
+def test_create_notebook_adopts_the_notebook_a_timed_out_create_left_behind(monkeypatch):
+    """The RPC can land server-side while the client gives up waiting. Adopting
+    the notebook by title keeps it tracked instead of leaking it against the
+    shared account's quota."""
+    monkeypatch.setattr(nb_mod, "_json",
+                        lambda *a, **k: (_ for _ in ()).throw(nb_mod.NotebookLMTimeout("timed out")))
+    monkeypatch.setattr(nb_mod, "list_notebooks", lambda **k: [
+        {"id": "nb-old", "title": "other", "created_at": "2026-08-01"},
+        {"id": "nb-orphan", "title": "x synthesis (第7回〜)", "created_at": "2026-08-16"},
+    ])
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [])
+    assert nb_mod.create_notebook("x synthesis (第7回〜)") == "nb-orphan"
+
+    # A same-titled notebook that already holds sources belongs to an earlier
+    # attempt (its own delete may have timed out) — reusing it would duplicate
+    # them, so the timeout stands and the caller stops the run.
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [{"id": "src-1"}])
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        nb_mod.create_notebook("x synthesis (第7回〜)")
+
+    # The lookup itself failing (the dead session that caused the timeout) is not
+    # a licence to guess.
+    monkeypatch.setattr(nb_mod, "list_notebooks",
+                        lambda **k: (_ for _ in ()).throw(nb_mod.NotebookLMAuthError("expired")))
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        nb_mod.create_notebook("x synthesis (第7回〜)")
 
 
 # ── Detection (network mocked) ───────────────────────────────────────────────
@@ -528,13 +816,277 @@ def test_discover_meetings_carries_meti_index_dates(monkeypatch):
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/genshiryoku/",
         source="METI",
     )
-    monkeypatch.setattr(scraper, "_fetch", lambda url, **kw: ("ok", html))
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", html))
 
     disc = scraper.discover_meetings(committee)
 
     assert disc.status == "ok"
     assert disc.meeting_nums == [49, 48]
     assert disc.dates == {49: datetime.date(2026, 6, 25), 48: datetime.date(2026, 3, 24)}
+
+
+# ── Fetch-failure observability ──────────────────────────────────────────────
+# A committee that cannot be fetched used to leave no trace: no cache row (the
+# error raised before the store), no status on the committee, and — for OCCTO —
+# a silently *truncated* meeting list reported as a clean success.
+
+
+def test_blocked_index_reports_the_cause_instead_of_a_bare_error(monkeypatch):
+    """`discover_meetings` must carry the reason out, not collapse it to "error"."""
+    committee = committee_by_key("system_review")
+    monkeypatch.setattr(
+        scraper, "_fetch_ex",
+        lambda url, **kw: scraper.FetchResult(
+            "error", None, kind="challenge_unresolved", detail="WAF challenge", url=url,
+        ),
+    )
+
+    disc = scraper.discover_meetings(committee)
+
+    assert disc.status == "error"
+    assert disc.error_kind == "challenge_unresolved"
+    assert "WAF" in (disc.error_detail or "")
+    assert disc.error_url
+
+
+def test_occto_probe_aborts_rather_than_truncating_when_blocked(monkeypatch):
+    """The data-corruption case, not just an observability one.
+
+    A blocked probe used to look exactly like a 404, so the scan counted it as a
+    miss, stopped, and returned a meeting list missing everything above the block
+    — which detection then recorded as authoritative. Aborting is the only safe
+    answer: a reported error can be retried, a lost meeting is never noticed.
+    """
+    committee = Committee(
+        key="occto_x", name_ja="X", name_en="X",
+        url="https://www.occto.or.jp/iinkai/x/index.html", source="OCCTO",
+    )
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    # 11 and 12 exist; the host then starts blocking us at 13.
+    monkeypatch.setattr(
+        scraper, "_exists",
+        lambda url: True if url.rsplit("/", 1)[-1] in ("11.html", "12.html") else None,
+    )
+
+    latest, kind = scraper.probe_occto_latest(committee, start_from=10)
+
+    assert latest is None, "a partial scan must not be passed off as the frontier"
+    assert kind == "blocked_403"
+
+
+def test_occto_probe_still_tolerates_a_real_gap(monkeypatch):
+    """The tri-state must not make genuine 404s abort the scan."""
+    committee = Committee(
+        key="occto_y", name_ja="Y", name_en="Y",
+        url="https://www.occto.or.jp/iinkai/y/index.html", source="OCCTO",
+    )
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    present = {"11.html", "13.html"}
+    monkeypatch.setattr(
+        scraper, "_exists", lambda url: url.rsplit("/", 1)[-1] in present,
+    )
+
+    latest, kind = scraper.probe_occto_latest(committee, start_from=10)
+
+    assert kind is None
+    assert latest == 13
+
+
+def test_detect_persists_the_failure_so_it_can_be_diagnosed_later(monkeypatch, tmp_path):
+    """Terminal output is ephemeral; the committee row is what survives a run."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(
+        detect_mod, "discover_meetings",
+        lambda c, **kw: Discovery(
+            status="error", meeting_nums=[],
+            error_kind="blocked_403", error_detail="blocked with status 403",
+            error_url=c.url,
+        ),
+    )
+
+    results = detect_mod.detect(keys=[key], db_path=db)
+
+    assert next(r for r in results if r["key"] == key)["error_kind"] == "blocked_403"
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["last_fetch_status"] == "error"
+    assert row["last_fetch_kind"] == "blocked_403"
+    # Stamped even though it failed: "attempted and failed" must be
+    # distinguishable from "never scheduled".
+    assert row["last_fetch_at"] is not None
+    assert row["consecutive_failures"] == 1
+    assert row["last_ok_at"] is None
+
+
+def test_consecutive_failures_accumulate_then_reset_on_success(tmp_path):
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    for _ in range(3):
+        store.set_committee_fetch_result(
+            key, "error", kind="blocked_403", detail="nope", url="u", db_path=db,
+        )
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["consecutive_failures"] == 3
+
+    store.set_committee_fetch_result(key, "ok", url="u", db_path=db)
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["consecutive_failures"] == 0
+    assert row["last_fetch_kind"] is None
+    assert row["last_ok_at"] is not None
+
+
+# ── Fetch rotation ───────────────────────────────────────────────────────────
+# A sweep only gets a handful of committees past the WAF per host before the
+# circuit opens. With fixed registry order the same few consumed that budget every
+# run and the rest starved permanently.
+
+
+def _keys_in_fetch_order(db):
+    from repower.policy.detect import _select_committees
+
+    return [c.key for c in _select_committees(None, db)]
+
+
+def test_sweep_puts_the_least_recently_succeeded_first(tmp_path):
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    first, second, third = order[0], order[1], order[2]
+
+    # `first` and `second` succeed, so they should drop behind everyone still
+    # carrying no successful fetch at all.
+    store.set_committee_fetch_result(first, "ok", db_path=db)
+    store.set_committee_fetch_result(second, "ok", db_path=db)
+
+    rotated = _keys_in_fetch_order(db)
+
+    assert rotated[0] == third, "a never-succeeded committee must outrank a fresh success"
+    assert rotated.index(first) > rotated.index(third)
+    assert rotated.index(second) > rotated.index(third)
+    # Rotation reorders, it must never drop or duplicate committees.
+    assert sorted(rotated) == sorted(order)
+
+
+def test_rotation_actually_rotates_when_nothing_succeeds(tmp_path):
+    """The property that makes this a rotation rather than a reshuffle.
+
+    A committee that can never succeed keeps `last_ok_at` NULL forever. If only
+    that were consulted it would hold first place on every run and simply move the
+    starvation onto a different victim, so the pass would still only ever touch the
+    same committees. Being *attempted* has to cost it its place.
+    """
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    budget = order[:3]
+
+    # Simulate one pass where the whole budget was spent and every attempt failed.
+    for k in budget:
+        store.set_committee_fetch_result(k, "error", kind="challenge_unresolved", db_path=db)
+
+    nxt = _keys_in_fetch_order(db)
+
+    assert set(nxt[:3]).isdisjoint(budget), (
+        "committees just attempted must not immediately reclaim the budget"
+    )
+    assert nxt[:3] == order[3:6], "the next-starved committees should be up"
+
+
+def test_rotation_covers_every_committee_over_successive_passes(tmp_path):
+    """End-to-end fairness under production semantics.
+
+    Mirrors a real sweep: the first few committees per pass get through, then the
+    circuit opens and *every remaining committee is still stamped* as collateral.
+    That full stamping is what previously made this hard to get right — it means
+    "was attempted" cannot be inferred from having a timestamp, so the rotation has
+    to survive every row moving on every pass.
+    """
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    order = _keys_in_fetch_order(db)
+    total = len(order)
+    budget = 3
+
+    reached: set[str] = set()
+    for _ in range(-(-total // budget)):  # ceil: just enough passes to cover all
+        sweep = _keys_in_fetch_order(db)
+        for i, k in enumerate(sweep):
+            if i < budget:
+                reached.add(k)
+                store.set_committee_fetch_result(k, "ok", db_path=db)
+            else:
+                # Collateral: never actually fetched, but still recorded.
+                store.set_committee_fetch_result(
+                    k, "error", kind="circuit_open", db_path=db,
+                )
+
+    assert reached == set(order), (
+        f"only {len(reached)}/{total} committees were ever reached — starvation"
+    )
+
+
+def test_registry_order_is_unchanged_for_non_sweep_callers(tmp_path):
+    """Rotation is opt-in: listings and the UI must stay in stable registry order,
+    or committees would appear to jump around between page loads."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    before = [c.key for c in store.tracked_committees(db_path=db, sync=False,
+                                                      include_disabled=True)]
+    store.set_committee_fetch_result(before[0], "ok", db_path=db)
+    after = [c.key for c in store.tracked_committees(db_path=db, sync=False,
+                                                     include_disabled=True)]
+
+    assert after == before
+
+
+def test_explicit_keys_keep_the_callers_order(tmp_path):
+    """`--committee a --committee b` is user intent, not a sweep to be reordered."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    keys = _keys_in_fetch_order(db)[:3]
+    store.set_committee_fetch_result(keys[0], "ok", db_path=db)
+
+    from repower.policy.detect import _select_committees
+
+    picked = [c.key for c in _select_committees(list(reversed(keys)), db)]
+
+    assert picked == list(reversed(keys))
+
+
+def test_a_later_failure_preserves_the_last_known_good_time(tmp_path):
+    """`last_ok_at` answers "how long has this been broken?" — an error must not
+    overwrite it, or the answer becomes unrecoverable."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    store.set_committee_fetch_result(key, "ok", url="u", db_path=db)
+    ok_at = next(c for c in store.list_committees(db_path=db) if c["key"] == key)["last_ok_at"]
+    store.set_committee_fetch_result(key, "error", kind="circuit_open", db_path=db)
+
+    row = next(c for c in store.list_committees(db_path=db) if c["key"] == key)
+    assert row["last_ok_at"] == ok_at
+    assert row["last_fetch_status"] == "error"
+
+
+def test_fetch_event_history_is_capped_per_committee(tmp_path):
+    """The log rides the Hugging Face sync, so it must not grow without bound."""
+    db = str(tmp_path / "t.db")
+    key = "system_review"
+    store.sync_committees(db_path=db)
+
+    for i in range(store.FETCH_EVENTS_PER_COMMITTEE + 7):
+        store.set_committee_fetch_result(
+            key, "error", kind="blocked_403", detail=f"attempt {i}", db_path=db,
+        )
+
+    events = store.fetch_events(key, limit=200, db_path=db)
+    assert len(events) == store.FETCH_EVENTS_PER_COMMITTEE
+    # Newest kept, oldest dropped.
+    assert "attempt 26" in (events[0]["detail"] or "")
 
 
 # ── Running document regeneration ────────────────────────────────────────────
@@ -681,29 +1233,41 @@ def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
 
 
-def test_synthesize_committee_hard_gate_at_source_cap(monkeypatch, tmp_path):
-    """At the NotebookLM source cap, new briefings must NOT be added (they stay
-    unsynthesized, awaiting the archive roll-up) — but the report is still
-    regenerated from the notebook's existing sources."""
+def test_synthesize_committee_rolls_over_at_source_cap(monkeypatch, tmp_path):
+    """At the NotebookLM source cap the synthesis continues in a NEW notebook
+    instead of dropping the briefings: the full notebook is left untouched, the
+    watermark records where it stops, and new meetings land in the fresh one."""
     db = str(tmp_path / "t.db")
     key = "emissions_trading"
     store.sync_committees(db_path=db)
     monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
     monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
 
-    # One new done meeting, and a synthesis notebook already at the cap.
-    store.record_meeting(key, 7, None, db_path=db)
-    mid = store.pending_meetings(key, db_path=db)[0]["id"]
-    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 7")
-    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-9", source_count=2)
+    def _done(num, *, folded=False):
+        store.record_meeting(key, num, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                   if m["meeting_num"] == num)
+        store.update_meeting(mid, db_path=db, state="done",
+                             briefing_md=f"briefing {num}", synth_done=folded)
 
+    # Two briefings already folded in → the live notebook sits at the cap; one
+    # newly-done meeting is waiting to be synthesized.
+    _done(5, folded=True)
+    _done(6, folded=True)
+    _done(7)
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full", source_count=2)
+
+    created: list[str] = []
+    added: list[tuple[str, str]] = []
+    monkeypatch.setattr(nb_mod, "create_notebook",
+                        lambda title: (created.append(title), "nb-new")[1])
     monkeypatch.setattr(nb_mod, "add_source",
-                        lambda *a, **k: pytest.fail("must not add sources past the cap"))
+                        lambda nb_id, path: (added.append((nb_id, path)), "src-1")[1])
     monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
     monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
 
     def fake_download(nb_id, task_id, out):
-        Path(out).write_text("capped synthesis", encoding="utf-8")
+        Path(out).write_text("rolled-over synthesis", encoding="utf-8")
         return True
 
     monkeypatch.setattr(nb_mod, "download_report", fake_download)
@@ -711,10 +1275,49 @@ def test_synthesize_committee_hard_gate_at_source_cap(monkeypatch, tmp_path):
 
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
     row = store.get_committee(key, db_path=db)
-    assert row.running_summary_md == "capped synthesis"  # report still refreshed
-    assert row.source_count == 2  # nothing was added
-    # The skipped meeting stays selectable for a future (post-roll-up) pass.
-    assert [m["meeting_num"] for m in store.meetings_for_synthesis(key, db_path=db)] == [7]
+    assert row.synthesis_notebook_id == "nb-new"  # rolled over
+    assert row.archive_watermark_meeting == 6  # the full notebook stops here
+    assert created == ["emissions_trading synthesis (第7回〜)"]
+    assert [nb_id for nb_id, _ in added] == ["nb-new"]  # nothing added to the full one
+    assert row.source_count == 1  # fresh notebook holds just the new briefing
+    assert row.running_summary_md == "rolled-over synthesis"
+    # The briefing is no longer stranded: it is folded into the new notebook.
+    assert store.meetings_for_synthesis(key, db_path=db) == []
+
+
+def test_synthesis_source_count_survives_a_stale_cached_value(monkeypatch, tmp_path):
+    """``source_count`` is only a cached mirror — an interrupted run can leave it
+    stale, so the live notebook's size is derived from the synth_done meetings
+    above the watermark instead."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
+
+    for num in (5, 6):
+        store.record_meeting(key, num, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                   if m["meeting_num"] == num)
+        store.update_meeting(mid, db_path=db, state="done",
+                             briefing_md=f"briefing {num}", synth_done=True)
+    store.record_meeting(key, 7, None, db_path=db)
+    mid7 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                if m["meeting_num"] == 7)
+    store.update_meeting(mid7, db_path=db, state="done", briefing_md="briefing 7")
+    # NULL cached count, as an interrupted run leaves it — the cap must still bite.
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full", source_count=None)
+
+    monkeypatch.setattr(nb_mod, "create_notebook", lambda title: "nb-new")
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "download_report",
+                        lambda nb_id, task_id, out: Path(out).write_text("s", encoding="utf-8") or True)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+    assert store.get_committee(key, db_path=db).synthesis_notebook_id == "nb-new"
 
 
 # ── Web committee discovery (network injected) ───────────────────────────────
@@ -1033,3 +1636,89 @@ def test_generation_request_orders_first(tmp_path):
 
     store.clear_generation_request("santeii", 5, db_path=db)
     assert store.pending_meetings(db_path=db)[0]["committee_key"] == "system_review"
+
+
+# ── Fetch-failure attribution (`policy doctor`) ──────────────────────────────
+def test_collateral_failures_are_grouped_by_host_not_committee():
+    """`circuit_open` means "some *other* committee on this host tripped the
+    breaker" — it is fallout, not a fault. A pass where one host goes hostile
+    produced 32 of these, and counting them as 32 problems hid the 2 that were
+    real. They must be attributed to the host and excluded from the count."""
+    from repower.cli import _COLLATERAL_KINDS, _fetch_host
+
+    assert "circuit_open" in _COLLATERAL_KINDS
+    # The kinds that describe a committee's *own* failure must not be swept in.
+    assert not _COLLATERAL_KINDS & {"not_found", "parse_error", "blocked_403"}
+
+    rows = [
+        {"last_fetch_url": "https://www.meti.go.jp/shingikai/a/index.html", "url": ""},
+        {"last_fetch_url": "https://WWW.METI.GO.JP:443/other.html", "url": ""},
+        {"last_fetch_url": "https://www.egc.meti.go.jp/x.html", "url": ""},
+    ]
+    hosts = [_fetch_host(r) for r in rows]
+    # Case and an explicit default port are the same server — grouping must agree,
+    # or one hostile host reports as two.
+    assert hosts == ["www.meti.go.jp", "www.meti.go.jp", "www.egc.meti.go.jp"]
+
+
+def test_fetch_host_falls_back_to_the_configured_url():
+    """A pass can fail before any request is issued (open circuit), leaving
+    last_fetch_url empty. The committee's homepage still identifies the host, so
+    the row is attributed rather than dumped into an unhelpful '?' bucket."""
+    from repower.cli import _fetch_host
+
+    assert _fetch_host({"last_fetch_url": None, "url": "https://www.meti.go.jp/a.html"}) == (
+        "www.meti.go.jp"
+    )
+    assert _fetch_host({"last_fetch_url": "", "url": ""}) == "?"
+
+
+def test_remedies_do_not_advise_slowing_down():
+    """Measured: 6s spacing got fewer committees through than 1s (1/12 vs 4/43),
+    because METI's WAF is stateful rather than rate-based. Advice to 'slow the
+    pass down' or 'widen the retry delays' is therefore actively wrong, and this
+    pins it so it can't drift back in."""
+    from repower.cli import _FETCH_REMEDIES
+
+    joined = " ".join(_FETCH_REMEDIES.values()).lower()
+    for phrase in ("slow the pass down", "widen _challenge_retry_delays"):
+        assert phrase not in joined
+    assert "circuit_open" in _FETCH_REMEDIES
+    assert "collateral" in _FETCH_REMEDIES["circuit_open"].lower()
+
+
+def test_archived_committees_are_not_reported_as_failing(monkeypatch, capsys):
+    """`doctor`'s own remedy for a retired committee is `policy archive`. Archiving
+    stops it being fetched, so its last recorded failure never changes — reporting
+    it forever would mean following the advice never clears the warning.
+
+    ``list_committees`` is stubbed rather than backed by a temp DB because
+    ``policy_doctor`` resolves its own DB path; the field names used here match the
+    real return shape (verified against the live DB).
+    """
+    import repower.cli as cli_mod
+
+    def _row(key, archived, kind="not_found"):
+        return {
+            "key": key, "committee_key": key, "source": "OCCTO", "enabled": 0,
+            "archived": archived, "url": f"https://www.occto.or.jp/iinkai/{key}/",
+            "last_fetch_status": "error", "last_fetch_kind": kind,
+            "last_fetch_detail": "gone", "last_fetch_url": None,
+            "last_fetch_at": "2026-01-01", "last_ok_at": None, "consecutive_failures": 3,
+        }
+
+    monkeypatch.setattr(store, "sync_committees", lambda *a, **k: None)
+    monkeypatch.setattr(
+        store, "list_committees", lambda *a, **k: [_row("dead_one", 1), _row("live_one", 0)]
+    )
+
+    cli_mod.policy_doctor(failing_only=True, history=False)
+    out = capsys.readouterr().out
+
+    head, _, tail = out.partition("archived committee(s) excluded")
+    assert "live_one" in head, "a non-archived failure must still be reported"
+    assert "dead_one" not in head, "an archived committee must not be listed as failing"
+    assert "1 archived committee(s) excluded" in out
+    assert "dead_one" in tail
+    # Denominator excludes it too, so the ratio doesn't imply a fetch that never happens.
+    assert "1/1 committee(s) need attention" in out

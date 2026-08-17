@@ -882,8 +882,13 @@ def _run_generation(key: str, lang: str, meeting_num: int | None = None) -> None
     except Exception as exc:  # noqa: BLE001
         st.error(T("policy_gen_error", lang, err=str(exc)))
         return
-    if summary.get("rate_limited"):
+    stopped = summary.get("stopped_early")
+    if stopped == "rate_limited":
         st.warning(T("policy_gen_rate_limited", lang))
+    elif stopped == "auth_expired":
+        st.warning(T("policy_auth_stale", lang))
+    elif stopped:
+        st.warning(T("policy_gen_stopped", lang))
     else:
         st.success(T("policy_gen_done", lang, n=summary.get("done", 0)))
     _policy_reset_and_rerun()

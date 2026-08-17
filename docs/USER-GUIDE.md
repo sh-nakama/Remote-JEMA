@@ -259,11 +259,19 @@ Run with the installed console script (`repower …`) from the project root:
 | `repower policy schedule` | Refresh upcoming meetings from the METI calendar (safe if feed is down). |
 | `repower policy materials --committee <key\|all> --limit <n>` | Backfill materials for meetings detected without any. `--limit 0` = unbounded (full heal); omit/`all` = every committee. |
 | `repower policy run` | Run the summarisation pipeline over pending tracked meetings. |
+| `repower policy doctor` | Explain why committees failed to fetch (blocked, WAF challenge, moved page …) and what to do about each. Add `--all` to include healthy ones, `--history` for recent attempts. |
 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
 | `repower web-api` | Start the local backend that powers the interactive frontend. |
 
 ### Known constraints & troubleshooting
 
+- **A committee looks stuck / hasn't updated in ages.** Run `repower policy doctor`.
+  Each detection pass now records per committee whether its pages could be fetched
+  and, if not, why — so a blocked committee is distinguishable from a quiet one.
+  The Deep Dive Committee Explorer shows the same thing as a **FETCH FAILED /
+  取得失敗** badge (hover it for the cause and how long it has been failing).
+  Note this is separate from the "errored" count next to a committee, which counts
+  meetings whose *summarisation* failed rather than pages that could not be reached.
 - **Upcoming list is empty.** The METI committee calendar sometimes serves an
   HTTP-200 "アクセスが集中" overload page instead of the calendar. The tool detects
   this and **skips** the schedule refresh without wiping existing data, so the

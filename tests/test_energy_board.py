@@ -112,8 +112,13 @@ def test_cross_check_persist_false_is_pure(monkeypatch, tmp_path):
 def test_scraper_falls_back_to_energy_board_on_meti_failure(monkeypatch):
     entries = eb.parse_feed(FEED_HTML)
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: entries)
-    # Simulate the direct METI fetch failing.
-    monkeypatch.setattr(scraper, "_fetch", lambda *a, **k: ("error", None))
+    # Simulate the direct METI fetch failing (_fetch delegates to _fetch_ex, so
+    # patching the primitive covers discover_meetings *and* list_materials).
+    monkeypatch.setattr(
+        scraper, "_fetch_ex",
+        lambda *a, **k: scraper.FetchResult("error", None, kind="blocked_403",
+                                            detail="blocked with status 403"),
+    )
     doji = committee_by_key("doji_shijo")
     disc = scraper.discover_meetings(doji)
     assert disc.status == "ok" and disc.meeting_nums == [12]  # recovered via backup

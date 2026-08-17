@@ -332,6 +332,36 @@ export function PolicyDeepDiveScreen() {
   }
   const isArchived = (c: (typeof committees)[number]): boolean =>
     archiveOverrides[c.key] ?? archivedByDefault(c)
+
+  // Why a committee's own pages could not be fetched, as a short bilingual label.
+  // Without this a blocked committee is indistinguishable from a quiet one: it
+  // simply shows no new meetings, which reads as "nothing is happening".
+  const FETCH_KIND_LABEL: Record<string, { en: string; ja: string }> = {
+    blocked_403: { en: 'Blocked by host', ja: 'ホストによる拒否' },
+    challenge_unresolved: { en: 'Bot check not cleared', ja: 'ボット判定を通過できず' },
+    circuit_open: { en: 'Host cooling down', ja: 'ホスト休止中' },
+    deadline_exceeded: { en: 'Timed out', ja: 'タイムアウト' },
+    not_found: { en: 'Page not found (moved?)', ja: 'ページが見つかりません（移転？）' },
+    server_error: { en: 'Server error', ja: 'サーバーエラー' },
+    network_error: { en: 'Network error', ja: 'ネットワークエラー' },
+    unexpected_status: { en: 'Unexpected response', ja: '想定外の応答' },
+    parse_error: { en: 'Page could not be parsed', ja: 'ページを解析できません' },
+  }
+  const fetchIssue = (c: (typeof committees)[number]) => {
+    if (c.fetchStatus !== 'error') return null
+    const lbl = FETCH_KIND_LABEL[c.fetchKind || ''] || { en: 'Fetch failed', ja: '取得失敗' }
+    const n = c.fetchFailures || 0
+    const streak = n > 1 ? (L === 'ja' ? `　${n}回連続` : ` · ${n} runs in a row`) : ''
+    const since = c.lastOkAt
+      ? (L === 'ja' ? `　最終成功 ${String(c.lastOkAt).slice(0, 10)}` : ` · last OK ${String(c.lastOkAt).slice(0, 10)}`)
+      : (L === 'ja' ? '　成功記録なし' : ' · never fetched successfully')
+    return {
+      text: L === 'ja' ? '取得失敗' : 'FETCH FAILED',
+      title: (L === 'ja' ? lbl.ja : lbl.en) + streak + since
+        + (c.fetchDetail ? `\n${c.fetchDetail}` : ''),
+    }
+  }
+
   const mapCom = (c: (typeof committees)[number]) => {
     const on = selCom === c.key
     const following = isFol(c)
@@ -350,6 +380,7 @@ export function PolicyDeepDiveScreen() {
       n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
       next: nx, hasNext: !!c.nextDate,
       following, tracked: c.tracked !== false, isRecent: isRecentCom(c.key),
+      fetchIssue: fetchIssue(c),
       archived,
       archClick: () => setArchived(c.key, !archived),
       s: {
@@ -671,6 +702,9 @@ export function PolicyDeepDiveScreen() {
   : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
           {!c.tracked && (
             <span style={s('font-size:9px;font-weight:700;letter-spacing:.04em;border:1px dashed var(--fnt2);color:var(--mut);border-radius:999px;padding:0 6px;white-space:nowrap;flex-shrink:0')} title={L === 'ja' ? '未追跡 — 会合は「保留」で表示。要約するには「管理」で追跡' : 'Untracked — its meetings show as Pending; Track it in Manage to summarise'}>{L === 'ja' ? '未追跡' : 'UNTRACKED'}</span>
+          )}
+          {c.fetchIssue && (
+            <span style={s('font-size:9px;font-weight:700;letter-spacing:.04em;background:var(--dnBg);color:var(--dn);border-radius:999px;padding:0 6px;white-space:nowrap;flex-shrink:0')} title={c.fetchIssue.title}>{c.fetchIssue.text}</span>
           )}
         </span>
         <span style={s('display:flex;align-items:center;gap:7px;flex-shrink:0')}>
@@ -1121,6 +1155,22 @@ export function PolicyDeepDiveScreen() {
                         <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;border:1px solid var(--bd2);color:var(--tx2);font-feature-settings:'tnum' 1")}>{L === 'ja' ? `第${selCommittee?.lastSynth}回まで統合` : `synthesised thru No. ${selCommittee?.lastSynth}`}</span>
                       )}
                     </div>
+                    {selCommittee && selCommittee.fetchStatus === 'error' && (() => {
+                      const iss = fetchIssue(selCommittee)
+                      return (
+                        <div style={s('margin-top:12px;border:1px solid var(--dn);background:var(--dnBg);border-radius:12px;padding:10px 13px')}>
+                          <div style={s('font-size:12.5px;font-weight:700;color:var(--dn)')}>
+                            {L === 'ja' ? 'このページを取得できませんでした' : 'Could not fetch this committee’s pages'}
+                          </div>
+                          <div style={s('font-size:12px;color:var(--tx2);margin-top:3px;white-space:pre-line')}>{iss?.title}</div>
+                          <div style={s('font-size:11.5px;color:var(--mut);margin-top:5px')}>
+                            {L === 'ja'
+                              ? '会合一覧が古い可能性があります。詳細は `repower policy doctor` を実行してください。'
+                              : 'Its meeting list may be stale. Run `repower policy doctor` for the cause and the fix.'}
+                          </div>
+                        </div>
+                      )
+                    })()}
                     {coHasSynth ? (
                       <>
                         {coSynthEn && (

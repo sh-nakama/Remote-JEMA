@@ -29,7 +29,7 @@ import httpx
 from bs4 import BeautifulSoup
 
 from repower.policy.committees import EGC_ACTIVITY_BASE, Committee
-from repower.scrapers.http_cache import conditional_get, pace_host
+from repower.scrapers.http_cache import classify, conditional_get, pace_host
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +70,20 @@ class Discovery:
     full crawl of the (WAF-throttled) committee pages, which routinely doesn't
     finish and leaves meetings showing a 検出 (detection) date instead. Empty for
     OCCTO, whose JS-rendered index carries no dates.
+
+    ``error_kind``/``error_detail``/``error_url`` say *why* a failure happened.
+    Without them ``status == "error"`` collapses a blocked host, an uncleared WAF
+    challenge, an open circuit breaker and a moved URL into one indistinguishable
+    bucket — each of which needs a different fix. ``error_kind`` is a
+    :data:`repower.scrapers.http_cache.FETCH_KINDS` slug.
     """
 
     status: str
     meeting_nums: list[int] = field(default_factory=list)
     dates: dict[int, datetime.date] = field(default_factory=dict)
+    error_kind: str | None = None
+    error_detail: str | None = None
+    error_url: str | None = None
 
 
 # ── Pure helpers (no network) ────────────────────────────────────────────────
@@ -374,11 +383,30 @@ def _materials_from_links(meeting_num: int, links: list[dict]) -> list[Material]
 
 
 # ── Networked fetch ──────────────────────────────────────────────────────────
-def _fetch(url: str, *, db_path: str | None = None, force: bool = False) -> tuple[str, bytes | None]:
-    """``conditional_get`` wrapper that downgrades exceptions to ``("error", None)``
-    so one bad page doesn't abort a whole detection run."""
+@dataclass
+class FetchResult:
+    """Outcome of one page fetch, keeping the failure *reason* alive.
+
+    ``status`` is the ``conditional_get`` status (``ok`` / ``not_modified`` /
+    ``not_found``) or ``error``. On error, ``kind`` is a
+    :data:`repower.scrapers.http_cache.FETCH_KINDS` slug — the distinction between
+    "the host is blocking us", "the WAF challenge never cleared" and "this page is
+    gone", each of which needs a different remedy.
+    """
+
+    status: str
+    content: bytes | None = None
+    kind: str | None = None
+    detail: str | None = None
+    url: str | None = None
+
+
+def _fetch_ex(url: str, *, db_path: str | None = None, force: bool = False) -> FetchResult:
+    """``conditional_get`` wrapper that captures *why* a page failed instead of
+    discarding it, so one bad page doesn't abort a whole detection run **and**
+    the caller can record what went wrong."""
     try:
-        return conditional_get(
+        status, content = conditional_get(
             url,
             db_path=db_path,
             headers={"Accept-Language": "ja,en;q=0.9"},
@@ -386,14 +414,33 @@ def _fetch(url: str, *, db_path: str | None = None, force: bool = False) -> tupl
             force=force,
             timeout=REQUEST_TIMEOUT,
         )
+        return FetchResult(status, content, url=url)
     except Exception as e:  # noqa: BLE001
-        logger.warning("policy fetch failed %s: %s", url, e)
-        return ("error", None)
+        kind = classify(e)
+        logger.warning("policy fetch failed %s: %s (%s)", url, e, kind)
+        return FetchResult("error", None, kind=kind, detail=str(e)[:300], url=url)
 
 
-def _exists(url: str) -> bool:
+def _fetch(url: str, *, db_path: str | None = None, force: bool = False) -> tuple[str, bytes | None]:
+    """``(status, content)`` view of :func:`_fetch_ex` for callers that only branch
+    on success (``"error"`` on any failure)."""
+    r = _fetch_ex(url, db_path=db_path, force=force)
+    return (r.status, r.content)
+
+
+def _exists(url: str) -> bool | None:
     """Existence check for OCCTO meeting pages (no cache writes, so a later
     ``conditional_get`` of the same URL still gets a parseable 200).
+
+    Returns ``True`` (page exists), ``False`` (definitively absent — a 404), or
+    ``None`` (**indeterminate**: the host blocked us, the challenge never cleared,
+    or the network failed).
+
+    The three-way answer matters. Collapsing ``None`` into ``False`` — as this
+    used to — makes a blocked probe indistinguishable from a genuine 404, so
+    :func:`probe_occto_latest` counts it toward ``PROBE_GAP_TOLERANCE``, stops
+    early, and reports a *silently truncated* meeting list that detection then
+    treats as authoritative. Losing meetings is worse than reporting an error.
 
     Prefer a cheap HEAD; if the host rejects plain Python TLS (some gov sites
     behind Akamai answer 403, as meti.go.jp does), fall back to a curl_cffi
@@ -421,16 +468,24 @@ def _exists(url: str) -> bool:
 
         pace_host(url)
         r = cr.get(url, impersonate="chrome", timeout=REQUEST_TIMEOUT, headers=headers)
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
+        if r.status_code == 404:
+            return False
+        logger.debug("curl_cffi probe inconclusive %s: %s", url, r.status_code)
     except Exception as e:  # noqa: BLE001
         logger.debug("curl_cffi probe failed %s: %s", url, e)
     try:
         pace_host(url)
         r = httpx.get(url, timeout=REQUEST_TIMEOUT, follow_redirects=True, headers=headers)
-        return r.status_code == 200
+        if r.status_code == 200:
+            return True
+        if r.status_code == 404:
+            return False
+        logger.debug("GET probe inconclusive %s: %s", url, r.status_code)
     except Exception as e:  # noqa: BLE001
         logger.debug("GET probe failed %s: %s", url, e)
-        return False
+    return None  # every transport was inconclusive — do not claim "absent"
 
 
 def _occto_base(committee: Committee) -> str:
@@ -438,14 +493,23 @@ def _occto_base(committee: Committee) -> str:
 
 
 def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
-                       max_probes: int | None = None) -> int | None:
+                       max_probes: int | None = None) -> tuple[int | None, str | None]:
     """Find the latest OCCTO meeting by a linear upward-window probe.
+
+    Returns ``(latest, error_kind)``. ``error_kind`` is None when the scan
+    completed normally; otherwise it is ``"blocked_403"`` and ``latest`` must be
+    treated as unusable.
 
     Replaces the reference's binary search, which mis-fires when meeting pages are
     non-contiguous (a missing middle page makes binary search conclude too low).
     Scans upward from ``start_from + 1`` (the last known meeting) and stops after
     ``PROBE_GAP_TOLERANCE`` consecutive misses — tolerating small gaps while
     staying cheap on re-runs (only a few probes past the known frontier).
+
+    An **indeterminate** probe (``_exists`` → None: blocked, challenged, network
+    down) aborts the scan rather than counting as a miss. Counting it would let a
+    blocked host masquerade as the end of the meeting list, truncating the result
+    to something that looks perfectly valid to the caller.
 
     ``max_probes`` optionally bounds the number of page probes (each costs a
     request + a polite ~1s sleep) — used by interactive previews; detection
@@ -461,7 +525,14 @@ def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
     while n <= cap and misses < PROBE_GAP_TOLERANCE:
         if max_probes is not None and probes >= max_probes:
             break
-        if _exists(f"{base}/{n}.html"):
+        found = _exists(f"{base}/{n}.html")
+        if found is None:
+            logger.warning(
+                "policy: OCCTO probe for %s indeterminate at %d.html — aborting scan "
+                "rather than reporting a truncated meeting list", committee.key, n
+            )
+            return (None, "blocked_403")
+        if found:
             latest = n
             misses = 0
         else:
@@ -469,7 +540,7 @@ def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
         n += 1
         probes += 1
         time.sleep(POLITE_DELAY)
-    return latest
+    return (latest, None)
 
 
 # ── Discovery (which meetings exist) ─────────────────────────────────────────
@@ -487,15 +558,27 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
     For METI/EGC the returned :class:`Discovery` also carries the meeting *dates*
     parsed from that same index body, so the caller can persist them without a
     second fetch.
+
+    A failing :class:`Discovery` carries ``error_kind``/``error_detail``/
+    ``error_url`` so the caller can record *which* failure this was — the whole
+    point being that "blocked", "challenge never cleared" and "page moved" need
+    different fixes and used to be indistinguishable.
     """
     if committee.is_occto:
-        latest = probe_occto_latest(committee, start_from=known_latest,
-                                    max_probes=max_probes)
+        latest, probe_err = probe_occto_latest(committee, start_from=known_latest,
+                                               max_probes=max_probes)
+        if probe_err is not None:
+            return Discovery("error", [], error_kind=probe_err,
+                             error_detail="OCCTO meeting probe blocked; meeting list would be truncated",
+                             error_url=_occto_base(committee))
         if latest is None:
-            return Discovery("error", [])
+            return Discovery("error", [], error_kind="not_found",
+                             error_detail="no OCCTO meeting pages found",
+                             error_url=_occto_base(committee))
         return Discovery("ok", list(range(latest, 0, -1)))
 
-    status, content = _fetch(committee.url, db_path=db_path, force=force)
+    res = _fetch_ex(committee.url, db_path=db_path, force=force)
+    status, content = res.status, res.content
     if status == "not_modified":
         return Discovery("unchanged", [])
 
@@ -523,7 +606,16 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
             return Discovery("ok", sorted(nums, reverse=True),
                              _energy_board_dates(committee, db_path=db_path))
 
-    return Discovery("ok", []) if status == "ok" else Discovery("error", [])
+    if status == "ok":
+        # Fetched fine, but no meetings could be parsed out of the body — the page
+        # exists and has changed shape (or genuinely lists nothing yet).
+        return Discovery("ok", [])
+    if status == "not_found":
+        return Discovery("error", [], error_kind="not_found",
+                         error_detail="committee index returned 404 — URL may have moved",
+                         error_url=committee.url)
+    return Discovery("error", [], error_kind=res.kind or "network_error",
+                     error_detail=res.detail, error_url=res.url or committee.url)
 
 
 def _energy_board_nums(committee: Committee, *, db_path: str | None = None) -> list[int]:

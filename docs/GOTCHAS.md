@@ -68,12 +68,48 @@ fixed.
   cooldown). Subsequent calls raise `CircuitOpenError` *without* issuing a request. If a scrape
   reports far fewer requests than expected, check for an open circuit before suspecting the
   parser. One success closes it immediately.
+- **METI's WAF is stateful, not rate-based — going slower makes it worse.** This is the single
+  most counter-intuitive thing in the codebase, and it was measured, twice: at 1s spacing 4 of 43
+  committees got through; after a 5-minute cooldown at 6s spacing, 1 of 12 did. Once the edge
+  flags the client, waiting does not un-flag it; it clears on its own schedule. So:
+  - `_MIN_HOST_INTERVAL` (2.0s) is a **politeness** choice only. Do not "tune" it hoping to
+    appease a WAF, and do not lower it below 1s (there is a test pinning that).
+  - The right response to a hostile host is to **stop asking**, not to ask more gently. Hence
+    `_challenge_exhausted`: the 2+50s challenge ladder is walked at most once per host per
+    healthy period, not once per URL. A sweep used to burn ~165s on three committees to learn
+    one fact; it now spends ~55s once and every later URL on that host gets a single
+    unbacked-off attempt (which still succeeds the moment the WAF relents).
+  - Any success — including a plain 200 that never touched the fallback — clears the flag via
+    `_circuit_record_success`.
+- **`ChallengeNotClearedError.attempts` must reflect the ladder actually walked**, not
+  `len(_CHALLENGE_RETRY_DELAYS) + 1`. It is snapshotted *before* the fallback runs, because the
+  fallback marks the host exhausted on its way out — asking afterwards reports 1 for everyone.
+  This number is surfaced in `last_error_detail` and `policy doctor`, so a constant here makes
+  the diagnostics lie.
+- **`circuit_open` is collateral, not a diagnosis.** One hostile host produces one root failure
+  plus ~35 short-circuited committees. `policy doctor` groups those per host and excludes them
+  from the "needs attention" count (`_COLLATERAL_KINDS`) — otherwise the two committees that are
+  genuinely broken are invisible among the fallout. Keep that distinction when adding kinds.
+- **Detection sweeps committees in rotation** (`tracked_committees(order="rotate")`), least
+  recently *succeeded* first. Fixed registry order meant the small pre-WAF budget was always
+  spent on the same alphabetically-early committees, permanently starving the rest. The
+  tiebreak on `last_fetch_at` matters: every committee is stamped on every pass (including
+  circuit_open collateral), so without it a permanently-failing committee would hold first place
+  forever and merely relocate the starvation.
 - **`_pace_host` claims its slot at the *intended send time* (`now + wait`), not `now`.** That
   is what makes concurrent callers queue rather than all read the same stale timestamp and fire
   together. Preserve this if you touch the pacer — the bug it prevents is invisible in
   single-threaded tests, and `web_api` runs catch-up on a background thread.
 - **Anything issuing its own requests outside `conditional_get` must still call `pace_host`.**
   The OCCTO `_exists` probes do; they run in tight loops against the most bot-sensitive hosts.
+- **Fetching a *file* by hand loses the WAF clearance the index fetch just earned.** The
+  curl_cffi session is cached per host precisely so a cookie bought once is replayed; a
+  hand-rolled `httpx`/`curl_cffi` call opens a fresh connection and re-earns it from zero — and
+  gets no challenge ladder, no pacing and no circuit breaker either. Policy PDF downloads used
+  to do this, so a 202 on a PDF was a one-shot give-up while the index page beside it patiently
+  retried (~half of a catch-up round's meetings lost on a bad METI day). `_download_pdf` now
+  goes through `conditional_get` with `force=True` — forced because we keep no persistent copy
+  of the bytes, so a 304 would leave nothing to ingest.
 - **A faked `time.sleep` in tests must also advance `time.monotonic`.** Otherwise the pacer sees
   no time pass between retries and piles up waits that don't exist in production — an artefact
   of the fake, not a real regression. `_fake_curl_cffi` installs a coherent clock; reuse it.
@@ -197,8 +233,62 @@ fixed.
 - `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
   timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
   paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.
-- The per-committee synthesis notebook approaches `NOTEBOOKLM_SOURCE_CAP` with **no roll-up
-  implemented** — long-lived committees will eventually fail to synthesize `(open — P4)`.
+- **A `create_notebook` timeout does not mean no notebook was created.** NotebookLM answers
+  the RPC and makes one while the client gives up waiting, so a bare `raise` leaks an
+  untracked notebook — the 2026-08-16 crash took the account from 13 to 14 notebooks with
+  nothing in the DB pointing at the extra one, and `policy resume` found nothing to
+  reconcile because the row was never written. `notebook.create_notebook` now looks the
+  notebook up by title on timeout and adopts it. It adopts **only an empty match**: a create
+  can only time out *before* any source is added, so a populated same-titled notebook belongs
+  to some earlier attempt (typically one whose own `delete_notebook` also timed out) and
+  reusing it would duplicate its sources. Any lookup failure — including the expired session
+  that probably caused the timeout — means don't adopt, so the timeout stands.
+  - Adoption only reclaims a notebook the *same* create retries into. Anything already leaked
+    stays leaked, so `repower policy notebooks` diffs the account against the DB. It is
+    **read-only by design**: an untracked notebook is usually a leak, but the shared account
+    also holds notebooks a human made by hand, so nothing here may auto-delete.
+  - **A rollover archive is untracked on purpose and must not be deleted.** The rollover keeps
+    the full notebook and stores only `archive_watermark_meeting` — the archive's *id* is
+    written nowhere, so it is indistinguishable from a leak by id alone. `policy notebooks`
+    flags `<key> synthesis…` for any committee with a watermark set; those hold meetings below
+    the watermark that the synthesis narrative no longer covers. (`chousei_jukyu` rolled over
+    at 第120回 on 2026-08-17 and its 07-03 notebook is exactly this case.)
+- **`require_auth` gates only the *start* of a run.** The browser cookie can lapse an hour in,
+  and the CLI reports that as an ordinary exit-1 failure, not as an auth error — so
+  `notebook._AUTH_MARKERS` sniffs stderr and raises `NotebookLMAuthError`. Without it every
+  remaining meeting is charged a `retry_count` for what is really one dead session.
+- **Rate limit, lapsed session and timeout are one category (`pipeline._HALTING`), not three.**
+  All are properties of the *account*, so the next meeting would fail identically; `run` stops
+  the round and names the cause in the summary's `stopped_early`
+  (`rate_limited` | `auth_expired` | `timed_out`), and `summarize_meeting` resets the row to
+  `detected` without burning a retry. Before this, a mid-run `NotebookLMTimeout` out of
+  `_rollover_synthesis`'s `create_notebook` was uncaught and killed the process with a
+  traceback (exit 1), losing the round's summary. `rate_limited` is kept in the summary dict
+  purely for callers that predate `stopped_early` — new code should read `stopped_early`, and
+  **any new NotebookLM error class that is account-wide belongs in `_HALTING`**, or it will
+  quietly burn the whole worklist's retry budget one meeting at a time.
+- **A full synthesis notebook rolls over to a new one, it does not compact.** At
+  `NOTEBOOKLM_SOURCE_CAP` the committee's synthesis continues in a fresh notebook titled
+  `<key> synthesis (第N回〜)`; the full one is left intact and `archive_watermark_meeting` records
+  the last meeting it covers. So the NotebookLM-generated *synthesis narrative* only spans
+  meetings above the watermark — the running document is regenerated from the DB's briefings and
+  stays complete, so don't "fix" a narrower narrative by re-adding old sources.
+- **The live notebook's size is derived from `synth_done` meetings above the watermark**, not
+  from `source_count` — that column is a cached mirror an interrupted run can leave NULL or
+  stale, and after a rollover the raw `synth_done` set spans every notebook the committee ever
+  used.
+- **Only *permanent* download failures burn a meeting's retry budget.** When no source PDF can
+  be staged, `summarize_meeting` splits the verdict by `FETCH_KINDS`: a host-hostility kind
+  (`_TRANSIENT_FETCH_KINDS` — circuit_open, challenge_unresolved, blocked_403, …) sets
+  `quality_flag='download_blocked'` and leaves `retry_count` alone, so the meeting is retried on
+  a calm day; anything else sets `'download_failed'` and bumps `retry_count`, so a genuinely
+  dead meeting leaves the worklist after `MAX_RETRIES`. A *mixed* outcome counts as blocked —
+  one transient kind is enough to make "these documents are gone" the wrong conclusion.
+- **`--max-per-run` counts NotebookLM attempts, not meetings tried.** `summarize_meeting`
+  returns `'blocked'` (DB state still `error`) when the host stopped it before anything reached
+  NotebookLM, and `run` doesn't charge those against the budget — otherwise a bad METI day
+  silently halves the round. A round still stops after `_MAX_BLOCKED_ATTEMPTS` blocked meetings
+  so a host-wide outage can't walk the whole backlog; that bound is logged when hit.
 - OCCTO meeting discovery is a **linear probe** (one request per meeting number, 1s delay) — a
   committee with `max_meeting` ≈ 150 means ~150 sequential requests on a cold cache.
 - NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
@@ -254,6 +344,29 @@ fixed.
     re-crawl works without un-archiving.
   - Archiving only stops *fetching*: rows, meetings and materials are kept and still render in the
     Deep Dive. It is also a **DB-only change**, so it reaches CI via the HF dataset push, not git.
+- **A failed fetch used to leave no trace anywhere** — `http_cache._store()` is only reached on
+  200/304, so 403 / uncleared-202 / circuit-open / deadline all raise past it and never write a
+  row. The only evidence was the console, and `web-api`'s in-process catch-up narrates straight
+  to a terminal nobody keeps. Every failure path now records: `http_cache` gets
+  `last_error_kind/at/detail`, `policy_committee` gets `last_fetch_*` + `consecutive_failures` +
+  `last_ok_at`, and `policy_fetch_event` keeps the last 20 attempts per committee.
+  `repower policy doctor` groups them by cause and prints the remedy.
+  - `_store_error()` must **never** touch `etag`/`last_modified` (writing NULL on a 403 forces a
+    full re-download of every PDF on the next success) or `last_checked` (`prune_cache` keys on
+    it, so error writes would keep permanently dead URLs alive forever in an HF-synced table).
+  - `set_committee_fetch_result` is called on **every** path including failures. Previously
+    `set_committee_checked` was skipped on error, so a blocked committee's `last_checked` merely
+    went stale — indistinguishable from "never scheduled".
+- **`_exists()` is tri-state (`True`/`False`/`None`) and must stay that way.** It used to
+  `return r.status_code == 200`, so a blocked probe was indistinguishable from a real 404.
+  `probe_occto_latest` counted that toward `PROBE_GAP_TOLERANCE`, stopped early, and returned a
+  **silently truncated** meeting list that `detect()` recorded as `status="ok"`. That is data
+  loss, not just lost observability: a reported error gets retried, a missing meeting never does.
+  An indeterminate probe now aborts the scan and returns `(None, "blocked_403")`.
+- Committee `fetchStatus` in the web payload is **not** the same as the `error` rollup next to it:
+  `error` counts meetings whose *summarisation* failed, `fetchStatus` says whether the
+  committee's own pages could be reached. Both `build_policy_catalog` and `build_policy_snapshot`
+  have their own SELECTs — adding a column to one silently omits it from the other.
 
 ## Streamlit dashboard
 
@@ -283,6 +396,14 @@ fixed.
 - There is **no conftest.py**; DB-setup boilerplate is duplicated ~30× across the policy test
   files `(open — P3)`. Tests are hermetic by monkeypatching the lowest-level I/O boundary
   (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
+  wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
+  I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both
+  seams. The same hazard appears whenever a patched hot path grows a new inner function.
+- The CLI reconfigures `stdout`/`stderr` to UTF-8 at import (`cli.py`). Without it the `═`
+  banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
+  Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
+  the printing.
 - `ruff` runs near-default rules (E4/E7/E9 + F only) and there is no type checker `(open — P2)`
   — a clean lint proves little.
 - Local dev: use `.venv` (Python 3.12) — the PATH `python` is 3.9 without deps.

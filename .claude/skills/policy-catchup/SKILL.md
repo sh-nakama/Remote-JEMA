@@ -70,6 +70,21 @@ breadth-first those few land on the newest meeting of the top committees.
    .venv/Scripts/python.exe -m repower.cli pull-hf
    ```
 
+2b. **Detect + resume** — the same two cheap steps the CI pipeline runs before
+   summarising (`.github/workflows/policy.yml`):
+   ```bash
+   .venv/Scripts/python.exe -m repower.cli policy detect
+   ```
+   No auth, no quota cost; picks up meetings published since the 05:30 JST data cron
+   (usually "0 new"). **Best-effort** — METI's WAF intermittently 403s the scraper, so
+   a failure here is noted and the round continues.
+   ```bash
+   export NOTEBOOKLM_BIN="C:/Users/SehunNakama/.local/bin/notebooklm.exe"
+   .venv/Scripts/python.exe -m repower.cli policy resume
+   ```
+   Finishes meetings left mid-flight by a previous partial run. If it warns about the
+   rate limit, skip step 3 and go straight to the push decision in step 4.
+
 3. **Summarise breadth-first across all tracked committees** in one pass — the newest
    pending meeting of each committee first (priority order), spreading the day's quota
    across committees:
@@ -86,7 +101,8 @@ breadth-first those few land on the newest meeting of the top committees.
    run one `policy run --committee <key> --max-per-run 8` per key instead, sequentially
    (a single committee runs depth-first through its backlog).
 
-4. **Push if anything changed.** Sum the counters across the runs that executed. If
+4. **Push if anything changed.** Sum the counters across the `resume` + `run` calls
+   that executed. If
    `done > 0` OR `synthesized > 0` OR `errored > 0`, persist:
    ```bash
    .venv/Scripts/python.exe -m repower.cli push-hf
