@@ -208,6 +208,19 @@ fixed.
 - `web_api.py` is a **localhost dev helper only**: wildcard CORS, zero auth, DB-mutating +
   subprocess-launching endpoints, no job timeout `(open — P3)`. Never bind it beyond 127.0.0.1
   or reuse it as a "real" backend.
+- **A second `repower web-api` on the same port starts "successfully" and serves nothing.**
+  `ThreadingHTTPServer` inherits `allow_reuse_address = 1`, and on Windows SO_REUSEADDR lets a
+  second process bind a port that is already bound — it logs `listening on http://127.0.0.1:8787`
+  while the *first* process keeps taking every connection. The symptom is a backend edit that
+  appears to have no effect (a new route 404s, a new field is missing from `/api/policy/catalog`)
+  even though the code is right there. Before debugging the code, check who actually owns the
+  port — `Get-NetTCPConnection -LocalPort 8787 -State Listen` — and kill *all* the stale
+  `repower web-api` processes, not just the newest.
+- **Policy exports are three files, not two.** `policy/status.json` (per-meeting pipeline state
+  for the Manage → Status table) is written alongside `committees.json` / `meetings.json`. It is
+  the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/
+  `generating`) and the per-meeting failure message; `meetings.json` collapses those into
+  `pending`. A read-only deployment shows stale meeting status until `repower export-web` reruns.
 - **Capacity-market figures are curated by hand from OCCTO PDFs** (`dashboard/capacity_data.py`)
   — there is no machine-readable feed, so a new auction means re-reading the press release.
   `pdfplumber` is broken in this venv (`cryptography` `_rust` DLL); use PyMuPDF (`fitz`).
@@ -230,6 +243,64 @@ fixed.
 
 ## Policy observer
 
+- **A meeting's PDFs are paced wider than a detection sweep's pages.** The 2s
+  `_MIN_HOST_INTERVAL` floor is sized for one-page-per-host sweeps. A meeting is a dozen
+  files from the *same* host, and METI's edge treats that as a burst: measured
+  2026-08-18, it served six PDFs at 2s spacing and challenged the seventh ~12s in.
+  `pipeline._batch_interval(n)` widens the gap with the batch size (≤4 files → 2s, 6 → 4s,
+  12 → 10s, capped at 12s) via the `http_cache.host_pace()` context manager, which is
+  thread-local and can only ever *slow* requests down. Note this is about **avoidance**
+  (staying under the burst allowance); it does not contradict the recovery finding above —
+  once flagged, waiting still does not un-flag you.
+- **Every path that hands a meeting back to a later run must keep its staged PDFs.**
+  There are three: `blocked` (host refused), `generating` (left for `resume`), and the
+  `_HALTING` reset (rate limit / auth lapse / NotebookLM timeout, which sets the row back
+  to `detected`). The halting one bit hardest — the downloads had all *succeeded*, and
+  wiping them meant the retry re-ran the full burst against a WAF that tolerates a handful
+  of requests, to re-fetch bytes already on disk. If you add another "come back to this
+  later" return, set `keep_scratch = True` with it.
+- **`downloaded` is a claim about disk, and the resume check reads the disk.** When staging
+  is discarded, `store.forget_staged_materials` resets those rows to `detected` so the
+  status table stops reporting documents that are gone. `ingested` rows are left — that
+  did happen, and it stays true after the ephemeral notebook is deleted.
+- **The ingested denominator is `docsPlanned`, not `docs`.** `docs` counts every PDF on the
+  page; only `pipeline.INGESTABLE_KINDS` are ever ingested, so a complete meeting that also
+  lists a 委員名簿 (`kind='other'`) would read as `12/13` and look broken. Report against
+  what the pipeline *meant* to ingest.
+- **Downloaded PDFs survive a blocked meeting; don't "clean up" that scratch dir.**
+  `summarize_meeting` keeps `_scratch()/<key>/<num>/` when it returns `blocked`, and skips
+  any file already on disk on the next attempt. Without it, all-or-nothing staging made a
+  large meeting *unable to ever complete*: each attempt re-requested all 12 files, burned
+  the same ~6-request allowance on bytes it already had, and failed at the same place. The
+  dir is removed on `done` and on the permanent-error path. A meeting that stays blocked
+  forever keeps its partial set (bounded by pending meetings × ~12 PDFs, in the OS temp dir).
+- **Stop requesting at the first hostile response.** `_HOSTILE_FETCH_KINDS`
+  (`challenge_unresolved` / `blocked_403` / `circuit_open`) abandons the rest of the batch.
+  Those requests cannot succeed *and* each one is a strike towards the 3-strike breaker —
+  in the observed failure, running the batch to the end took three strikes and opened the
+  breaker for 300s, taking every other committee on that host down with it. Abandoning at
+  the first takes one.
+- **Source staging is all-or-nothing, deliberately.** It used to proceed whenever *at
+  least one* document downloaded, and the observed result was a meeting where 11 of 12
+  PDFs were blocked mid-download, the one that landed was `配布資料一覧` (the *list* of
+  documents), and NotebookLM produced a fluent summary of a table of contents that was
+  then marked `done` and folded into the committee synthesis. A partial briefing is
+  worse than none because it reads complete. Any download or `add_source` shortfall now
+  aborts the meeting: transient kinds → `blocked` (no retry burned, stays pending),
+  anything else → `error` + a retry, so a permanently-404 handout still leaves the
+  worklist after `MAX_RETRIES` instead of blocking its meeting forever.
+- **`policy_material.status` / `nblm_source_id` are the record of what the briefing
+  actually saw.** They were declared from the start and never written, so every document
+  read `detected` forever and "did this summary see all the papers?" was unanswerable
+  except by reading the summary's own prose. The pipeline writes
+  `downloaded`/`error`/`ingested` per document; the Manage status table shows the
+  `ingested/total` ratio. A `done` meeting showing `0/13` is a briefing to re-run.
+- **The circuit breaker is per-process and in-memory** (`http_cache._circuit_open_until`).
+  `policy run` is a subprocess, so every run starts with a closed breaker — the skip in
+  `run()` only prevents *within-run* thrash, which is the case that hurt: the breaker
+  opened on the third meeting and the rest of the backlog then failed instantly, one
+  meeting per ~15 ms, marking everything blocked. Use the read-only `circuit_cooldown()`
+  for checks; `_circuit_retry_after()` consumes the one probe allowed after a cooldown.
 - `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
   timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
   paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.

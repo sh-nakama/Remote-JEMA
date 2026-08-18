@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -164,8 +165,31 @@ def list_notebooks(*, timeout: float = 60.0) -> list[dict]:
 
 
 # ── Sources ──────────────────────────────────────────────────────────────────
-def add_source(notebook_id: str, path_or_url: str, *, timeout: float = 180.0) -> str:
-    return _json(["source", "add", path_or_url, "--notebook", notebook_id], timeout=timeout)["source"]["id"]
+def add_source(notebook_id: str, path_or_url: str, *, timeout: float = 180.0,
+               attempts: int = 2) -> str:
+    """Upload one source; returns its id. Retries a timed-out upload once.
+
+    An upload is a single long-lived connection, and a dropped one raises
+    NotebookLMTimeout — which the pipeline treats as "the account is the problem,
+    stop the run". For *this* call that verdict is usually wrong: observed
+    2026-08-18, source 1 of 12 uploaded fine and source 2 died mid-write (an
+    asyncio assertion inside the notebooklm CLI as its transport closed). Losing
+    the run there discards every PDF already fetched for the meeting, so one
+    retry is far cheaper than the re-download it prevents. Mirrors the ``--retry``
+    that :func:`generate_report` already relies on for the submit RPC.
+    """
+    last: NotebookLMTimeout | None = None
+    for attempt in range(max(1, attempts)):
+        try:
+            return _json(["source", "add", path_or_url, "--notebook", notebook_id],
+                         timeout=timeout)["source"]["id"]
+        except NotebookLMTimeout as e:
+            last = e
+            if attempt + 1 < max(1, attempts):
+                logger.warning("source add timed out (%s), retrying once: %s",
+                               Path(path_or_url).name, e)
+                time.sleep(5.0)
+    raise last if last else NotebookLMError("source add failed")
 
 
 def wait_source(notebook_id: str, source_id: str, *, timeout: float = 600.0) -> bool:

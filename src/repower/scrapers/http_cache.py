@@ -30,6 +30,7 @@ import logging
 import random
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
@@ -199,17 +200,48 @@ def _host_key(url: str) -> str:
     return host
 
 
+# Per-thread override of the pacing gap, set by :func:`host_pace` for the duration
+# of a batch. Thread-local because ``web_api`` runs jobs on a background thread
+# while other work may be in flight, and a batch's wider gap must not leak into it.
+_pace_override = threading.local()
+
+
+def min_host_interval() -> float:
+    """The politeness floor between same-host requests."""
+    return _MIN_HOST_INTERVAL
+
+
+@contextmanager
+def host_pace(interval: float):
+    """Widen the inter-request gap to *interval* seconds for this block.
+
+    For pulling a *batch* of files from one host. The floor
+    (:data:`_MIN_HOST_INTERVAL`) is a politeness choice sized for one-page-per-host
+    sweeps; a meeting with a dozen PDFs is a different shape of request and, as
+    measured against METI, a burst that the edge starts challenging partway through.
+    Clamped to the floor, so this can only ever slow requests down.
+    """
+    prev = getattr(_pace_override, "interval", None)
+    _pace_override.interval = max(float(interval), _MIN_HOST_INTERVAL)
+    try:
+        yield
+    finally:
+        _pace_override.interval = prev
+
+
 def _pace_host(url: str) -> None:
     """Sleep just long enough that consecutive requests to *url*'s host are at
-    least ``_MIN_HOST_INTERVAL`` seconds apart. A host's first request never
-    waits; distinct hosts don't block each other."""
+    least ``_MIN_HOST_INTERVAL`` seconds apart (or the wider gap a surrounding
+    :func:`host_pace` asked for). A host's first request never waits; distinct
+    hosts don't block each other."""
     host = _host_key(url)
     if not host:
         return
+    gap = getattr(_pace_override, "interval", None) or _MIN_HOST_INTERVAL
     with _pace_lock:
         now = time.monotonic()
         prev = _last_request_at.get(host)
-        wait = 0.0 if prev is None else _MIN_HOST_INTERVAL - (now - prev)
+        wait = 0.0 if prev is None else gap - (now - prev)
         if wait < 0:
             wait = 0.0
         # Claim our slot before releasing: the next caller paces off the moment we
@@ -283,6 +315,26 @@ def _circuit_retry_after(url: str) -> float:
             _circuit_failures[host] = _CIRCUIT_FAILURE_THRESHOLD - 1
             return 0.0
         return remaining
+
+
+def circuit_cooldown(url: str) -> float:
+    """Seconds until *url*'s host is allowed again; ``0.0`` if it is allowed now.
+
+    Read-only, unlike :func:`_circuit_retry_after`, which consumes the single probe
+    allowed once a cooldown elapses. Callers use this to *skip* work aimed at a host
+    that is currently cooling down, rather than queueing thousands of requests that
+    will each fail instantly — the failure mode this was written for was a run
+    walking an entire committee backlog in under a second, marking every meeting
+    blocked, because the breaker had opened on its third meeting.
+    """
+    host = _host_key(url)
+    if not host:
+        return 0.0
+    with _circuit_lock:
+        until = _circuit_open_until.get(host)
+        if until is None:
+            return 0.0
+        return max(0.0, until - time.monotonic())
 
 
 def _circuit_record_failure(url: str) -> None:

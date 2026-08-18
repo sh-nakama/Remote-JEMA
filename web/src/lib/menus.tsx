@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from './app'
 import type { JobRun, JobStage, Screen, WatchEntry } from './app'
 import { getSnapshot, refreshSnapshots, useManifest } from './data'
+import { parseDbTs } from './policyActivity'
 import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s } from './style'
 
@@ -440,6 +441,12 @@ const GUIDE: GuideSection[] = [
         ja: 'エラー: 要約に失敗。数回再試行後に除外されます。' },
       { en: 'A meeting with no materials yet is hidden — materials are what make it appear.',
         ja: '資料がまだ無い会合は非表示です。資料が揃うと表示されます。' },
+      { en: 'Manage → Status: one row per committee (tracked first, most recently updated first) — what the pipeline last did, how long ago, and whether the pages could be fetched. Expand a row for each meeting’s state and the error it failed with.',
+        ja: '「管理」→「状態」: 委員会ごとに1行（追跡中が先頭、更新の新しい順）。直近の処理内容・経過時間・ページ取得の可否を表示。行を展開すると会合ごとの状態と失敗理由が見られます。' },
+      { en: 'One meeting at a time: LATEST summarises a committee’s newest pending meeting and stops; ▶ on a single meeting runs just that one (and can re-run a summarised one); ↑ moves it to the front of the queue.',
+        ja: '1件ずつ処理: 「最新」は最新の未要約会合のみを要約。会合行の▶はその1件だけを実行（要約済みの再実行も可）、↑はキューの先頭へ移動します。' },
+      { en: 'A meeting is only summarised when every one of its documents was fetched — the DOCS IN column shows how many reached the AI. A summarised meeting showing 3/12 saw only part of the papers; re-run it with ▶.',
+        ja: '全ての資料を取得できた場合のみ要約します。「取込資料」列はAIに渡された件数です。要約済みで3/12などの場合は一部しか参照していないため、▶で再実行してください。' },
     ],
   },
   {
@@ -616,6 +623,10 @@ function WatchlistPanel() {
 // ---------------------------------------------------------------------------
 const PANEL_WIDE =
   'width:1120px;max-width:96vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
+// The status table carries nine columns; at the card width they'd all be ellipsis.
+const PANEL_TABLE =
+  'width:1340px;max-width:97vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
+const VIEW_KEY = 'jema-manage-view'
 const I_LIST =
   '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>'
 const I_STAR_O =
@@ -642,9 +653,597 @@ interface CatalogCommittee {
   url?: string
   source_count?: number
   meetings?: number
+  /** Meeting-state rollup (see build_committees_payload). */
+  done?: number
+  pending?: number
+  error?: number
+  /** Fetch health — whether the committee's own pages could be reached at all. */
+  fetchStatus?: string | null
+  fetchKind?: string | null
+  fetchDetail?: string | null
+  fetchAt?: string | null
+  lastOkAt?: string | null
+  fetchFailures?: number
+  /** Newest meeting-level pipeline event: when, which meeting, how it went. */
+  lastUpdateAt?: string | null
+  lastUpdateNum?: number | null
+  lastUpdateState?: string | null
+  lastUpdateFlag?: string | null
+  lastUpdateError?: string | null
 }
 
 const ORGS: Array<'METI' | 'OCCTO' | 'EGC'> = ['METI', 'OCCTO', 'EGC']
+
+// ---------------------------------------------------------------------------
+// Manage → Status table
+// ---------------------------------------------------------------------------
+// The card grid answers "what do we track?". It cannot answer "what happened to
+// this committee last night, and if it failed, why?" — the cards show a tier and
+// a meeting number, and the per-meeting lifecycle isn't there at all. This view
+// is that second question: one row per committee ordered tracked-first then most
+// recently touched, expanding into its individual meetings with the raw pipeline
+// state, the failure message and how long ago each was last written.
+const I_CHEV_R = '<polyline points="9 18 15 12 9 6"></polyline>'
+const I_CHEV_D = '<polyline points="6 9 12 15 18 9"></polyline>'
+// Move-to-front-of-queue: an arrow up to a line.
+const I_TO_TOP =
+  '<line x1="5" y1="4" x2="19" y2="4"></line><line x1="12" y1="20" x2="12" y2="9"></line><polyline points="7 14 12 9 17 14"></polyline>'
+
+/** One meeting's raw pipeline state (GET /api/policy/status · policy/status.json). */
+interface MeetingStatus {
+  com: string
+  num: number
+  date: string | null
+  /** detected | downloading | ingesting | generating | done | error — NOT the
+   *  Deep Dive's 3-way rollup; a meeting stuck mid-pipeline is visible here. */
+  state: string
+  flag: string | null
+  error: string | null
+  errorAt: string | null
+  retries: number
+  requested: boolean
+  minutes: boolean
+  tori: boolean
+  docs: number
+  /** How many of them the pipeline intends to ingest (excludes 委員名簿-style files). */
+  docsPlanned?: number
+  /** How many the last attempt actually got into NotebookLM. */
+  docsIngested?: number
+  genSeconds: number | null
+  updatedAt: string | null
+  detectedAt: string | null
+}
+
+interface StatusPayload {
+  meetings: MeetingStatus[]
+  /** committee_key → meetings trimmed from its list (quiet backlog only). */
+  truncated?: Record<string, number>
+}
+
+const MSTATE: Record<string, { en: string; ja: string; color: string }> = {
+  done: { en: 'Summarised', ja: '要約済み', color: 'var(--up)' },
+  detected: { en: 'Pending', ja: '要約待ち', color: 'var(--mut)' },
+  downloading: { en: 'Downloading', ja: '取得中', color: 'var(--warnTx)' },
+  ingesting: { en: 'Ingesting', ja: '取込中', color: 'var(--warnTx)' },
+  generating: { en: 'Generating', ja: '生成中', color: 'var(--warnTx)' },
+  error: { en: 'Error', ja: 'エラー', color: 'var(--dn)' },
+}
+const mstate = (st?: string | null) =>
+  MSTATE[st || ''] || { en: st || '—', ja: st || '—', color: 'var(--mut)' }
+
+// `quality_flag` slugs. The first three mark a failure; the last two ride a
+// *successful* meeting as a quality warning, so they must not read as errors.
+const FLAG_TEXT: Record<string, [string, string]> = {
+  no_sources: ['no usable source documents were found', '利用可能な資料が見つかりません'],
+  download_failed: ['the source documents could not be downloaded', '資料をダウンロードできません'],
+  download_blocked: ['the source site blocked the download — will be retried', '配信元にブロックされました（再試行されます）'],
+  ocr_suspect: ['sources look image-only — the briefing may be thin', '画像PDFの可能性 — 要約が薄い場合があります'],
+  short_output: ['the briefing came back unusually short', '要約が異常に短いです'],
+}
+
+// http_cache FETCH_KINDS, condensed from `repower policy doctor`'s remedies.
+const FETCH_TEXT: Record<string, [string, string]> = {
+  blocked_403: ['403 — the host refused the client', '403 — 接続を拒否されました'],
+  challenge_unresolved: ['the WAF challenge never cleared — the host clears on its own; re-run later', 'WAFチャレンジ未通過 — 時間をおいて再実行'],
+  circuit_open: ['collateral: another committee on this host tripped the breaker', '波及：同一ホストの別委員会の失敗によるもの'],
+  deadline_exceeded: ['the per-call time budget ran out', '時間予算切れ'],
+  not_found: ['404 — the page moved or was retired; fix the URL or archive it', '404 — ページ移転／終了。URL修正かアーカイブを'],
+  server_error: ['5xx/429 from the host — usually temporary', 'サーバエラー（5xx/429）— 通常は一時的'],
+  network_error: ['DNS/TLS/connection failure', 'DNS/TLS/接続の失敗'],
+  unexpected_status: ['an HTTP status this layer does not handle', '未対応のHTTPステータス'],
+  parse_error: ['fetched fine but unparseable — the page layout likely changed', '取得はできたが解析不可 — ページ構成の変更'],
+}
+
+/** Timestamp for ordering; unparseable/absent sorts last (never first). */
+const tsOf = (v?: string | null): number => {
+  const t = parseDbTs(v)
+  return Number.isNaN(t) ? 0 : t
+}
+/** "3h ago", with the raw stamp kept for the tooltip. */
+const ago = (v: string | null | undefined, ja: boolean): string => {
+  const t = tsOf(v)
+  return t ? relTime(t, ja) : '—'
+}
+
+// Committee row / meeting sub-row column tracks, shared by header and body so
+// the two can't drift.
+const T_COLS = '20px minmax(190px,1.8fr) 108px 84px 78px 104px 112px 92px 108px'
+const M_COLS = '62px 88px 104px 62px minmax(150px,1fr) 66px 58px'
+const TH =
+  "font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);white-space:nowrap;overflow:hidden;font-feature-settings:'tnum' 1"
+const TD = "font-size:11.5px;color:var(--tx2);min-width:0;font-feature-settings:'tnum' 1"
+
+function StateChip({ state, lang }: { state: string; lang: string }) {
+  const m = mstate(state)
+  return (
+    <span style={s('display:inline-flex;align-items:center;gap:5px;min-width:0')}>
+      <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${m.color}`)}></span>
+      <span style={s(`font-size:11.5px;font-weight:600;color:${m.color};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`)}>
+        {lang === 'ja' ? m.ja : m.en}
+      </span>
+    </span>
+  )
+}
+
+/** Expanded committee → its individual meetings, newest activity first. */
+function MeetingRows({
+  meetings,
+  trimmed,
+  lang,
+  committee,
+  interactive,
+  running,
+  onRunMeeting,
+  onQueueMeeting,
+}: {
+  meetings: MeetingStatus[]
+  trimmed: number
+  lang: string
+  committee: string
+  interactive: boolean
+  running: boolean
+  onRunMeeting: (key: string, num: number) => void
+  onQueueMeeting: (key: string, num: number, queued: boolean) => void
+}) {
+  const L = lang
+  const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
+  if (!meetings.length) {
+    return (
+      <div style={s('padding:9px 12px 11px 34px;font-size:11.5px;color:var(--mut)')}>
+        {pick('No meetings recorded yet — run “Check for updates” to detect them.',
+              '会合の記録がありません — 「更新を確認」で検出してください')}
+      </div>
+    )
+  }
+  return (
+    <div style={s('padding:4px 12px 9px 34px;background:var(--bg0)')}>
+      <div style={s(`display:grid;grid-template-columns:${M_COLS};gap:8px;padding:4px 6px`)}>
+        {[
+          pick('MEETING', '会合'),
+          pick('DATE', '開催日'),
+          pick('STATE', '状態'),
+          pick('DOCS IN', '取込資料'),
+          pick('DETAIL / ERROR', '詳細・エラー'),
+          pick('UPDATED', '更新'),
+          '',
+        ].map((h, i) => (
+          <span key={h || `sp${i}`} style={s(TH)}>{h}</span>
+        ))}
+      </div>
+      {meetings.map((m) => {
+        const flag = m.flag ? FLAG_TEXT[m.flag] : null
+        // Prefer the recorded message; fall back to the slug's canned text, then
+        // to a bare "errored" so an old row (logged before last_error existed)
+        // still reads as a failure rather than as blank.
+        const detail =
+          m.error ||
+          (flag ? (L === 'ja' ? flag[1] : flag[0]) : null) ||
+          (m.state === 'error' ? pick('failed — no reason recorded', '失敗（理由の記録なし）') : '')
+        const isErr = m.state === 'error'
+        const warn = !isErr && !!m.flag
+        return (
+          <div
+            key={m.num}
+            style={s(`display:grid;grid-template-columns:${M_COLS};gap:8px;align-items:center;padding:5px 6px;border-top:1px solid var(--dv)`)}
+          >
+            <span style={s('font-size:11.5px;font-weight:600;color:var(--tx)')}>第{m.num}回</span>
+            <span style={s(TD)} title={m.date ? '' : pick('Meeting date not backfilled yet', '開催日は未取得')}>
+              {m.date || '—'}
+            </span>
+            <StateChip state={m.state} lang={L} />
+            {(() => {
+              // A summarised meeting whose notebook saw fewer documents than the
+              // page lists is the failure this column exists for — the briefing
+              // reads complete and isn't.
+              const got = m.docsIngested ?? 0
+              // Denominator is what the pipeline *meant* to ingest, not every PDF on
+              // the page — a meeting listing a 委員名簿 would otherwise read as short
+              // when it was complete.
+              const want = m.docsPlanned ?? m.docs
+              const short = m.state === 'done' && want > 0 && got < want
+              return (
+                <span
+                  style={s(`${TD}${short ? ';color:var(--warnTx);font-weight:600' : ''}`)}
+                  title={
+                    m.state === 'done'
+                      ? pick(
+                          `${got} of ${want} ingestable document(s) reached NotebookLM` +
+                            (m.docs > want ? ` (${m.docs} on the page)` : '') +
+                            (short ? ' — this briefing did not see them all; re-run it' : ''),
+                          `取込対象${want}件中${got}件をNotebookLMに取込` +
+                            (m.docs > want ? `（ページ上は${m.docs}件）` : '') +
+                            (short ? ' — 全資料を参照していません。再実行を推奨' : ''),
+                        )
+                      : pick(`${m.docs} source document(s) detected`, `資料 ${m.docs}件を検出`)
+                  }
+                >
+                  {m.state === 'done' ? `${got}/${want}` : m.docs}
+                  {m.tori ? ' ◆' : ''}
+                </span>
+              )
+            })()}
+            <span
+              style={s(`font-size:11px;color:${isErr ? 'var(--dn)' : warn ? 'var(--warnTx)' : 'var(--mut)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`)}
+              title={detail + (m.retries ? pick(` · ${m.retries} retries`, ` · 再試行 ${m.retries}回`) : '')}
+            >
+              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : '—')}
+              {m.retries ? ` (${m.retries}×)` : ''}
+            </span>
+            <span style={s(TD)} title={m.updatedAt || ''}>{ago(m.updatedAt, L === 'ja')}</span>
+            <span style={s('display:flex;align-items:center;gap:4px')}>
+              {interactive && (
+                <>
+                  <Hoverable
+                    as="span"
+                    base={`display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;flex-shrink:0;border:1px solid var(--bd2);color:${running ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${running ? 'default' : 'pointer'}`}
+                    hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
+                    onClick={() => !running && onRunMeeting(committee, m.num)}
+                    title={
+                      m.state === 'done'
+                        ? pick(
+                            'Re-summarise this meeting now — replaces the existing briefing and re-folds it into the synthesis',
+                            'この会合を再要約 — 既存の要約を置き換え、総括にも反映します',
+                          )
+                        : pick('Summarise this meeting now — nothing else', 'この会合のみを今すぐ要約')
+                    }
+                    aria-label="Summarise this meeting now"
+                  >
+                    {icon(I_PLAY, 10, 'currentColor')}
+                  </Hoverable>
+                  <Hoverable
+                    as="span"
+                    base={`display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;flex-shrink:0;cursor:pointer;${
+                      m.requested
+                        ? 'border:1px solid var(--ac);background:var(--acTint);color:var(--acT)'
+                        : 'border:1px solid var(--bd2);color:var(--mut)'
+                    }`}
+                    hover={m.requested ? 'background:var(--bg1)' : 'border-color:var(--ac);color:var(--acT)'}
+                    onClick={() => onQueueMeeting(committee, m.num, !m.requested)}
+                    title={
+                      m.requested
+                        ? pick('Queued first — click to take it off the front', '最優先キュー中 — クリックで解除')
+                        : pick('Move to the front of the queue — the next run takes it first', 'キューの先頭へ — 次回の要約で最初に処理')
+                    }
+                    aria-label={m.requested ? 'Remove from the front of the queue' : 'Move to the front of the queue'}
+                  >
+                    {icon(I_TO_TOP, 10, 'currentColor')}
+                  </Hoverable>
+                </>
+              )}
+              {!interactive && m.requested && (
+                <span style={s('font-size:10px;font-weight:600;color:var(--acT)')} title={pick('Queued first', '最優先キュー中')}>
+                  {pick('QUEUED', 'キュー')}
+                </span>
+              )}
+            </span>
+          </div>
+        )
+      })}
+      {trimmed > 0 && (
+        <div style={s('padding:6px 6px 0;font-size:10.5px;color:var(--mut);border-top:1px solid var(--dv)')}>
+          {pick(`+${trimmed} older pending meeting(s) not shown`, `他 ${trimmed}件の要約待ち会合は非表示`)}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function StatusTable({
+  rows,
+  status,
+  statusLoading,
+  interactive,
+  running,
+  onTrack,
+  onArchive,
+  onPriority,
+  onRun,
+  onRunLatest,
+  onBackfill,
+  onRunMeeting,
+  onQueueMeeting,
+}: {
+  rows: CatalogCommittee[]
+  status: StatusPayload | null
+  statusLoading: boolean
+  interactive: boolean
+  running: boolean
+  onTrack: (key: string, enabled: boolean) => void
+  onArchive: (key: string, archived: boolean) => void
+  onPriority: (key: string, raw: string, prev: number) => void
+  onRun: (c: CatalogCommittee) => void
+  onRunLatest: (c: CatalogCommittee) => void
+  onBackfill: (c: CatalogCommittee) => void
+  onRunMeeting: (key: string, num: number) => void
+  onQueueMeeting: (key: string, num: number, queued: boolean) => void
+}) {
+  const app = useApp()
+  const L = app.lang
+  const dark = app.theme === 'dark'
+  const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
+  const [open, setOpen] = useState<Record<string, boolean>>({})
+  const orgColor = (org: string) =>
+    org === 'OCCTO' ? (dark ? '#7C9CD1' : '#4A6FA5') : org === 'EGC' ? (dark ? '#C77BD8' : '#7B2D8E') : 'var(--ac)'
+
+  // Meetings grouped per committee, each already newest-activity-first from the
+  // backend. Built once per payload rather than per expanded row.
+  const byCom = useMemo(() => {
+    const out: Record<string, MeetingStatus[]> = {}
+    for (const m of status?.meetings || []) (out[m.com] ||= []).push(m)
+    return out
+  }, [status])
+
+  if (!rows.length) {
+    return <div style={s('padding:26px;text-align:center;color:var(--mut);font-size:13px')}>{pick('No matches', '該当なし')}</div>
+  }
+
+  return (
+    <div style={s('min-width:900px')}>
+      <div
+        style={s(
+          `display:grid;grid-template-columns:${T_COLS};gap:8px;align-items:center;padding:6px 10px;position:sticky;top:0;z-index:2;background:var(--bg1);border-bottom:1px solid var(--bd)`,
+        )}
+      >
+        <span></span>
+        {(
+          [
+            [pick('COMMITTEE', '委員会'), ''],
+            [pick('LAST UPDATE', '最終更新'), pick('The newest meeting the pipeline touched, and how it went', '直近に処理した会合とその結果')],
+            [pick('WHEN', '経過'), pick('How long ago that was', 'その処理からの経過時間')],
+            // NOT "latest meeting": `latest_meeting` is the highest number that
+            // reached `done`, so a committee whose newest meetings all failed
+            // shows an older number here — or none at all.
+            [pick('SUMMARISED TO', '要約済み'), pick('Highest meeting number that reached “done”', '要約が完了した最新の会合番号')],
+            [pick('DONE / PEND / ERR', '完了・待ち・失敗'), pick('Meetings summarised / awaiting summary / errored', '要約済み・要約待ち・失敗した会合数')],
+            [pick('FETCH', '取得'), pick('Whether the committee’s own pages could be reached on the last pass', '前回パスで委員会ページを取得できたか')],
+            [pick('TRACK', '追跡'), pick('Tracked committees are summarised, lowest queue number first', '追跡中の委員会を#の小さい順に要約')],
+            [pick('ACTIONS', '操作'), ''],
+          ] as const
+        ).map(([h, tip]) => (
+          <span key={h} style={s(TH)} title={tip}>{h}</span>
+        ))}
+      </div>
+
+      {rows.map((c) => {
+        const expanded = !!open[c.key]
+        const meetings = byCom[c.key] || []
+        const trimmed = status?.truncated?.[c.key] || 0
+        const fetchErr = c.fetchStatus === 'error'
+        const fk = c.fetchKind ? FETCH_TEXT[c.fetchKind] : null
+        const fetchTip = [
+          c.fetchKind || c.fetchStatus || pick('never fetched', '未取得'),
+          fk ? (L === 'ja' ? fk[1] : fk[0]) : null,
+          c.fetchDetail,
+          c.fetchAt ? pick(`last try ${c.fetchAt}`, `最終試行 ${c.fetchAt}`) : null,
+          c.lastOkAt
+            ? pick(`last success ${c.lastOkAt}`, `最終成功 ${c.lastOkAt}`)
+            : pick('never fetched successfully', '成功した取得なし'),
+          c.fetchFailures ? pick(`${c.fetchFailures} consecutive failures`, `連続失敗 ${c.fetchFailures}回`) : null,
+        ]
+          .filter(Boolean)
+          .join('\n')
+        // What the pipeline last did here: the newest meeting event, or — when a
+        // committee has no meetings at all — why it has none (a dead fetch is the
+        // usual answer, and saying "no meetings" alone would hide that).
+        const lastErr = c.lastUpdateError || (c.lastUpdateFlag ? (FLAG_TEXT[c.lastUpdateFlag] || [])[L === 'ja' ? 1 : 0] : null)
+        return (
+          <div key={c.key} style={s('border-bottom:1px solid var(--dv)')}>
+            <Hoverable
+              base={`display:grid;grid-template-columns:${T_COLS};gap:8px;align-items:center;padding:7px 10px;cursor:pointer`}
+              hover="background:var(--bg2)"
+              onClick={() => setOpen((o) => ({ ...o, [c.key]: !o[c.key] }))}
+              aria-expanded={expanded}
+              title={pick('Click to show this committee’s individual meetings', 'クリックで会合ごとの状態を表示')}
+            >
+              <span style={s('display:flex;color:var(--mut)')}>{icon(expanded ? I_CHEV_D : I_CHEV_R, 13, 'currentColor')}</span>
+
+              <div style={s('min-width:0')}>
+                <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
+                  <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${orgColor(c.org)}`)}></span>
+                  <span style={s('font-size:12.5px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>
+                    {L === 'ja' ? c.ja : c.en}
+                  </span>
+                  {c.archived && (
+                    <span style={s('font-size:9px;font-weight:700;color:var(--warnTx);background:var(--warnBg);border-radius:5px;padding:0 5px;flex-shrink:0')}>
+                      {pick('ARCHIVED', 'アーカイブ')}
+                    </span>
+                  )}
+                </div>
+                <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>
+                  {c.key} · {c.org}
+                </div>
+              </div>
+
+              <div style={s('min-width:0')}>
+                {c.lastUpdateAt ? (
+                  <>
+                    <StateChip state={c.lastUpdateState || ''} lang={L} />
+                    <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}
+                         title={lastErr || ''}>
+                      {c.lastUpdateNum ? `第${c.lastUpdateNum}回` : ''}
+                      {lastErr ? ` · ${lastErr}` : ''}
+                    </div>
+                  </>
+                ) : (
+                  <span style={s('font-size:11.5px;color:var(--mut)')}>{pick('never run', '実行なし')}</span>
+                )}
+              </div>
+
+              <span style={s(TD)} title={c.lastUpdateAt || pick('no meeting has been processed yet', 'まだ処理された会合はありません')}>
+                {ago(c.lastUpdateAt, L === 'ja')}
+              </span>
+
+              <span style={s(TD)}>{c.last || '—'}</span>
+
+              <span style={s(TD)} title={pick(
+                `${c.done || 0} summarised · ${c.pending || 0} pending · ${c.error || 0} errored`,
+                `要約済み ${c.done || 0} · 要約待ち ${c.pending || 0} · 失敗 ${c.error || 0}`,
+              )}>
+                <span style={s('color:var(--up);font-weight:600')}>{c.done || 0}</span>
+                <span style={s('color:var(--fnt3)')}> / </span>
+                <span>{c.pending || 0}</span>
+                <span style={s('color:var(--fnt3)')}> / </span>
+                <span style={s(`font-weight:600;color:${c.error ? 'var(--dn)' : 'var(--mut)'}`)}>{c.error || 0}</span>
+              </span>
+
+              <span
+                style={s(
+                  `font-size:10.5px;font-weight:600;border-radius:999px;padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;justify-self:start;max-width:100%;${
+                    fetchErr
+                      ? 'background:var(--dnBg);color:var(--dn)'
+                      : c.fetchStatus
+                        ? 'background:var(--upBg);color:var(--up)'
+                        : 'border:1px solid var(--bd2);color:var(--mut)'
+                  }`,
+                )}
+                title={fetchTip}
+              >
+                {fetchErr
+                  ? `${c.fetchKind || 'error'}${c.fetchFailures ? ` ×${c.fetchFailures}` : ''}`
+                  : c.fetchStatus || pick('none', '未取得')}
+              </span>
+
+              <span
+                style={s('display:flex;align-items:center;gap:5px;min-width:0')}
+                onClick={(e) => e.stopPropagation()}
+              >
+                {interactive ? (
+                  <Hoverable
+                    as="span"
+                    base={`font-size:10.5px;font-weight:600;border-radius:999px;padding:2px 9px;cursor:pointer;white-space:nowrap;${
+                      c.tracked ? 'background:var(--acBadge);color:#FFFFFF' : 'border:1px solid var(--bd2);color:var(--acT)'
+                    }`}
+                    hover={c.tracked ? 'background:var(--dn)' : 'border-color:var(--ac);background:var(--acTint)'}
+                    onClick={() => onTrack(c.key, !c.tracked)}
+                    title={c.tracked ? pick('Click to untrack', 'クリックで追跡解除') : pick('Click to track', 'クリックで追跡')}
+                  >
+                    {c.tracked ? pick('ON', '追跡') : pick('OFF', '未追跡')}
+                  </Hoverable>
+                ) : (
+                  <span style={s(`font-size:10.5px;font-weight:600;color:${c.tracked ? 'var(--up)' : 'var(--mut)'}`)}>
+                    {c.tracked ? pick('ON', '追跡') : pick('OFF', '未追跡')}
+                  </span>
+                )}
+                {c.tracked &&
+                  (interactive ? (
+                    <input
+                      type="number"
+                      min={1}
+                      defaultValue={c.priority ?? 100}
+                      onBlur={(e) => onPriority(c.key, e.currentTarget.value, c.priority ?? 100)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur()
+                      }}
+                      title={pick('Queue priority — lower is summarised first', 'キュー優先度 — 小さいほど先に処理')}
+                      style={s("width:40px;font-family:inherit;font-size:11px;font-weight:600;text-align:center;color:var(--tx);background:var(--bg0);border:1px solid var(--bd2);border-radius:7px;padding:2px 3px;font-feature-settings:'tnum' 1")}
+                    />
+                  ) : (
+                    <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>#{c.priority ?? 100}</span>
+                  ))}
+              </span>
+
+              <span style={s('display:flex;align-items:center;gap:4px')} onClick={(e) => e.stopPropagation()}>
+                {interactive && c.tracked && (
+                  <>
+                    <Hoverable
+                      as="span"
+                      base={`display:inline-flex;align-items:center;justify-content:center;height:22px;padding:0 8px;border-radius:999px;flex-shrink:0;font-size:10.5px;font-weight:700;border:1px solid var(--bd2);color:${running ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${running ? 'default' : 'pointer'}`}
+                      hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
+                      onClick={() => !running && onRunLatest(c)}
+                      title={pick(
+                        'Summarise the newest pending meeting only — one meeting, then stop',
+                        '最新の未要約会合のみを要約 — 1件で終了',
+                      )}
+                      aria-label="Summarise the latest pending meeting only"
+                    >
+                      {pick('LATEST', '最新')}
+                    </Hoverable>
+                    <Hoverable
+                      as="span"
+                      base={`display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;flex-shrink:0;border:1px solid var(--bd2);color:${running ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${running ? 'default' : 'pointer'}`}
+                      hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
+                      onClick={() => !running && onRun(c)}
+                      title={pick('Summarise pending meetings — needs notebooklm login', '未要約の会合を要約 — notebooklm loginが必要')}
+                      aria-label="Summarise pending meetings"
+                    >
+                      {icon(I_PLAY, 11, 'currentColor')}
+                    </Hoverable>
+                    <Hoverable
+                      as="span"
+                      base={`display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;flex-shrink:0;border:1px solid var(--bd2);color:${running ? 'var(--fnt3)' : 'var(--acT)'};cursor:${running ? 'default' : 'pointer'}`}
+                      hover={running ? '' : 'border-color:var(--ac);background:var(--acTint)'}
+                      onClick={() => !running && onBackfill(c)}
+                      title={pick('Backfill older meetings, then summarise', '過去の会合を取得して要約')}
+                      aria-label="Backfill older meetings"
+                    >
+                      {icon(I_REWIND, 11, 'currentColor')}
+                    </Hoverable>
+                  </>
+                )}
+                {interactive && (
+                  <Hoverable
+                    as="span"
+                    base={`display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;flex-shrink:0;cursor:pointer;${
+                      c.archived
+                        ? 'border:1px solid var(--warnTx);background:var(--warnBg);color:var(--warnTx)'
+                        : 'border:1px solid var(--bd2);color:var(--mut)'
+                    }`}
+                    hover={c.archived ? 'background:var(--bg1)' : 'border-color:var(--warnTx);color:var(--warnTx)'}
+                    onClick={() => onArchive(c.key, !c.archived)}
+                    title={
+                      c.archived
+                        ? pick('Archived — every fetch pass skips it. Click to resume fetching.', 'アーカイブ済み — 取得対象外。クリックで再開')
+                        : pick('Archive: stop fetching this concluded committee.', 'アーカイブ：終了した委員会の取得を停止')
+                    }
+                    aria-label={c.archived ? 'Un-archive committee' : 'Archive committee'}
+                  >
+                    {icon(I_ARCHIVE, 11, 'currentColor')}
+                  </Hoverable>
+                )}
+              </span>
+            </Hoverable>
+
+            {expanded &&
+              (statusLoading && !meetings.length ? (
+                <div style={s('padding:9px 12px 11px 34px;font-size:11.5px;color:var(--mut)')}>{pick('Loading…', '読み込み中…')}</div>
+              ) : (
+                <MeetingRows
+                  meetings={meetings}
+                  trimmed={trimmed}
+                  lang={L}
+                  committee={c.key}
+                  interactive={interactive}
+                  running={running}
+                  onRunMeeting={onRunMeeting}
+                  onQueueMeeting={onQueueMeeting}
+                />
+              ))}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
 
 function CommitteesManage() {
   const app = useApp()
@@ -656,6 +1255,19 @@ function CommitteesManage() {
   const [q, setQ] = useState('')
   const [busy, setBusy] = useState<Record<string, boolean>>({})
   const [adding, setAdding] = useState(false)
+  // Cards (manage the tracked set) vs Status table (what the pipeline did, and
+  // what broke). Remembered per browser: whichever one you work in is the one
+  // you keep coming back to.
+  const [view, setView] = useState<'cards' | 'table'>(() => {
+    try {
+      return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'cards'
+    } catch {
+      return 'cards'
+    }
+  })
+  const [scope, setScope] = useState<'all' | 'tracked' | 'failing'>('all')
+  const [status, setStatus] = useState<StatusPayload | null>(null)
+  const [statusLoading, setStatusLoading] = useState(false)
 
   // Load the catalog: the live DB (interactive) or the static snapshot (read-only).
   // Reused after a job finishes (Check for updates / catch-up, or a Summarise run),
@@ -668,15 +1280,38 @@ function CommitteesManage() {
     return p.then((d) => setRows(d.committees || [])).catch(() => {})
   }
 
+  // Per-meeting pipeline status. Only the table view needs it, so it is fetched
+  // on first switch rather than on open — the payload is every committee's recent
+  // meetings, which the card grid would never show.
+  const loadStatus = () => {
+    setStatusLoading(true)
+    const p = app.interactive
+      ? fetch('/api/policy/status').then((r) => r.json())
+      : getSnapshot<StatusPayload>('policy/status.json')
+    return p
+      .then((d: StatusPayload) => setStatus({ meetings: d.meetings || [], truncated: d.truncated || {} }))
+      .catch(() => setStatus({ meetings: [], truncated: {} }))
+      .finally(() => setStatusLoading(false))
+  }
+
   useEffect(() => {
     let alive = true
     setLoading(true)
+    // The status payload comes from a different source per mode (live API vs
+    // static snapshot), so drop it when the mode flips and let the effect below
+    // refetch from the right one.
+    setStatus(null)
     loadCatalog().finally(() => alive && setLoading(false))
     return () => {
       alive = false
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [app.interactive])
+
+  useEffect(() => {
+    if (view === 'table' && !status && !statusLoading) loadStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, app.interactive])
 
   const orgColor = (org: string) =>
     org === 'OCCTO' ? (dark ? '#7C9CD1' : '#4A6FA5') : org === 'EGC' ? (dark ? '#C77BD8' : '#7B2D8E') : 'var(--ac)'
@@ -803,8 +1438,10 @@ function CommitteesManage() {
           jobTimer.current = window.setTimeout(pollJob, 1500)
         } else {
           // Job finished: refresh the catalog so any rows it added/changed show up
-          // (crosscheck/discover add discovered committees; detect updates latest).
+          // (crosscheck/discover add discovered committees; detect updates latest)
+          // — and the per-meeting status, which is what the job just rewrote.
           loadCatalog()
+          if (view === 'table') loadStatus()
           // …and refetch the Policy Deep Dive screen behind this modal: the same
           // job wrote new meetings/dates/summaries to the DB that the screen's
           // usePolicyLive must pick up (it subscribes to this refresh signal).
@@ -836,6 +1473,40 @@ function CommitteesManage() {
         }
       })
       .catch(() => app.toast(pick('Could not start job', 'ジョブを開始できませんでした')))
+  }
+
+  // Summarise exactly one meeting. `policy run --meeting N` bypasses the pending
+  // queue, so this also re-runs an already-summarised meeting — the repair path
+  // for a briefing written from an incomplete source set.
+  const runMeeting = (key: string, num: number) =>
+    postJob('run', { committee: key, meeting: num }, `run ${key} 第${num}回`)
+
+  // Newest pending meeting of one committee, then stop. No meeting number needed:
+  // a single-committee run is depth-first (newest first), so a budget of 1 is
+  // exactly "the latest one".
+  const runLatest = (c: CatalogCommittee) =>
+    postJob('run', { committee: c.key, max_per_run: 1 }, `run ${c.key} (latest)`)
+
+  // Move a meeting to the front of the summarisation queue. Ordering only — it
+  // changes nothing about what gets summarised, so unlike the job actions it stays
+  // available while a job is running.
+  const queueMeeting = (key: string, num: number, queued: boolean) => {
+    if (!app.interactive) return
+    fetch('/api/policy/request', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, meeting_num: num, queued }),
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error('http'))))
+      .then(() => {
+        app.toast(
+          queued
+            ? pick(`第${num}回 queued — the next run takes it first`, `第${num}回 をキュー先頭に追加 — 次回の要約で最初に処理`)
+            : pick(`第${num}回 removed from the front of the queue`, `第${num}回 をキュー先頭から解除`),
+        )
+        loadStatus()
+      })
+      .catch(() => app.toast(pick('Could not update the queue', 'キューを更新できませんでした')))
   }
 
   const backfill = (c: CatalogCommittee) => {
@@ -893,6 +1564,7 @@ function CommitteesManage() {
           onDone: () => {
             setChecking(false)
             loadCatalog()
+            if (view === 'table') loadStatus()
           },
         })
         app.toast(pick('Checking for updates…', '更新を確認中…'))
@@ -907,17 +1579,71 @@ function CommitteesManage() {
   const match = (c: CatalogCommittee) =>
     !needle || (c.en + ' ' + c.ja + ' ' + c.key).toLowerCase().includes(needle)
 
+  // "Failing" spans both ways a committee can be broken, which are independent:
+  // its pages can't be fetched, or its meetings can't be summarised. Filtering on
+  // either alone would quietly hide half the problems.
+  const failing = (c: CatalogCommittee) =>
+    c.fetchStatus === 'error' || (c.error || 0) > 0 || c.lastUpdateState === 'error'
+  const nTracked = rows.filter((c) => c.tracked).length
+  const nFailing = rows.filter(failing).length
+
+  // Tracked first, then most recently touched by the pipeline (never-run rows
+  // sink to the bottom of their group), then key for a stable tie-break.
+  const tableRows = useMemo(() => {
+    const inScope = (c: CatalogCommittee) =>
+      scope === 'all' ? true : scope === 'tracked' ? c.tracked : failing(c)
+    return rows
+      .filter((c) => match(c) && inScope(c))
+      .slice()
+      .sort(
+        (a, b) =>
+          Number(b.tracked) - Number(a.tracked) ||
+          tsOf(b.lastUpdateAt) - tsOf(a.lastUpdateAt) ||
+          a.key.localeCompare(b.key),
+      )
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, needle, scope])
+
+  const setViewMode = (v: 'cards' | 'table') => {
+    setView(v)
+    try {
+      localStorage.setItem(VIEW_KEY, v)
+    } catch {
+      /* private mode — the choice just won't persist */
+    }
+  }
+
   return (
     <Modal onClose={app.closeOverlay}>
-      <div style={s(PANEL_WIDE)}>
+      <div style={s(view === 'table' ? PANEL_TABLE : PANEL_WIDE)}>
         <div style={s('display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--bd)')}>
           {icon(I_LIST, 17, 'var(--ac)')}
           <span style={s('font-size:16px;font-weight:700;color:var(--tx);margin-left:9px')}>{pick('Committees', '委員会管理')}</span>
           <span style={s('font-size:12px;color:var(--mut);margin-left:8px')}>
             · {app.interactive ? pick('editable', '編集可能') : pick('read-only', '閲覧のみ')}
           </span>
+          <div style={s('margin-left:auto;display:flex;align-items:center;gap:2px;background:var(--bg0);border:1px solid var(--bd);border-radius:999px;padding:2px')}>
+            {([
+              ['cards', pick('Cards', 'カード'), pick('Manage the tracked set', '追跡対象の管理')],
+              ['table', pick('Status', '状態'), pick('Per-meeting pipeline status, errors and recency', '会合ごとの処理状態・エラー・更新時刻')],
+            ] as const).map(([v, label, tip]) => (
+              <Hoverable
+                as="span"
+                key={v}
+                base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:3px 12px;white-space:nowrap;cursor:pointer;${
+                  view === v ? 'background:var(--bg1);color:var(--tx);box-shadow:var(--sh1)' : 'color:var(--mut)'
+                }`}
+                hover={view === v ? '' : 'color:var(--tx)'}
+                onClick={() => setViewMode(v)}
+                title={tip}
+                aria-pressed={view === v}
+              >
+                {label}
+              </Hoverable>
+            ))}
+          </div>
           <Hoverable
-            base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
+            base="margin-left:8px;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
             hover="background:var(--bg2);color:var(--tx)"
             onClick={app.closeOverlay}
             aria-label="Close"
@@ -999,11 +1725,59 @@ function CommitteesManage() {
           </div>
         )}
 
-        <div style={s('max-height:64vh;overflow-y:auto;padding:4px 16px 16px')}>
+        {view === 'table' && (
+          <div style={s('display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 20px 6px')}>
+            {([
+              ['all', pick(`All ${rows.length}`, `全 ${rows.length}`)],
+              ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`)],
+              ['failing', pick(`Needs attention ${nFailing}`, `要対応 ${nFailing}`)],
+            ] as const).map(([v, label]) => (
+              <Hoverable
+                as="span"
+                key={v}
+                base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:3px 12px;white-space:nowrap;cursor:pointer;${
+                  scope === v
+                    ? 'background:var(--acTint);border:1px solid var(--ac);color:var(--acT)'
+                    : 'border:1px solid var(--bd2);color:var(--mut)'
+                }`}
+                hover={scope === v ? '' : 'border-color:var(--ac);color:var(--acT)'}
+                onClick={() => setScope(v)}
+                aria-pressed={scope === v}
+              >
+                {label}
+              </Hoverable>
+            ))}
+            <span style={s('font-size:11px;color:var(--mut);margin-left:auto')}>
+              {pick(
+                'Tracked first, most recently updated first · click a row for its meetings',
+                '追跡中を先頭に、更新の新しい順 · 行をクリックで会合を表示',
+              )}
+            </span>
+          </div>
+        )}
+
+        <div style={s(`max-height:64vh;overflow:auto;padding:${view === 'table' ? '0 16px 12px' : '4px 16px 16px'}`)}>
           {loading && (
             <div style={s('padding:26px;text-align:center;color:var(--mut);font-size:13px')}>{pick('Loading…', '読み込み中…')}</div>
           )}
-          {!loading && (
+          {!loading && view === 'table' && (
+            <StatusTable
+              rows={tableRows}
+              status={status}
+              statusLoading={statusLoading}
+              interactive={app.interactive}
+              running={actionBusy}
+              onTrack={setTracked}
+              onArchive={setArchived}
+              onPriority={setPriority}
+              onRun={(c) => postJob('run', { committee: c.key }, `run ${c.key}`)}
+              onRunLatest={runLatest}
+              onBackfill={backfill}
+              onRunMeeting={runMeeting}
+              onQueueMeeting={queueMeeting}
+            />
+          )}
+          {!loading && view === 'cards' && (
             <div style={s('display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;align-items:start')}>
             {ORGS.map((org) => {
               // Tracked first, then by queue priority (lower = summarised first) so the

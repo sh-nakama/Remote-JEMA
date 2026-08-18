@@ -759,9 +759,48 @@ def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) ->
             .all()
         )
         return [
-            {"id": r.id, "pdf_id": r.pdf_id, "kind": r.kind, "url": r.url, "title": r.title}
+            {"id": r.id, "pdf_id": r.pdf_id, "kind": r.kind, "url": r.url, "title": r.title,
+             "status": r.status, "nblm_source_id": r.nblm_source_id}
             for r in rows
         ]
+
+
+def set_material_state(key: str, pdf_id: str, db_path: str | None = None, **fields) -> None:
+    """Patch one material row (``status``, ``nblm_source_id``, ...).
+
+    ``policy_material.status`` and ``nblm_source_id`` were declared from the start
+    and never written, so every document read ``detected`` forever — which meant
+    nothing recorded whether a meeting's briefing had actually seen its papers.
+    Written per document by the pipeline, and read back as the "N of M ingested"
+    count in the Manage status table.
+    """
+    with session_scope(db_path) as session:
+        m = (
+            session.query(PolicyMaterial)
+            .filter_by(committee_key=key, pdf_id=pdf_id)
+            .one_or_none()
+        )
+        if m is None:
+            return
+        for k, v in fields.items():
+            setattr(m, k, v)
+
+
+def forget_staged_materials(key: str, meeting_num: int, db_path: str | None = None) -> None:
+    """Reset ``downloaded`` materials of one meeting back to ``detected``.
+
+    Called when the staged files are discarded. ``downloaded`` is a claim about what
+    is on disk, and the next attempt's resume check reads the disk — so leaving the
+    column saying ``downloaded`` after a wipe makes the status table report progress
+    that no longer exists. ``ingested`` rows are left alone: that did happen.
+    """
+    with session_scope(db_path) as session:
+        for m in (
+            session.query(PolicyMaterial)
+            .filter_by(committee_key=key, meeting_num=meeting_num, status="downloaded")
+            .all()
+        ):
+            m.status = "detected"
 
 
 def meetings_for_synthesis(key: str, db_path: str | None = None) -> list[dict]:
@@ -793,6 +832,23 @@ def mark_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> 
         )
         if m is not None:
             m.synth_done = True
+
+
+def reset_synthesized(key: str, meeting_num: int, db_path: str | None = None) -> None:
+    """Un-flag a meeting so its briefing is folded into the synthesis again.
+
+    Used when a meeting is deliberately re-summarised: the copy already in the
+    synthesis notebook was written from the old briefing, so leaving the flag set
+    would keep the committee overview quoting a summary its meeting no longer has.
+    """
+    with session_scope(db_path) as session:
+        m = (
+            session.query(PolicyMeeting)
+            .filter_by(committee_key=key, meeting_num=meeting_num)
+            .one_or_none()
+        )
+        if m is not None and m.synth_done:
+            m.synth_done = False
 
 
 def synthesized_meeting_nums(key: str, db_path: str | None = None) -> list[int]:

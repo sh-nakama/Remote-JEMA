@@ -551,22 +551,60 @@ def policy_run(
              "to breadth-first for '--committee all' and depth-first for a single "
              "committee; pass --breadth/--depth-first to override.",
     ),
+    meeting: int | None = typer.Option(
+        None, "--meeting",
+        help="Summarise exactly this meeting number of --committee and nothing else. "
+             "Bypasses the pending queue, so an already-summarised meeting can be "
+             "re-run (e.g. after a briefing was written from an incomplete source set).",
+    ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
     from repower.policy.pipeline import run
 
     _require_auth_or_exit()
+    if meeting is not None and committee == "all":
+        typer.echo("--meeting needs a specific --committee")
+        raise typer.Exit(code=2)
     keys = None if committee == "all" else [committee]
     # Default: breadth-first across the whole tracked set (get the latest meeting of
     # each committee current first), depth-first when draining a single committee.
     breadth_first = (committee == "all") if breadth is None else breadth
-    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth_first)
+    summary = run(keys, max_per_run=(1 if meeting is not None else max_per_run),
+                  breadth_first=breadth_first, meeting_num=meeting)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} blocked={summary.get('blocked', 0)} "
-        f"synthesized={summary['synthesized']}"
+        f"skipped={summary.get('skipped', 0)} synthesized={summary['synthesized']}"
     )
+    for host, n in sorted((summary.get("skipped_hosts") or {}).items()):
+        typer.echo(f"  skipped {n} meeting(s) on {host} - its circuit breaker is open; "
+                   f"they stay pending.")
     _warn_if_stopped_early(summary, "remaining meetings stay pending - retry later.")
+
+
+@policy_app.command("queue")
+def policy_queue(
+    committee: str = typer.Option(..., help="Committee key"),
+    meeting: int = typer.Option(..., help="Meeting number to move to the front of the queue"),
+    clear: bool = typer.Option(False, "--clear", help="Remove it from the front instead"),
+):
+    """Put one meeting at the front of the summarisation queue (or take it off).
+
+    The queue is otherwise ordered by committee priority then newest-meeting-first;
+    a queued meeting outranks all of that, so this is how a specific meeting jumps
+    ahead without re-prioritising its whole committee. The flag is cleared
+    automatically once the meeting has been processed.
+    """
+    from repower.policy.store import clear_generation_request, request_generation
+
+    if clear:
+        clear_generation_request(committee, meeting, db_path=None)
+        typer.echo(f"{committee} 第{meeting}回 removed from the front of the queue")
+        return
+    if not request_generation(committee, meeting, db_path=None):
+        typer.echo(f"no such meeting: {committee} 第{meeting}回")
+        raise typer.Exit(code=1)
+    typer.echo(f"{committee} 第{meeting}回 queued - the next `policy run` takes it first")
 
 
 @policy_app.command("backfill")

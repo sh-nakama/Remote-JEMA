@@ -30,7 +30,7 @@ from repower.policy.scraper import (
     parse_meti_meeting_urls,
     parse_pdf_links,
 )
-from repower.scrapers.http_cache import ChallengeNotClearedError
+from repower.scrapers.http_cache import ChallengeNotClearedError, min_host_interval
 
 # ── Fixtures (small inline HTML) ─────────────────────────────────────────────
 METI_INDEX = """
@@ -273,8 +273,9 @@ def _meeting_row(key: str, num: int, db):
     session = get_session(db)
     try:
         m = session.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
-        return {"state": m.state, "quality_flag": m.quality_flag,
-                "retry_count": m.retry_count or 0}
+        return {"id": m.id, "state": m.state, "quality_flag": m.quality_flag,
+                "retry_count": m.retry_count or 0,
+                "last_error": m.last_error, "last_error_at": m.last_error_at}
     finally:
         session.close()
 
@@ -369,6 +370,34 @@ def test_missing_documents_burn_the_retry_budget_and_eventually_drop_out(monkeyp
 
     assert not any(m["meeting_num"] == 7
                    for m in store.pending_meetings("doji_shijo", db_path=db))
+
+
+def test_every_failure_path_records_why_and_success_clears_it(monkeypatch, tmp_path):
+    """`state='error'` alone can't be acted on. Each failure path must leave a
+    message naming the cause — including the generic NotebookLM one, which has no
+    quality_flag at all — and a later success must clear it, so the status table
+    never reports a resolved error against a summarised meeting."""
+    db = str(tmp_path / "t.db")
+    committee = _stage_meeting(db)
+
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
+    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+    row = _meeting_row("doji_shijo", 7, db)
+    assert "not_found" in row["last_error"] and row["last_error_at"]
+
+    # The generic NotebookLM path: no slug fits, so the message is the only record.
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "ok")
+    monkeypatch.setattr(pipeline.nb, "create_notebook",
+                        lambda *a, **k: (_ for _ in ()).throw(nb_mod.NotebookLMError("quota exhausted")))
+    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+    row = _meeting_row("doji_shijo", 7, db)
+    assert row["quality_flag"] is None
+    assert "quota exhausted" in row["last_error"]
+
+    # A later success wipes it.
+    store.update_meeting(row["id"], db_path=db, state="done", last_error=None, last_error_at=None)
+    row = _meeting_row("doji_shijo", 7, db)
+    assert row["last_error"] is None and row["last_error_at"] is None
 
 
 def test_blocked_meetings_do_not_consume_the_quota_budget(monkeypatch, tmp_path):
@@ -1722,3 +1751,316 @@ def test_archived_committees_are_not_reported_as_failing(monkeypatch, capsys):
     assert "dead_one" in tail
     # Denominator excludes it too, so the ratio doesn't imply a fetch that never happens.
     assert "1/1 committee(s) need attention" in out
+
+
+def test_partial_download_is_refused_rather_than_summarised(monkeypatch, tmp_path):
+    """A briefing written from a subset of a meeting's papers reads exactly like a
+    complete one, so a shortfall must abort the meeting. The real failure: 11 of 12
+    documents blocked, the one that landed was the *list* of documents, and
+    NotebookLM summarised a table of contents."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 9
+    # Minutes sort first, so the order the batch is walked in is deterministic.
+    store.record_meeting(
+        key, num,
+        [Material(num, "009_min", "https://x/9_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "009_h1", "https://x/9_01_00.pdf", "資料1", "handout"),
+         Material(num, "009_h2", "https://x/9_02_00.pdf", "資料2", "handout")],
+        db_path=db,
+    )
+    # The first document lands; the host then turns on us.
+    monkeypatch.setattr(pipeline, "_download_pdf",
+                        lambda url, *a, **k: "ok" if "gijiroku" in url else "circuit_open")
+    # Nothing may reach NotebookLM.
+    monkeypatch.setattr(pipeline.nb, "create_notebook",
+                        lambda *a, **k: pytest.fail("notebook created from a partial source set"))
+
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "blocked"
+    row = _meeting_row(key, num, db)
+    assert row["quality_flag"] == "download_blocked"
+    assert row["retry_count"] == 0  # host trouble, not a dead meeting
+    assert "2 of 3" in row["last_error"]
+    # The batch stopped at the first hostile response instead of spending two more
+    # doomed requests — each of which is a strike towards opening the host breaker.
+    assert "1 not attempted" in row["last_error"]
+    # Still queued, so a calm day picks it up whole.
+    assert any(m["meeting_num"] == num for m in store.pending_meetings(key, db_path=db))
+
+    # Per-document outcomes are recorded, so "did the briefing see everything?" is
+    # answerable from the DB rather than only from the briefing's own prose.
+    mats = {m["pdf_id"]: m for m in store.meeting_materials(key, num, db_path=db)}
+    assert mats["009_min"]["status"] == "downloaded"
+    assert mats["009_h1"]["status"] == "error"
+    assert mats["009_h2"]["status"] == "detected"  # never attempted
+    assert all(m["nblm_source_id"] is None for m in mats.values())
+
+
+def test_missing_document_burns_a_retry_even_when_others_download(monkeypatch, tmp_path):
+    """A permanently-gone document is the meeting's own problem, so the strict rule
+    must still let it leave the worklist rather than retry forever."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 10
+    store.record_meeting(
+        key, num,
+        [Material(num, "010_min", "https://x/10_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "010_h1", "https://x/10_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+    monkeypatch.setattr(pipeline, "_download_pdf",
+                        lambda url, *a, **k: "ok" if "gijiroku" in url else "not_found")
+
+    for expected in range(1, store.MAX_RETRIES + 1):
+        assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "error"
+        row = _meeting_row(key, num, db)
+        assert row["quality_flag"] == "download_failed" and row["retry_count"] == expected
+        assert "1 of 2" in row["last_error"]
+    assert not any(m["meeting_num"] == num for m in store.pending_meetings(key, db_path=db))
+
+
+def test_run_skips_committees_whose_host_is_cooling_down(monkeypatch, tmp_path):
+    """One hostile host must not consume the round: its committees are skipped
+    without a request, and committees elsewhere still get their turn."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    for key, num in (("doji_shijo", 11), ("chousei_jukyu", 12)):
+        store.record_meeting(
+            key, num,
+            [Material(num, f"{num:03d}_min", f"https://x/{num}_gijiroku.pdf", "議事録", "minutes")],
+            db_path=db,
+        )
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    # doji_shijo lives on meti.go.jp; chousei_jukyu on occtonet.occto.or.jp.
+    monkeypatch.setattr(pipeline, "circuit_cooldown",
+                        lambda url: 300.0 if "meti.go.jp" in (url or "") else 0.0)
+    attempted: list[str] = []
+
+    def fake_summarize(committee, meeting_num, **kw):
+        attempted.append(committee.key)
+        return "done"
+
+    monkeypatch.setattr(pipeline, "summarize_meeting", fake_summarize)
+
+    summary = pipeline.run(db_path=db)
+    assert "doji_shijo" not in attempted  # never even asked the blocked host
+    assert "chousei_jukyu" in attempted
+    assert summary["skipped"] >= 1
+    assert any("meti.go.jp" in h for h in summary["skipped_hosts"])
+
+
+def test_meeting_num_targets_one_meeting_and_re_runs_a_done_one(monkeypatch, tmp_path):
+    """"Run now" on an already-summarised meeting must re-summarise exactly it, and
+    let the corrected briefing back into the committee synthesis."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"
+    for num in (5, 6):
+        store.record_meeting(
+            key, num,
+            [Material(num, f"{num:03d}_min", f"https://x/{num}_gijiroku.pdf", "議事録", "minutes")],
+            db_path=db,
+        )
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings(key, db_path=db)}
+    store.update_meeting(by_num[5], db_path=db, state="done", briefing_md="## thin")
+    store.mark_synthesized(key, 5, db_path=db)
+
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
+    seen: list[int] = []
+    monkeypatch.setattr(pipeline, "summarize_meeting",
+                        lambda c, n, **kw: (seen.append(n), "done")[1])
+
+    pipeline.run([key], db_path=db, meeting_num=5)
+    # Only meeting 5 — the pending meeting 6 is untouched, and `done` was no bar.
+    assert seen == [5]
+    assert 5 not in store.synthesized_meeting_nums(key, db_path=db)
+
+    with pytest.raises(ValueError):
+        pipeline.run(db_path=db, meeting_num=5)  # needs exactly one committee
+
+
+def test_batch_pace_widens_with_the_number_of_documents():
+    """The 2s floor is sized for one-page-per-host sweeps. A meeting is a dozen
+    files from the same host, and METI's edge treats that as a burst — so the gap
+    grows with the batch and is capped so a huge meeting still finishes."""
+    assert pipeline._batch_interval(1) == 2.0
+    assert pipeline._batch_interval(4) == 2.0      # unchanged for small meetings
+    assert pipeline._batch_interval(6) == 4.0
+    assert pipeline._batch_interval(12) == 10.0    # the observed failure case
+    assert pipeline._batch_interval(40) == pipeline._BATCH_PACE_CAP
+    # Monotonic, and never faster than the politeness floor.
+    vals = [pipeline._batch_interval(n) for n in range(1, 40)]
+    assert vals == sorted(vals)
+    assert min(vals) >= min_host_interval()
+
+
+def test_blocked_meeting_keeps_its_downloads_for_the_next_attempt(monkeypatch, tmp_path):
+    """Re-downloading files we already have spends the few requests the host allows
+    on bytes that are already on disk — which is why a large meeting could never
+    finish: every attempt re-burned the same budget and failed at the same place."""
+    db = str(tmp_path / "t.db")
+    scratch = tmp_path / "scratch"
+    monkeypatch.setattr(pipeline, "_scratch", lambda: scratch)
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 13
+    store.record_meeting(
+        key, num,
+        [Material(num, "013_min", "https://x/13_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "013_h1", "https://x/13_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+
+    asked: list[str] = []
+
+    def fake_download(url, dest, **kw):
+        asked.append(url)
+        if "gijiroku" in url:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(b"%PDF-1.4 minutes")
+            return "ok"
+        return "challenge_unresolved"
+
+    monkeypatch.setattr(pipeline, "_download_pdf", fake_download)
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "blocked"
+    assert len(asked) == 2
+    staged = scratch / key / str(num) / "013_min.pdf"
+    assert staged.exists()  # kept, not wiped
+
+    # Second attempt: the host is calm now. Only the missing document is requested.
+    asked.clear()
+    monkeypatch.setattr(pipeline, "_download_pdf", lambda url, dest, **kw: (
+        asked.append(url), dest.parent.mkdir(parents=True, exist_ok=True),
+        dest.write_bytes(b"%PDF-1.4 handout"), "ok")[-1])
+    monkeypatch.setattr(pipeline.nb, "create_notebook", lambda *a, **k: "nb1")
+    monkeypatch.setattr(pipeline.nb, "add_source", lambda nb_id, path: f"src:{Path(path).name}")
+    monkeypatch.setattr(pipeline.nb, "wait_source", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "_ocr_guard", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.nb, "generate_report", lambda *a, **k: "task1")
+    monkeypatch.setattr(pipeline.nb, "wait_artifact", lambda *a, **k: True)
+
+    def fake_download_report(nb_id, task_id, out):
+        out.write_text("## 論点\n" + "x" * 500, encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(pipeline.nb, "download_report", fake_download_report)
+    monkeypatch.setattr(pipeline.nb, "ask", lambda *a, **k: {"answer": "ok"})
+    monkeypatch.setattr(pipeline.nb, "delete_notebook", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "regenerate_running_doc", lambda *a, **k: None)
+
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "done"
+    assert asked == ["https://x/13_01_00.pdf"]  # the minutes were NOT re-fetched
+    # Both documents are recorded as ingested, so the status table's N/M is honest.
+    mats = {m["pdf_id"]: m for m in store.meeting_materials(key, num, db_path=db)}
+    assert {m["status"] for m in mats.values()} == {"ingested"}
+    assert all(m["nblm_source_id"] for m in mats.values())
+    # A finished meeting cleans up after itself.
+    assert not (scratch / key / str(num)).exists()
+
+
+def test_notebooklm_timeout_keeps_the_downloads_it_already_paid_for(monkeypatch, tmp_path):
+    """A NotebookLM stall hands the meeting back to a later run — so its documents
+    must be handed back with it. Wiping them meant the retry re-ran the whole burst
+    against a rate-limited WAF to re-fetch bytes that were already on disk."""
+    db = str(tmp_path / "t.db")
+    scratch = tmp_path / "scratch"
+    monkeypatch.setattr(pipeline, "_scratch", lambda: scratch)
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 14
+    store.record_meeting(
+        key, num,
+        [Material(num, "014_min", "https://x/14_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "014_h1", "https://x/14_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+
+    def fake_download(url, dest, **kw):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"%PDF-1.4 body")
+        return "ok"
+
+    monkeypatch.setattr(pipeline, "_download_pdf", fake_download)
+    monkeypatch.setattr(pipeline.nb, "create_notebook", lambda *a, **k: "nb1")
+    monkeypatch.setattr(pipeline.nb, "delete_notebook", lambda *a, **k: None)
+    # The first upload lands; the second dies with the connection (what happened).
+    calls: list[str] = []
+
+    def flaky_add(nb_id, path):
+        calls.append(path)
+        if len(calls) == 1:
+            return "src1"
+        raise nb_mod.NotebookLMTimeout("timeout after 180s: notebooklm source add")
+
+    monkeypatch.setattr(pipeline.nb, "add_source", flaky_add)
+
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        pipeline.summarize_meeting(committee_by_key(key), num, db_path=db)
+
+    # Handed back for a later run …
+    row = _meeting_row(key, num, db)
+    assert row["state"] == "detected" and row["retry_count"] == 0
+    # … with both PDFs still on disk.
+    staged = sorted(pp.name for pp in (scratch / key / str(num)).glob("*.pdf"))
+    assert staged == ["014_h1.pdf", "014_min.pdf"]
+
+    # The next attempt makes no HTTP requests at all.
+    monkeypatch.setattr(pipeline, "_download_pdf",
+                        lambda *a, **k: pytest.fail("re-downloaded a file already on disk"))
+    monkeypatch.setattr(pipeline.nb, "add_source", lambda nb_id, path: f"src:{Path(path).name}")
+    monkeypatch.setattr(pipeline.nb, "wait_source", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline, "_ocr_guard", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline.nb, "generate_report", lambda *a, **k: "t1")
+    monkeypatch.setattr(pipeline.nb, "wait_artifact", lambda *a, **k: True)
+    monkeypatch.setattr(pipeline.nb, "download_report",
+                        lambda n, t, out: (out.write_text("## 論点\n" + "x" * 500, encoding="utf-8"), True)[1])
+    monkeypatch.setattr(pipeline.nb, "ask", lambda *a, **k: {"answer": "ok"})
+    monkeypatch.setattr(pipeline, "regenerate_running_doc", lambda *a, **k: None)
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "done"
+
+
+def test_discarded_staging_stops_claiming_the_files_are_downloaded(monkeypatch, tmp_path):
+    """`downloaded` is a claim about disk. When the staging is wiped, the status
+    table must not keep reporting documents it no longer has."""
+    db = str(tmp_path / "t.db")
+    monkeypatch.setattr(pipeline, "_scratch", lambda: tmp_path / "scratch")
+    store.sync_committees(db_path=db)
+    key, num = "doji_shijo", 15
+    store.record_meeting(
+        key, num,
+        [Material(num, "015_min", "https://x/15_gijiroku.pdf", "議事録", "minutes"),
+         Material(num, "015_h1", "https://x/15_01_00.pdf", "資料1", "handout")],
+        db_path=db,
+    )
+    # One document lands, the other is permanently gone: a hard error, staging wiped.
+    monkeypatch.setattr(pipeline, "_download_pdf",
+                        lambda url, dest, **k: "ok" if "gijiroku" in url else "not_found")
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "error"
+    mats = {m["pdf_id"]: m["status"] for m in store.meeting_materials(key, num, db_path=db)}
+    assert mats["015_min"] == "detected"  # was 'downloaded', but the file is gone
+    assert mats["015_h1"] == "error"
+
+
+def test_add_source_retries_a_dropped_upload_once(monkeypatch):
+    """A dropped upload used to halt the run, discarding every PDF already fetched
+    for the meeting. One retry is far cheaper than the re-download it prevents."""
+    calls = []
+
+    def fake_json(args, *, timeout):
+        calls.append(args)
+        if len(calls) == 1:
+            raise nb_mod.NotebookLMTimeout("timeout after 180s")
+        return {"source": {"id": "src-2"}}
+
+    monkeypatch.setattr(nb_mod, "_json", fake_json)
+    monkeypatch.setattr(nb_mod.time, "sleep", lambda *_: None)
+    assert nb_mod.add_source("nb1", "C:/tmp/a.pdf") == "src-2"
+    assert len(calls) == 2
+
+    # A genuinely dead session still halts rather than looping.
+    calls.clear()
+    monkeypatch.setattr(nb_mod, "_json", lambda *a, **k: (
+        calls.append(1), (_ for _ in ()).throw(nb_mod.NotebookLMTimeout("dead")))[0])
+    with pytest.raises(nb_mod.NotebookLMTimeout):
+        nb_mod.add_source("nb1", "C:/tmp/a.pdf")
+    assert len(calls) == 2

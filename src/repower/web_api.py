@@ -12,12 +12,14 @@ Endpoints (all JSON):
   GET  /api/policy/catalog  -> {schema, committees:[…]}   (live committees.json shape)
   POST /api/policy/track    -> {ok, key, enabled}         body: {key, enabled}
   POST /api/policy/priority -> {ok, key, priority}        body: {key, priority}
+  POST /api/policy/request  -> {ok, key, meeting_num, queued}  body: {key, meeting_num, queued}
   POST /api/policy/add      -> {ok, key, name_ja, existing} body: {url} (METI /shingikai/ page; auto-tracks)
   POST /api/policy/catchup  -> 202, starts the auth-free refresh job
   POST /api/policy/job      -> 202/400/409, runs one `repower policy <cmd>` (subprocess)
                                body: {cmd, committee?, since_meeting?, max_per_run?, since_days?}
   GET  /api/policy/catchup  -> current job status (alias: /api/policy/job)
   GET  /api/policy/job      -> current job status + output tail / result
+  GET  /api/policy/status   -> {schema, meetings:[…], truncated}  per-meeting pipeline status
   GET  /api/policy/crosscheck -> energy-board vs our catalog (committees we may miss)
   POST /api/data/refresh    -> 202/409, full data refresh (recover gaps → scrape → export-web)
   GET  /api/data/refresh    -> current job status (shares the single-flight job slot)
@@ -280,6 +282,12 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     if cmd in ("schedule", "discover", "crosscheck", "resume", "status"):
         return ["policy", cmd]
     if cmd == "run":
+        # A targeted single-meeting run ("Run now" in the status table): needs a real
+        # committee, and the CLI forces max-per-run to 1 for it.
+        if params.get("meeting") not in (None, ""):
+            return ["policy", "run",
+                    "--committee", _committee(required=True, allow_all=False),
+                    "--meeting", str(_int("meeting", None, 1, 100000, required=True))]
         argv = ["policy", "run", "--committee", _committee(),
                 "--max-per-run", str(_int("max_per_run", 5, 1, 20))]
         if params.get("breadth"):
@@ -477,6 +485,16 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001 — never 500 the UI; fall back to empty
                 logger.exception("deepdive snapshot failed; serving empty fallback")
                 return self._send(200, {"schema": 1, "committees": [], "meetings": [], "upcoming": [], "error": str(e)})
+        if path == "/api/policy/status":
+            # Per-meeting pipeline status for the Manage status table. Falls back to
+            # an empty payload rather than 500ing: the table's committee rows come
+            # from the catalog and stay useful without the per-meeting detail.
+            try:
+                from repower.dashboard.export_web import build_policy_status
+                return self._send(200, {"schema": 1, **build_policy_status(self.db_path)})
+            except Exception as e:  # noqa: BLE001 — never 500 the UI; fall back to empty
+                logger.exception("policy status failed; serving empty fallback")
+                return self._send(200, {"schema": 1, "meetings": [], "truncated": {}, "error": str(e)})
         if path in ("/api/policy/catchup", "/api/policy/job", "/api/data/refresh"):
             with _job_lock:
                 return self._send(200, dict(_job))
@@ -510,6 +528,23 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": "key required"})
             ok = set_committee_archived(key, archived, db_path=self.db_path)
             return self._send(200 if ok else 404, {"ok": ok, "key": key, "archived": archived})
+        if path == "/api/policy/request":
+            # Move one meeting to the front of the summarisation queue (or off it).
+            # Ordering-only: it changes nothing about *what* is summarised, so it is
+            # safe to leave enabled even while a job runs.
+            from repower.policy.store import clear_generation_request, request_generation
+            key = (body.get("key") or "").strip()
+            try:
+                num = int(body.get("meeting_num"))
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "meeting_num must be an integer"})
+            queued = bool(body.get("queued", True))
+            if queued:
+                if not request_generation(key, num, db_path=self.db_path):
+                    return self._send(404, {"error": "no such meeting"})
+            else:
+                clear_generation_request(key, num, db_path=self.db_path)
+            return self._send(200, {"ok": True, "key": key, "meeting_num": num, "queued": queued})
         if path == "/api/policy/priority":
             from repower.policy.store import set_committee_priority
             key = body.get("key")
