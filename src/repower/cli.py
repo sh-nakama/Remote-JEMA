@@ -454,6 +454,19 @@ def _warn_if_stopped_early(summary: dict, retry_hint: str) -> None:
                    err=True)
 
 
+def _report_deferred(count: int, noun: str) -> None:
+    """Say that a pass stopped early, so a partial result doesn't read as a final one.
+
+    Hosts like meti.go.jp only allow a handful of requests before blocking, so the
+    sweeps stop short and come back later; without this the run looks complete.
+    """
+    if count:
+        typer.echo(
+            f"-- {count} {noun}(s) deferred: the host's request budget is spent. "
+            "Re-run in a few minutes to continue. --"
+        )
+
+
 @policy_app.command("detect")
 def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
@@ -472,6 +485,7 @@ def policy_detect(
             f"{str(r['latest_online'] or '-'):>7}{str(r['known_latest'] or '-'):>7}{r['new']:>5}"
         )
     typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
+    _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
 
 
 @policy_app.command("dates")
@@ -497,6 +511,7 @@ def policy_dates(
     for r in results:
         typer.echo(f"{r['key']:<28}{r['source']:<6}{r['dated']:>6}")
     typer.echo(f"-- {sum(r['dated'] for r in results)} meeting date(s) set --")
+    _report_deferred(sum(1 for r in results if r["deferred"]), "committee")
 
 
 @policy_app.command("schedule")
@@ -537,6 +552,7 @@ def policy_materials(
             typer.echo(f"{r['key']:<28}{r['source']:<6} materialised {r['materialised']}/{r['checked']}")
             total += r["materialised"]
     typer.echo(f"-- {total} meeting(s) populated with materials --")
+    _report_deferred(sum(r["deferred"] for r in results), "meeting")
 
 
 @policy_app.command("run")

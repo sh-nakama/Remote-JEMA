@@ -268,6 +268,65 @@ def reset_pacing() -> None:
         _last_request_at.clear()
 
 
+# Per-host request allowance. Some hosts answer a sustained crawl with an
+# escalating block rather than a 429: meti.go.jp lets roughly five requests
+# through, then serves 403 to everything from this IP — real browsers included —
+# for minutes, and walking into it repeatedly teaches the edge to escalate sooner.
+# Pacing does not help, because the rule is not rate-based (see _MIN_HOST_INTERVAL).
+#
+# So a sweep stops just short of the cliff and comes back later. The allowance
+# refills after _BUDGET_WINDOW, which is what lets a long-lived process (web_api's
+# catch-up) keep making progress instead of starving after its first pass.
+#
+# Hosts absent from this map are unlimited, so this changes nothing for OCCTO or
+# the TSO/JEPX/EPRX scrapers.
+_HOST_BUDGET: dict[str, int] = {
+    "www.meti.go.jp": 4,
+    "www.egc.meti.go.jp": 4,
+}
+_BUDGET_WINDOW: float = 300.0
+_budget_used: dict[str, tuple[float, int]] = {}  # host -> (window start, requests)
+_budget_lock = threading.Lock()
+
+
+def _consume_budget(url: str) -> None:
+    """Count one request against *url*'s host allowance."""
+    host = _host_key(url)
+    if host not in _HOST_BUDGET:
+        return
+    now = time.monotonic()
+    with _budget_lock:
+        start, used = _budget_used.get(host, (now, 0))
+        if now - start >= _BUDGET_WINDOW:
+            start, used = now, 0
+        _budget_used[host] = (start, used + 1)
+
+
+def budget_exhausted(url: str) -> bool:
+    """True if *url*'s host has spent its request allowance for now.
+
+    **Advisory.** Only work that can be resumed later consults it — the crawl
+    sweeps, which stop and leave the rest for the next pass. Work that is
+    indivisible (every PDF of one meeting, or a user asking for one committee by
+    name) ignores it and takes its chances, exactly as before.
+    """
+    host = _host_key(url)
+    cap = _HOST_BUDGET.get(host)
+    if cap is None:
+        return False
+    with _budget_lock:
+        start, used = _budget_used.get(host, (0.0, 0))
+        if time.monotonic() - start >= _BUDGET_WINDOW:
+            return False
+        return used >= cap
+
+
+def reset_budgets() -> None:
+    """Forget all host budget state (tests, and manual recovery)."""
+    with _budget_lock:
+        _budget_used.clear()
+
+
 # Per-host circuit breaker. Once a host has blocked/challenged us this many times
 # in a row, every further request to it short-circuits for a cooldown window
 # instead of paying the round-trip again to rediscover the same fact. One success
@@ -918,6 +977,7 @@ def _do_get(
     for attempt in range(_TRANSIENT_MAX_RETRIES + 1):
         deadline.check(url)
         _pace_host(url)  # space consecutive same-host requests to a human pace
+        _consume_budget(url)
         # The default UA belongs to this transport only — the curl fallback gets the
         # headers untouched so impersonation supplies a UA matching its fingerprint.
         httpx_headers = {**_BROWSER_HEADERS, **headers}
@@ -1084,6 +1144,7 @@ def _curl_get(
             # Retries go through the same politeness gate as any other request —
             # this is the host that is least tolerant of unpaced bursts.
             _pace_host(url)
+            _consume_budget(url)
             try:
                 r = session.get(
                     url,

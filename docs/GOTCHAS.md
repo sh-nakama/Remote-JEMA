@@ -140,7 +140,16 @@ fixed.
   returned the same 403 block page. So the browser transport only helps at the *challenge*
   stage; once METI has escalated, the only remedy is time. Budget observed on a real backfill:
   ~5 requests get through, then 403 for ~5 minutes — which is why healing is incremental by
-  nature and the fix is scheduling (small spaced runs, rotation order), not a better client.
+  nature and the fix is scheduling, not a better client.
+- **A per-host request budget stops the sweeps before the cliff.** `_HOST_BUDGET` in
+  `http_cache` allows 4 requests per 5 minutes to meti.go.jp and egc.meti.go.jp (unlisted hosts
+  are unlimited, so OCCTO and the TSO/JEPX/EPRX scrapers are untouched). It is **advisory**:
+  `budget_exhausted(url)` is consulted only by work that can be resumed — `detect` and the two
+  backfills, which report the remainder as `deferred` rather than as failures. Indivisible work
+  ignores it on purpose: stopping halfway through one meeting's PDFs would be worse than being
+  blocked. Measured on `doji_shijo`: 22 requests → 5/21 healed plus an IP block and an open
+  circuit, versus 4 requests → 3/3 healed, every response a 200, 13 deferred to the next run.
+  If you raise the number, expect the escalation back.
 - **Every plain request used to open a fresh client.** `_do_get` called module-level
   `httpx.get`, so each request paid a new TLS handshake and — worse — dropped its cookie jar,
   making any clearance cookie unusable by design. `_http_client(url)` now memoises one client

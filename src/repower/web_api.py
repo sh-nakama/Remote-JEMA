@@ -161,6 +161,10 @@ def _run_catchup_job(db_path: str | None) -> None:
             summary = ", ".join(f"{k} x{n}" for k, n in kinds.most_common())
             bits.append(f"{len(failed)} failed ({summary})")
             bits_ja.append(f"取得失敗{len(failed)}件")
+        deferred = sum(1 for r in det if r.get("status") == "deferred")
+        if deferred:
+            bits.append(f"{deferred} deferred")
+            bits_ja.append(f"繰越{deferred}件")
         _stage_finish(i, "error" if failed else "done", " · ".join(bits), " · ".join(bits_ja))
 
         # 1b) Populate materials for meetings detected without any (e.g. first seen
@@ -169,9 +173,13 @@ def _run_catchup_job(db_path: str | None) -> None:
         i = _stage_start("materials", "Fetched meeting materials", "会合資料を取得")
         matres = backfill_materials(db_path=db_path, limit_per_committee=8)
         n_mat = sum(r["materialised"] for r in matres)
-        _stage_finish(i, "done",
-                      f"{n_mat} meeting(s) populated" if n_mat else "materials current",
-                      f"{n_mat}件を取得" if n_mat else "対象なし")
+        n_mat_def = sum(r["deferred"] for r in matres)
+        mat_bits = [f"{n_mat} meeting(s) populated" if n_mat else "materials current"]
+        mat_bits_ja = [f"{n_mat}件を取得" if n_mat else "対象なし"]
+        if n_mat_def:
+            mat_bits.append(f"{n_mat_def} deferred")
+            mat_bits_ja.append(f"{n_mat_def}件繰越")
+        _stage_finish(i, "done", " · ".join(mat_bits), " · ".join(mat_bits_ja))
 
         # 2) Backfill any missing meeting dates.
         i = _stage_start("dates", "Backfilled meeting dates", "会合日を補完")

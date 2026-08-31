@@ -34,6 +34,7 @@ from repower.policy.store import (
     sync_committees,
     tracked_committees,
 )
+from repower.scrapers.http_cache import budget_exhausted
 
 
 def _select_committees(keys: list[str] | None, db_path: str | None):
@@ -85,9 +86,11 @@ def detect(
         {"key", "source", "status", "error_kind", "error_detail", "latest_online",
          "known_latest", "new", "enumerated", "dated"}
 
-    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error``, and on error
-    ``error_kind`` is a :data:`repower.scrapers.http_cache.FETCH_KINDS` slug naming
-    the cause (blocked, challenge never cleared, circuit open, moved URL, …). Each
+    ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error`` / ``deferred``,
+    and on error ``error_kind`` is a :data:`repower.scrapers.http_cache.FETCH_KINDS`
+    slug naming the cause (blocked, challenge never cleared, circuit open, moved
+    URL, …). ``deferred`` means the committee was never fetched because its host's
+    request allowance was spent — not a failure, just work for a later pass. Each
     outcome is persisted per committee — see
     :func:`repower.policy.store.set_committee_fetch_result` — because nothing else
     records it: the HTTP cache stores no row at all for these failures.
@@ -117,6 +120,16 @@ def detect(
                 progress(idx, total, c.key)
             except Exception:  # noqa: BLE001 — progress is best-effort UI feedback
                 pass
+        if budget_exhausted(c.url):
+            # The host's allowance is spent. Stopping here leaves it healthy for
+            # the next pass; pushing on would only collect blocked committees and
+            # teach the edge to escalate sooner (docs/GOTCHAS.md).
+            results.append({
+                "key": c.key, "source": c.source, "status": "deferred",
+                "error_kind": None, "error_detail": None, "latest_online": None,
+                "known_latest": None, "new": 0, "enumerated": 0, "dated": 0,
+            })
+            continue
         known = known_meeting_nums(c.key, db_path)
         known_latest = max(known) if known else None
 
@@ -227,7 +240,8 @@ def backfill_dates(
     WAF whose challenge/backoff can cost minutes per page, so re-reading settled
     committees is what used to starve the ones that actually need a date.
     ``occto_limit`` caps OCCTO subpage fetches per committee per run (None = no
-    cap). Returns one result dict per committee.
+    cap). Returns one result dict per committee, ``deferred`` marking those left
+    untouched because the host's request allowance was spent.
     """
     sync_committees(db_path)
     committees = _select_committees(keys, db_path)
@@ -237,8 +251,11 @@ def backfill_dates(
         updated = 0
         missing = set(meetings_missing_date(c.key, db_path)) if only_missing else None
         if missing is not None and not missing:
-            results.append({"key": c.key, "source": c.source, "dated": 0})
+            results.append({"key": c.key, "source": c.source, "dated": 0, "deferred": False})
             continue  # nothing to fill — don't spend a fetch on this committee
+        if budget_exhausted(c.url):
+            results.append({"key": c.key, "source": c.source, "dated": 0, "deferred": True})
+            continue
         if c.is_occto:
             nums = sorted(missing if missing is not None else known_meeting_nums(c.key, db_path),
                           reverse=True)
@@ -246,6 +263,8 @@ def backfill_dates(
                 nums = nums[:occto_limit]
             dates = {}
             for n in nums:
+                if budget_exhausted(c.url):
+                    break
                 d = fetch_occto_meeting_date(c, n, db_path=db_path)
                 if d is not None:
                     dates[n] = d
@@ -256,7 +275,7 @@ def backfill_dates(
             if missing is not None:
                 dates = {n: d for n, d in dates.items() if n in missing}
             updated = set_meeting_dates(c.key, dates, db_path=db_path)
-        results.append({"key": c.key, "source": c.source, "dated": updated})
+        results.append({"key": c.key, "source": c.source, "dated": updated, "deferred": False})
         logger.info("policy dates %-26s updated=%d", c.key, updated)
         time.sleep(POLITE_DELAY)  # be gentle on meti.go.jp between committees
 
@@ -281,7 +300,10 @@ def backfill_materials(
 
     Returns one result dict per committee::
 
-        {"key", "source", "materialised", "checked"}
+        {"key", "source", "materialised", "checked", "deferred"}
+
+    ``deferred`` counts meetings left untouched because the host's request
+    allowance ran out — they are not failures, just work for the next run.
     """
     sync_committees(db_path)
     committees = _select_committees(keys, db_path)
@@ -291,6 +313,10 @@ def backfill_materials(
         nums = meetings_missing_materials(c.key, db_path=db_path)
         if limit_per_committee is not None:
             nums = nums[:limit_per_committee]
+        if nums and budget_exhausted(c.url):
+            results.append({"key": c.key, "source": c.source, "materialised": 0,
+                            "checked": 0, "deferred": len(nums)})
+            continue
         # METI: resolve every meeting's subpage URL from ONE index fetch, so we
         # don't re-hit the (WAF-challenged) index once per meeting. If the index is
         # unreachable this run, defer the whole committee rather than hammering it.
@@ -300,11 +326,16 @@ def backfill_materials(
             if not meti_urls:
                 logger.info("policy materials %-26s index unreachable; deferring", c.key)
                 results.append(
-                    {"key": c.key, "source": c.source, "materialised": 0, "checked": 0}
+                    {"key": c.key, "source": c.source, "materialised": 0, "checked": 0,
+                     "deferred": len(nums)}
                 )
                 continue
         materialised = 0
+        checked = 0
         for n in nums:
+            if budget_exhausted(c.url):
+                break
+            checked += 1
             page_url = meti_urls.get(n) if meti_urls is not None else None
             mats = list_materials(c, n, db_path=db_path, page_url=page_url)
             if mats:
@@ -312,9 +343,11 @@ def backfill_materials(
                 materialised += 1
             time.sleep(POLITE_DELAY)  # be gentle between meeting-page fetches
         results.append(
-            {"key": c.key, "source": c.source, "materialised": materialised, "checked": len(nums)}
+            {"key": c.key, "source": c.source, "materialised": materialised,
+             "checked": checked, "deferred": len(nums) - checked}
         )
         if nums:
-            logger.info("policy materials %-26s materialised=%d/%d", c.key, materialised, len(nums))
+            logger.info("policy materials %-26s materialised=%d/%d deferred=%d",
+                        c.key, materialised, checked, len(nums) - checked)
 
     return results

@@ -465,6 +465,45 @@ def test_browser_is_not_used_for_a_plain_block(monkeypatch):
     assert called == []
 
 
+def test_host_budget_is_unlimited_for_unlisted_hosts(monkeypatch):
+    """Only hosts that escalate get a budget; OCCTO and the TSO scrapers must be
+    untouched by this."""
+    monkeypatch.setattr(http_cache, "_budget_used", {})
+
+    for _ in range(50):
+        http_cache._consume_budget("https://occto.example/x")
+
+    assert http_cache.budget_exhausted("https://occto.example/x") is False
+
+
+def test_host_budget_stops_after_its_allowance(monkeypatch):
+    monkeypatch.setattr(http_cache, "_HOST_BUDGET", {"meti.example": 2})
+    monkeypatch.setattr(http_cache, "_budget_used", {})
+
+    assert http_cache.budget_exhausted("https://meti.example/a") is False
+    http_cache._consume_budget("https://meti.example/a")
+    http_cache._consume_budget("https://meti.example/b")
+
+    assert http_cache.budget_exhausted("https://meti.example/c") is True
+    # Per host, like everything else here.
+    assert http_cache.budget_exhausted("https://other.example/c") is False
+
+
+def test_host_budget_refills_after_the_window(monkeypatch):
+    """Without a refill a long-lived process (web_api's catch-up) would starve
+    after its first pass and never make progress again."""
+    monkeypatch.setattr(http_cache, "_HOST_BUDGET", {"meti.example": 1})
+    monkeypatch.setattr(http_cache, "_budget_used", {})
+    _fake_clock(monkeypatch)  # sleeping advances the fake monotonic clock
+
+    http_cache._consume_budget("https://meti.example/a")
+    assert http_cache.budget_exhausted("https://meti.example/b") is True
+
+    http_cache.time.sleep(http_cache._BUDGET_WINDOW)
+
+    assert http_cache.budget_exhausted("https://meti.example/b") is False
+
+
 def test_curl_does_not_send_our_default_user_agent(monkeypatch):
     """impersonate="chrome" supplies a UA matching the TLS fingerprint it
     presents. Overriding it with our own (older, different-platform) string is

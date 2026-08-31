@@ -758,6 +758,60 @@ def test_backfill_materials_meti_fetches_index_once(monkeypatch, tmp_path):
     assert next(r for r in results if r["key"] == key)["materialised"] == 3
 
 
+def test_backfill_materials_stops_when_the_host_budget_is_spent(monkeypatch, tmp_path):
+    """meti.go.jp serves ~5 requests then blocks this IP outright for minutes, so a
+    sweep stops short of the cliff and leaves the rest for the next run rather than
+    collecting blocked meetings and teaching the edge to escalate sooner."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    key = "doji_shijo"  # METI
+    for n in range(1, 6):
+        store.record_meeting(key, n, None, db_path=db)
+
+    fetched: list[int] = []
+
+    def fake_list(c, n, **kw):
+        fetched.append(n)
+        return [Material(n, f"{n:03d}_01", f"https://x/{n}.pdf", "議事次第", "agenda")]
+
+    monkeypatch.setattr(detect_mod, "fetch_meti_url_map",
+                        lambda c, **kw: {n: f"https://x/{n:03d}.html" for n in range(1, 6)})
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(detect_mod, "budget_exhausted", lambda url: len(fetched) >= 2)
+
+    results = detect_mod.backfill_materials([key], db_path=db)
+
+    row = next(r for r in results if r["key"] == key)
+    assert row["checked"] == 2 and row["materialised"] == 2
+    assert row["deferred"] == 3  # reported, so the run doesn't read as complete
+    # Untouched, not failed: the next run picks them up.
+    assert store.meetings_missing_materials(key, db_path=db) == [3, 2, 1]
+
+
+def test_detect_defers_committees_once_the_host_budget_is_spent(monkeypatch, tmp_path):
+    """A deferred committee is never fetched, and is not recorded as a failure —
+    it simply wasn't looked at this pass."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    discovered: list[str] = []
+
+    def fake_discover(c, **kw):
+        discovered.append(c.key)
+        return Discovery(status="ok", meeting_nums=[1])
+
+    monkeypatch.setattr(detect_mod, "discover_meetings", fake_discover)
+    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
+    monkeypatch.setattr(detect_mod, "budget_exhausted", lambda url: len(discovered) >= 1)
+
+    results = detect_mod.detect(db_path=db)
+
+    assert len(discovered) == 1, "the sweep must stop after the allowance is spent"
+    deferred = [r for r in results if r["status"] == "deferred"]
+    assert len(deferred) == len(results) - 1
+    assert all(r["error_kind"] is None for r in deferred)
+
+
 def test_backfill_materials_defers_when_index_unreachable(monkeypatch, tmp_path):
     """If a METI committee's index can't be fetched (e.g. a persistent WAF 202),
     backfill defers the whole committee rather than hammering it per meeting."""
