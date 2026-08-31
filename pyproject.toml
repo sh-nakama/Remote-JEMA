@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
 policy = ["notebooklm-py[browser]>=0.7.3,<1"]
+# Headless browser used only to mint AWS WAF clearance tokens (meti.go.jp).
+# Needs `playwright install chromium` after pip install.
+browser = ["playwright>=1.44"]
 
 [project.scripts]
 repower = "repower.cli:app"

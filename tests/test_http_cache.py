@@ -6,6 +6,7 @@ and a temporary SQLite path holds the http_cache table.
 
 from __future__ import annotations
 
+import types
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -13,6 +14,14 @@ import pytest
 
 from repower.db import HttpCache, get_session, init_db
 from repower.scrapers import http_cache
+
+
+@pytest.fixture(autouse=True)
+def _no_browser(monkeypatch):
+    """No test may launch Chromium: the WAF paths reach for a real browser, and a
+    unit test must not depend on one being installed (or take seconds to say so).
+    Tests that exercise the browser branch patch it explicitly instead."""
+    monkeypatch.setenv("REPOWER_BROWSER_CLEARANCE", "0")
 
 
 def _patch(monkeypatch, responses):
@@ -340,6 +349,122 @@ def test_success_restores_the_full_challenge_ladder(monkeypatch):
     assert exc.value.attempts == len(http_cache._CHALLENGE_RETRY_DELAYS) + 1
 
 
+def test_waf_challenge_does_not_walk_the_backoff_ladder(monkeypatch):
+    """An AWS WAF challenge is a JavaScript proof-of-work: no HTTP client can
+    wait it out, so backing off 5s + 15s + 30s only burns the run's clock. One
+    attempt (carrying whatever token we could mint), then give up."""
+    sleeps, _made, calls = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202])
+
+    assert http_cache._curl_get(
+        "https://meti.example/a", {}, 30.0, js_challenge=True
+    ) is None
+
+    assert len(calls) == 1, "a JS challenge must not be retried"
+    assert sleeps == [http_cache._CHALLENGE_INITIAL_DELAY]
+
+
+def test_plain_202_still_walks_the_ladder(monkeypatch):
+    """The fast-fail is scoped to the WAF challenge: another edge's 202 may well
+    be the transient "clearance arming" case the ladder was written for."""
+    sleeps, _made, calls = _fake_curl_cffi(monkeypatch, [202, 202, 202, 202])
+
+    assert http_cache._curl_get("https://other.example/a", {}, 30.0) is None
+
+    assert len(calls) == len(http_cache._CHALLENGE_RETRY_DELAYS) + 1
+    assert sleeps[1:] == list(http_cache._CHALLENGE_RETRY_DELAYS)
+
+
+def test_challenge_header_is_what_selects_the_fast_path(monkeypatch):
+    _fake_httpx(monkeypatch, [(202, {"x-amzn-waf-action": "challenge"}, b"")])
+    seen: dict = {}
+
+    def fake_curl(url, headers, timeout, deadline=None, js_challenge=False):
+        seen["js_challenge"] = js_challenge
+        return None
+
+    monkeypatch.setattr(http_cache, "_curl_get", fake_curl)
+
+    with pytest.raises(http_cache.ChallengeNotClearedError) as exc:
+        http_cache._do_get("https://meti.example/a", {}, True, 30.0)
+
+    assert seen["js_challenge"] is True
+    # One attempt, honestly reported — not the ladder length we never walked.
+    assert exc.value.attempts == 1
+
+
+def test_clearance_cookies_ride_the_curl_session(monkeypatch):
+    """The browser-minted token is the only thing that can clear the challenge,
+    so it must reach the impersonating session that makes the real request."""
+    monkeypatch.setattr(
+        http_cache.browser_clearance, "cookies_for", lambda url: {"aws-waf-token": "tok"}
+    )
+    jar: list[tuple] = []
+
+    class _Session:
+        cookies = types.SimpleNamespace(
+            set=lambda name, value, domain=None: jar.append((name, value, domain))
+        )
+
+    assert http_cache._apply_clearance(_Session(), "https://www.meti.go.jp/x") is True
+    assert jar == [("aws-waf-token", "tok", "www.meti.go.jp")]
+
+
+def test_clearance_failure_is_not_a_fetch_failure(monkeypatch):
+    """Clearance is an optimisation: a browser that won't start must degrade to
+    the old behaviour, not raise into the middle of a scrape."""
+    def boom(url):
+        raise RuntimeError("no browser here")
+
+    monkeypatch.setattr(http_cache.browser_clearance, "cookies_for", boom)
+
+    assert http_cache._apply_clearance(object(), "https://www.meti.go.jp/x") is False
+
+
+def test_http_client_is_persistent_per_host(monkeypatch):
+    """Cookies (a clearance token above all) only accumulate if the client
+    outlives the request that earned them."""
+    monkeypatch.setattr(http_cache, "_http_clients", {})
+
+    a1 = http_cache._http_client("https://a.example/1")
+    a2 = http_cache._http_client("https://a.example/2")
+    b1 = http_cache._http_client("https://b.example/1")
+
+    assert a1 is a2
+    assert a1 is not b1
+
+
+def test_browser_is_the_last_resort_for_a_challenge(monkeypatch):
+    """Only a browser can run the proof-of-work, so when the cheap transports are
+    refused it gets the last word rather than the request being lost."""
+    _fake_httpx(monkeypatch, [(202, {"x-amzn-waf-action": "challenge"}, b"")])
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+    monkeypatch.setattr(
+        http_cache.browser_clearance,
+        "fetch",
+        lambda url, headers=None: (200, b"via-browser", "e", "lm"),
+    )
+
+    assert http_cache._do_get("https://meti.example/a", {}, True, 30.0) == (
+        200, b"via-browser", "e", "lm",
+    )
+
+
+def test_browser_is_not_used_for_a_plain_block(monkeypatch):
+    """A 403 from a host with no JS challenge is curl_cffi's job; launching a
+    browser for it would spend seconds to learn the same 403."""
+    _fake_httpx(monkeypatch, [(403, {}, b"")])
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+    called: list = []
+    monkeypatch.setattr(
+        http_cache.browser_clearance, "fetch", lambda url, headers=None: called.append(url)
+    )
+
+    with pytest.raises(http_cache.BlockedError):
+        http_cache._do_get("https://kyuden.example/a", {}, True, 30.0)
+
+    assert called == []
+
+
 def test_curl_does_not_send_our_default_user_agent(monkeypatch):
     """impersonate="chrome" supplies a UA matching the TLS fingerprint it
     presents. Overriding it with our own (older, different-platform) string is
@@ -376,13 +501,18 @@ def test_httpx_path_still_sends_the_default_user_agent(monkeypatch):
         sent.update(kwargs.get("headers") or {})
         return _Resp()
 
-    monkeypatch.setattr(http_cache.httpx, "get", fake_get)
+    class _FakeClient:
+        get = staticmethod(fake_get)
+
+    monkeypatch.setattr(http_cache, "_http_client", lambda url: _FakeClient())
     monkeypatch.setattr(http_cache, "_pace_host", lambda url: None)
 
     http_cache._do_get("https://a.example/1", {"Accept-Language": "ja"}, False, 30.0)
 
     assert sent["User-Agent"] == http_cache._DEFAULT_UA
     assert sent["Accept-Language"] == "ja"
+    # AWS WAF only serves its challenge page to something that admits text/html.
+    assert "text/html" in sent["Accept"]
 
 
 def test_caller_user_agent_overrides_the_default_on_the_httpx_path(monkeypatch):
@@ -397,7 +527,10 @@ def test_caller_user_agent_overrides_the_default_on_the_httpx_path(monkeypatch):
         sent.update(kwargs.get("headers") or {})
         return _Resp()
 
-    monkeypatch.setattr(http_cache.httpx, "get", fake_get)
+    class _FakeClient:
+        get = staticmethod(fake_get)
+
+    monkeypatch.setattr(http_cache, "_http_client", lambda url: _FakeClient())
     monkeypatch.setattr(http_cache, "_pace_host", lambda url: None)
 
     http_cache._do_get("https://a.example/1", {"User-Agent": "custom/1.0"}, False, 30.0)
@@ -458,7 +591,7 @@ def test_politeness_floor_stays_above_one_second():
 
 # ── httpx-level fakes: the failure/fallback paths inside _do_get ─────────────
 def _fake_httpx(monkeypatch, responses):
-    """Patch ``httpx.get`` to yield *responses* in order.
+    """Patch the per-host client's ``get`` to yield *responses* in order.
 
     Each entry is either an ``Exception`` (raised) or ``(status, headers, body)``.
     Returns the list recording each call's url/headers.
@@ -486,7 +619,10 @@ def _fake_httpx(monkeypatch, responses):
             raise nxt
         return _Resp(*nxt)
 
-    monkeypatch.setattr(http_cache.httpx, "get", fake_get)
+    class _FakeClient:
+        get = staticmethod(fake_get)
+
+    monkeypatch.setattr(http_cache, "_http_client", lambda url: _FakeClient())
     monkeypatch.setattr(http_cache, "_last_request_at", {})
     monkeypatch.setattr(http_cache, "_circuit_failures", {})
     monkeypatch.setattr(http_cache, "_circuit_open_until", {})
@@ -504,14 +640,17 @@ def test_403_falls_back_to_curl(monkeypatch):
     _fake_httpx(monkeypatch, [(403, {}, b"")])
     seen = {}
 
-    def fake_curl(url, headers, timeout, deadline=None):
+    def fake_curl(url, headers, timeout, deadline=None, js_challenge=False):
         seen["url"] = url
+        seen["js_challenge"] = js_challenge
         return (200, b"via-curl", "e", "lm")
 
     monkeypatch.setattr(http_cache, "_curl_get", fake_curl)
 
     assert http_cache._do_get("http://x/f", {}, True, 30.0) == (200, b"via-curl", "e", "lm")
     assert seen["url"] == "http://x/f"
+    # No x-amzn-waf-action header: a plain block, so the ladder still applies.
+    assert seen["js_challenge"] is False
 
 
 def test_403_without_fallback_raises_blocked(monkeypatch):

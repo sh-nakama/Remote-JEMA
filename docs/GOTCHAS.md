@@ -117,6 +117,34 @@ fixed.
   it is synced to HF and otherwise grows forever. Eviction is safe — a missing entry costs one
   unconditional re-fetch — and anything still being requested is re-touched every run.
   `repower cache status` reports per-host entries/last-success/failures.
+- **METI's block is an AWS WAF *challenge*, and no HTTP client can ever clear it.** Measured
+  against the live host: a 202 carries `x-amzn-waf-action: challenge` and a page whose
+  `challenge.js` runs a JavaScript proof-of-work to mint an `aws-waf-token` cookie. curl_cffi
+  impersonates Chrome's TLS/HTTP2 fingerprint — which beats *fingerprint* rules — but has no JS
+  engine, and once the edge has flagged the caller it is challenged exactly as often as plain
+  httpx. So waiting is not a strategy: `_curl_get(js_challenge=True)` makes one attempt and
+  stops instead of walking the 5s+15s+30s ladder for a cookie that will never arrive.
+  `browser_clearance.fetch` (headless Chromium, optional `[browser]` extra) is the last resort
+  and the only one that works; it runs `fetch()` *inside* the page so the request inherits the
+  browser's TLS stack, cookies and referer, and returns base64 (PDFs are the common case).
+- **The 202 body is empty unless you ask for HTML.** AWS WAF only serves the challenge
+  interstitial to a request whose `Accept` admits `text/html`; with httpx's default `*/*` you
+  get a 0-byte 202 and cannot see what you are being asked to do. `_BROWSER_HEADERS` fixes this
+  — don't trim it back to a lone User-Agent.
+- **The WAF escalates, and escalation outlives the burst.** Normal → challenge (202) → block
+  (403), keyed on the client rather than the URL: at the 403 stage even real Chrome is refused.
+  A tight burst of cache-busting requests reaches 403 in seconds and takes ~15 minutes to decay.
+  Diagnose with single spaced requests, never a loop.
+- **At the 403 stage the block is IP-wide, and no client shape escapes it.** Measured on one URL
+  seconds apart: browser navigation, in-page `fetch()` and Playwright's request context all
+  returned the same 403 block page. So the browser transport only helps at the *challenge*
+  stage; once METI has escalated, the only remedy is time. Budget observed on a real backfill:
+  ~5 requests get through, then 403 for ~5 minutes — which is why healing is incremental by
+  nature and the fix is scheduling (small spaced runs, rotation order), not a better client.
+- **Every plain request used to open a fresh client.** `_do_get` called module-level
+  `httpx.get`, so each request paid a new TLS handshake and — worse — dropped its cookie jar,
+  making any clearance cookie unusable by design. `_http_client(url)` now memoises one client
+  per host; keep it that way.
 
 ## The HF dataset sync (shared mutable state)
 

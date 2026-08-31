@@ -39,6 +39,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from repower.db import HttpCache, get_session, init_db
+from repower.scrapers import browser_clearance
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +476,70 @@ _DEFAULT_UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+# The rest of a browser's navigation headers. A lone User-Agent is a tell — and
+# more concretely, AWS WAF only serves its challenge *page* to a request whose
+# Accept admits text/html; with httpx's default ``*/*`` the 202 comes back with an
+# empty body, so the client cannot even see what it is being asked to do.
+# Accept-Encoding is deliberately absent: httpx sets it from the codecs it can
+# actually decode, and advertising one we can't is worse than not looking like a
+# browser.
+_BROWSER_HEADERS: dict[str, str] = {
+    "User-Agent": _DEFAULT_UA,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# AWS WAF names the action it took. ``challenge`` means a JavaScript proof-of-work
+# stands between us and the page — see repower.scrapers.browser_clearance.
+_WAF_ACTION_HEADER = "x-amzn-waf-action"
+_WAF_CHALLENGE_ACTION = "challenge"
+
+# One httpx client per host for the process's lifetime. Previously every request
+# went through module-level ``httpx.get``, i.e. a fresh client: a new TLS
+# handshake each time and, worse, a cookie jar that was discarded before the next
+# request could use it — so no clearance or session cookie could ever accumulate.
+_http_clients: dict[str, httpx.Client] = {}
+_http_client_lock = threading.Lock()
+
+
+def _http_client(url: str) -> httpx.Client:
+    """The persistent client for *url*'s host, created on first use.
+
+    Per host so one server's cookies and connections stay its own, and so a
+    wedged client can be discarded without disturbing the others.
+    """
+    host = _host_key(url)
+    with _http_client_lock:
+        client = _http_clients.get(host)
+        if client is None:
+            client = httpx.Client(follow_redirects=True)
+            _http_clients[host] = client
+        return client
+
+
+def reset_http_clients() -> None:
+    """Close and forget every per-host client (tests, and manual recovery)."""
+    with _http_client_lock:
+        clients = list(_http_clients.values())
+        _http_clients.clear()
+    for client in clients:
+        _close_quietly(client)
+
+
+def _is_waf_challenge(resp: Any) -> bool:
+    """True if *resp* is an AWS WAF JavaScript challenge rather than a plain block."""
+    action = resp.headers.get(_WAF_ACTION_HEADER) or ""
+    return action.strip().casefold() == _WAF_CHALLENGE_ACTION
+
+
 # One curl_cffi session per host, reused for the process's lifetime, so a WAF
 # clearance cookie earned on one URL is replayed on the host's later URLs instead
 # of being re-earned (minutes of challenge backoff) per URL. Keyed per host both
@@ -855,12 +920,11 @@ def _do_get(
         _pace_host(url)  # space consecutive same-host requests to a human pace
         # The default UA belongs to this transport only — the curl fallback gets the
         # headers untouched so impersonation supplies a UA matching its fingerprint.
-        httpx_headers = {"User-Agent": _DEFAULT_UA, **headers}
+        httpx_headers = {**_BROWSER_HEADERS, **headers}
         try:
-            resp = httpx.get(
+            resp = _http_client(url).get(
                 url,
                 timeout=deadline.clamp_timeout(timeout),
-                follow_redirects=True,
                 headers=httpx_headers,
             )
         except Exception:
@@ -875,13 +939,25 @@ def _do_get(
         # behind CloudFront + WAF and answers plain HTTP stacks with either). Both
         # yield to the browser-impersonating fallback.
         if resp.status_code in (403, 202):
+            # An AWS WAF *challenge* is a JavaScript proof-of-work, so no amount of
+            # waiting will clear it and the backoff ladder is dead time; only a
+            # browser-minted token helps, which _curl_get goes and fetches.
+            js_challenge = _is_waf_challenge(resp)
             # Snapshot before the fallback: it marks the host exhausted on failure,
             # so asking afterwards would report 1 attempt even for the full ladder.
             # This number reaches last_error_detail, so it has to be the truth.
-            attempts = len(_challenge_ladder_for(url)) + 1
+            attempts = 1 if js_challenge else len(_challenge_ladder_for(url)) + 1
             if allow_curl_fallback:
-                r = _curl_get(url, headers, timeout, deadline)
+                r = _curl_get(url, headers, timeout, deadline, js_challenge=js_challenge)
                 if r is not None:
+                    _circuit_record_success(url)
+                    return r
+            if js_challenge:
+                # Last resort, and the only one that can actually work: a real
+                # browser runs the proof-of-work. Costly, so it is reached only
+                # after the cheap transports have been refused.
+                r = browser_clearance.fetch(url, httpx_headers)
+                if r is not None and r[0] in (200, 304, 404):
                     _circuit_record_success(url)
                     return r
             # Fallback unavailable, or it could not clear the block either.
@@ -928,7 +1004,31 @@ def _do_get(
     raise UnexpectedStatusError(url, last_resp.status_code)
 
 
-def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | None = None):
+def _apply_clearance(session: Any, url: str) -> bool:
+    """Put a browser-minted WAF token on *session*'s cookie jar.
+
+    Returns True if one was applied. Best-effort: clearance is an optimisation,
+    so a browser that won't start must not turn into a fetch failure.
+    """
+    try:
+        cookies = browser_clearance.cookies_for(url)
+        if not cookies:
+            return False
+        for name, value in cookies.items():
+            session.cookies.set(name, value, domain=_host_key(url))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not apply clearance cookies for %s: %s", url, e)
+        return False
+    return True
+
+
+def _curl_get(
+    url: str,
+    headers: dict,
+    timeout: float,
+    deadline: _Deadline | None = None,
+    js_challenge: bool = False,
+):
     """curl_cffi Chrome-impersonation fallback. Returns the same 4-tuple, or
     None if curl_cffi is unavailable or the request did not yield a usable
     status. Conditional headers are forwarded so 304s still work for Kyuden.
@@ -939,11 +1039,15 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
 
     The host's session is reused across calls (see ``_curl_sessions``), so a
     WAF/Akamai clearance cookie earned once is replayed by the host's later URLs
-    rather than being re-earned per URL. A 202 is retried with the lengthening
-    ``_CHALLENGE_RETRY_DELAYS`` backoff — but only until that ladder fails once for
-    the host (see ``_challenge_exhausted``), after which its URLs get a single
-    unbacked-off attempt each. If the budget is exhausted the cookie jar has failed
-    to clear, so it is discarded rather than carried forward.
+    rather than being re-earned per URL.
+
+    ``js_challenge`` says the block was an AWS WAF challenge. That changes the
+    strategy completely: impersonation alone cannot solve a proof-of-work, so
+    instead of backing off we ask :mod:`repower.scrapers.browser_clearance` for a
+    browser-minted token and make a single attempt carrying it. Otherwise (a
+    fingerprint-style 403, or a 202 from some other edge) the lengthening
+    ``_CHALLENGE_RETRY_DELAYS`` ladder still applies, once per host — see
+    ``_challenge_exhausted``.
 
     Retries are paced like any other request, and the whole ladder is bounded by
     *deadline* so a hostile host can't consume the run.
@@ -961,14 +1065,17 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
         session = _curl_session_for(host, cr)
         if session is None:
             return None
+        if js_challenge:
+            _apply_clearance(session, url)
         # Don't slam the fallback request in the same instant as the httpx 202 — a
         # short warm-up gap keeps the initial fallback from re-tripping the challenge.
         if not deadline.allows(_CHALLENGE_INITIAL_DELAY):
             return None
         time.sleep(_CHALLENGE_INITIAL_DELAY)
-        # Empty once this host has already failed a ladder: one real attempt is
-        # still made (the WAF may have relented), but without the long backoff.
-        delays = _challenge_ladder_for(url)
+        # Empty for a JS challenge (waiting cannot mint a token), and once this
+        # host has already failed a ladder: one real attempt is still made (the
+        # WAF may have relented), but without the long backoff.
+        delays = () if js_challenge else _challenge_ladder_for(url)
         for attempt in range(len(delays) + 1):
             if deadline.expired():
                 # Out of time: the jar hasn't cleared, so don't carry it forward.
@@ -1012,6 +1119,10 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
                 continue
             # Out of retries (or an unusable status): these cookies aren't working.
             if r.status_code == 202:
+                if js_challenge:
+                    # The token we carried (if any) did not clear the challenge, so
+                    # don't hand the same one to the next URL — re-mint instead.
+                    browser_clearance.invalidate(url)
                 _mark_challenge_exhausted(url)
             reset_curl_sessions(host)
             return None
