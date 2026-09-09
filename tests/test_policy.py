@@ -2118,3 +2118,180 @@ def test_add_source_retries_a_dropped_upload_once(monkeypatch):
     with pytest.raises(nb_mod.NotebookLMTimeout):
         nb_mod.add_source("nb1", "C:/tmp/a.pdf")
     assert len(calls) == 2
+
+
+def _no_probe(*a, **kw):
+    """Stand-in for the probe: reaching it means the JSON path failed to answer."""
+    raise AssertionError("the number probe was reached; the JSON should have answered")
+
+
+# ── OCCTO list JSON (replaces the number probe) ──────────────────────────────
+# OCCTO's index is rendered client-side, so its raw HTML carries no meetings at
+# all — which is why discovery probed {n}.html one number at a time. The page's
+# own JavaScript reads a per-committee JSON, which answers the same question in
+# one cacheable request and carries the meeting dates too.
+
+def _occto(key="x", path="x"):
+    return Committee(
+        key=key, name_ja=key, name_en=key,
+        url=f"https://www.occto.or.jp/iinkai/{path}/index.html", source="OCCTO",
+    )
+
+
+def _occto_json(*items) -> bytes:
+    import json as _json
+    return _json.dumps(list(items), ensure_ascii=False).encode("utf-8")
+
+
+def test_occto_json_yields_meeting_numbers_and_dates():
+    raw = _occto_json(
+        {"url": "/iinkai/x/76.html", "meeting_date": "2026-09-01 00:00:00"},
+        {"url": "/iinkai/x/75.html", "meeting_date": "2026-07-28 00:00:00"},
+    )
+
+    nums, dates = scraper.parse_occto_list_json(raw, _occto())
+
+    assert nums == [76, 75]
+    assert dates == {76: datetime.date(2026, 9, 1), 75: datetime.date(2026, 7, 28)}
+
+
+def test_occto_json_reads_fiscal_year_numbering():
+    """`margin_kentoukai` and `unyouyouryou` number by fiscal year (26001 =
+    FY2026's first meeting). An upward probe from 1 can never reach those, which
+    is why both committees reported "no OCCTO meeting pages found" indefinitely."""
+    raw = _occto_json(
+        {"url": "/iinkai/margin_kentoukai/26001.html", "meeting_date": "2026-06-05 00:00:00"},
+        {"url": "/iinkai/margin_kentoukai/25004.html", "meeting_date": "2026-02-09 00:00:00"},
+    )
+
+    nums, dates = scraper.parse_occto_list_json(raw, _occto("margin", "margin_kentoukai"))
+
+    assert nums == [26001, 25004]
+    assert dates[26001] == datetime.date(2026, 6, 5)
+
+
+def test_occto_json_drops_another_committees_meetings():
+    """The endpoint is keyed by category, not committee: `chousei_sagyoukai`'s JSON
+    is 80 `jukyuchousei` URLs. Attributing those to the requester would invent
+    meeting numbers its own pages never had."""
+    raw = _occto_json(
+        {"url": "/iinkai/jukyuchousei/63.html", "meeting_date": "2026-09-15 00:00:00"},
+        {"url": "/iinkai/jukyuchousei/62.html", "meeting_date": "2026-07-31 00:00:00"},
+    )
+
+    nums, dates = scraper.parse_occto_list_json(raw, _occto("sagyoukai", "chousei_sagyoukai"))
+
+    assert nums == []
+    assert dates == {}
+
+
+def test_occto_json_survives_a_missing_date_and_junk_items():
+    raw = _occto_json(
+        {"url": "/iinkai/x/9.html", "meeting_date": None},
+        {"url": "/iinkai/x/8.html"},
+        {"url": "/iinkai/x/notanumber.html", "meeting_date": "2026-01-01 00:00:00"},
+        "not a dict",
+    )
+
+    nums, dates = scraper.parse_occto_list_json(raw, _occto())
+
+    assert nums == [9, 8], "a dateless meeting is still a meeting"
+    assert dates == {}
+
+
+def test_occto_json_unreadable_body_is_not_a_crash():
+    nums, dates = scraper.parse_occto_list_json(b"<html>not json</html>", _occto())
+    assert (nums, dates) == ([], {})
+
+
+def test_occto_discovery_prefers_the_json(monkeypatch):
+    raw = _occto_json({"url": "/iinkai/x/12.html", "meeting_date": "2026-05-01 00:00:00"})
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", raw))
+    monkeypatch.setattr(scraper, "probe_occto_latest", _no_probe)
+
+    disc = scraper.discover_meetings(_occto())
+
+    assert disc.status == "ok"
+    assert disc.meeting_nums == [12]
+    assert disc.dates == {12: datetime.date(2026, 5, 1)}
+
+
+def test_occto_json_is_always_fetched_with_a_body(monkeypatch):
+    """A 304 is cheaper but carries no body, so the under-report guard below
+    cannot run and an under-reporting committee would report "unchanged" forever
+    without ever probing — the one failure mode here that loses meetings silently.
+    Both paths are bound by the 2s per-host pacing floor anyway (84s vs 52s over
+    27 committees, against ~240s for the probe), so the body is cheap insurance."""
+    seen: list[bool] = []
+
+    def fake_fetch(url, **kw):
+        seen.append(kw.get("force", False))
+        return scraper.FetchResult(
+            "ok", _occto_json({"url": "/iinkai/x/5.html", "meeting_date": None})
+        )
+
+    monkeypatch.setattr(scraper, "_fetch_ex", fake_fetch)
+    monkeypatch.setattr(scraper, "probe_occto_latest", _no_probe)
+
+    scraper.discover_meetings(_occto())
+
+    assert seen == [True], "the OCCTO list JSON must not be served from a 304"
+
+
+def test_occto_falls_back_to_the_probe_when_the_json_is_gone(monkeypatch):
+    """OCCTO could restructure its site at any time. The probe still works, so a
+    missing JSON must cost speed, not correctness."""
+    monkeypatch.setattr(
+        scraper, "_fetch_ex",
+        lambda url, **kw: scraper.FetchResult("error", None, kind="not_found", url=url),
+    )
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(
+        scraper, "_exists", lambda url: url.rsplit("/", 1)[-1] == "11.html",
+    )
+
+    disc = scraper.discover_meetings(_occto(), known_latest=10)
+
+    assert disc.status == "ok"
+    assert disc.meeting_nums[0] == 11
+
+
+def test_occto_falls_back_when_the_json_holds_nothing_of_its_own(monkeypatch):
+    """The category-bleed case must reach the probe rather than report zero
+    meetings, which detection would read as a healthy empty committee."""
+    raw = _occto_json({"url": "/iinkai/someone_else/5.html", "meeting_date": None})
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", raw))
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(scraper, "_exists", lambda url: url.rsplit("/", 1)[-1] == "3.html")
+
+    disc = scraper.discover_meetings(_occto())
+
+    assert disc.status == "ok"
+    assert disc.meeting_nums[0] == 3
+
+
+def test_occto_falls_back_when_the_json_reports_less_than_we_know(monkeypatch):
+    """`chousei_sagyoukai`'s JSON lists only up to 72 under its own path while
+    pages through 80 demonstrably exist. Trusting it would park the committee
+    below its real frontier and silently stop detecting new meetings — the probe,
+    which scans *above* the frontier, cannot make that mistake."""
+    raw = _occto_json({"url": "/iinkai/x/72.html", "meeting_date": "2026-01-01 00:00:00"})
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", raw))
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(scraper, "_exists", lambda url: url.rsplit("/", 1)[-1] == "81.html")
+
+    disc = scraper.discover_meetings(_occto(), known_latest=80)
+
+    assert disc.meeting_nums[0] == 81, "the probe must get the last word here"
+
+
+def test_occto_json_is_trusted_when_it_matches_what_we_know(monkeypatch):
+    """The guard must not fire on the normal settled case, or every committee
+    pays the probe forever and the change buys nothing."""
+    raw = _occto_json({"url": "/iinkai/x/80.html", "meeting_date": "2026-01-01 00:00:00"})
+    monkeypatch.setattr(scraper, "_fetch_ex", lambda url, **kw: scraper.FetchResult("ok", raw))
+    monkeypatch.setattr(scraper, "probe_occto_latest", _no_probe)
+
+    disc = scraper.discover_meetings(_occto(), known_latest=80)
+
+    assert disc.meeting_nums == [80]

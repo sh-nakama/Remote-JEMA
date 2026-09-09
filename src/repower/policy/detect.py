@@ -141,7 +141,10 @@ def detect(
         # what left 原子力小委員会 showing 検出 dates). Re-request the index once,
         # scoped to committees that actually lack dates, so the repair cost is
         # bounded by that shrinking set rather than by the committee count.
-        if disc.status == "unchanged" and not c.is_occto and meetings_missing_date(c.key, db_path):
+        # OCCTO used to be excluded here because its number probe could not report
+        # a date. It no longer needs excluding: its list JSON carries dates and is
+        # always fetched with a body, so it never reaches this branch anyway.
+        if disc.status == "unchanged" and meetings_missing_date(c.key, db_path):
             logger.info("policy detect %-26s 304 but dates missing; re-fetching index", c.key)
             forced = discover_meetings(
                 c, db_path=db_path, known_latest=known_latest, force=True

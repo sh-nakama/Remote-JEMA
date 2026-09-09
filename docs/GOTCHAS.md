@@ -49,6 +49,28 @@ fixed.
   httpx→curl_cffi Chrome-impersonation fallback is the workaround; it's duplicated in ~4 places
   (`http_cache`, `policy/pipeline._download_pdf`, `policy/scraper`, `policy/energy_board`,
   `policy/catalog`) — change all of them or centralize.
+- **OCCTO discovery reads a JSON, not the index — and not the number probe.** OCCTO's committee
+  index is rendered client-side (its raw HTML contains no meeting data at all, which is why
+  discovery used to probe `{n}.html` one number at a time). The page's own JavaScript reads
+  `/_include/json/committees-list_<slug>.json`, where `<slug>` is the last path segment of the
+  committee URL; all 27 tracked committees have one. It lists every meeting with its
+  `meeting_date`, so detection persists dates for free instead of leaving them to
+  `backfill_dates`. Measured: ~240s → ~90s over 27 committees, 81 requests → 27, and it revived
+  `margin_kentoukai` and `unyouyouryou`, which number by **fiscal year** (`26001.html` = FY2026's
+  first) and so could never be found by an upward probe from 1 — both had reported `not_found`
+  indefinitely. Three traps if you touch this:
+  - **The endpoint is keyed by category, not committee.** `chousei_sagyoukai`'s JSON lists
+    `jukyuchousei` URLs. `parse_occto_list_json` keeps only items under the committee's own path;
+    anything else would invent meeting numbers its pages never had.
+  - **It can under-report.** `chousei_sagyoukai` tops out at 72 under its own path while pages
+    through 80 exist. `_discover_occto_json` therefore returns `None` (→ probe) whenever the JSON
+    reports less than `known_latest`. This is also why the JSON is fetched with `force=True`
+    rather than conditionally: a 304 carries no body, the guard could not run, and an
+    under-reporting committee would report `unchanged` forever without probing — the one failure
+    here that loses meetings silently. Both paths are bound by the 2s pacing floor anyway (84s vs
+    52s over 27 committees), so the body is cheap insurance.
+  - `probe_occto_latest` is still the fallback for all of those cases, and for OCCTO
+    restructuring its site. Don't delete it — a missing JSON must cost speed, not correctness.
 - Scrapers **fail soft by design**: per-URL/per-region errors are caught broadly and produce
   0 rows, not exceptions. A systematic outage looks like "0 rows upserted", not a red run —
   check row counts, not just exit codes. Kyushu/Chugoku URL patterns are reverse-engineered
