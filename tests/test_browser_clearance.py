@@ -255,3 +255,57 @@ def test_fetch_keeps_the_cheap_origin_reuse(monkeypatch):
     bc._page("https://www.meti.go.jp/a.pdf")
 
     assert page.gotos == []
+
+
+# ── Minting aims at the blocked path, not the origin ─────────────────────────
+def test_mint_target_keeps_a_directory_url_as_is():
+    assert bc._mint_target(
+        "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+    ) == "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+
+
+def test_mint_target_keeps_an_html_page():
+    assert bc._mint_target(
+        "https://www.egc.meti.go.jp/activity/index_emsc.html"
+    ) == "https://www.egc.meti.go.jp/activity/index_emsc.html"
+
+
+def test_mint_target_reduces_a_pdf_to_its_directory():
+    # Navigating to a PDF opens the viewer or downloads it, rather than rendering
+    # a document that can run challenge.js.
+    assert bc._mint_target(
+        "https://www.meti.go.jp/shingikai/x/pdf/014_07_01.pdf"
+    ) == "https://www.meti.go.jp/shingikai/x/pdf/"
+
+
+def test_mint_target_drops_query_and_fragment():
+    assert bc._mint_target("https://www.meti.go.jp/a/b/?x=1#f") == "https://www.meti.go.jp/a/b/"
+
+
+def test_mint_navigates_to_the_blocked_path_not_the_origin(monkeypatch):
+    """The regression this exists to prevent. METI challenges paths
+    independently, so navigating to `/` gambles that the root happens to be
+    guarded at that instant. When it isn't, the visit is unchallenged, no token is
+    minted, and the caller logs "no aws-waf-token issued" a couple of hundred
+    milliseconds later while the path it wanted stays blocked."""
+    page = _NavPage("")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._mint("https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/")
+
+    assert page.gotos == [
+        "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+    ], "minting navigated somewhere other than the blocked path"
+
+
+def test_fetch_still_navigates_to_the_origin(monkeypatch):
+    """`fetch` only needs a same-origin document to run its in-page fetch from,
+    and must not pay a deep navigation per call."""
+    page = _NavPage("")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._page("https://www.meti.go.jp/shingikai/x/pdf/1.pdf")
+
+    assert page.gotos == ["https://www.meti.go.jp/"]

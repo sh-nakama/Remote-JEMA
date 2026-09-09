@@ -31,7 +31,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +79,37 @@ def _host(url: str) -> str:
 def _origin(url: str) -> str:
     parts = urlsplit(url)
     return f"{parts.scheme}://{parts.netloc}/"
+
+
+# Suffixes we are willing to navigate *to* when minting. Anything else (a PDF,
+# a ZIP) would open a viewer or start a download rather than render a document
+# that can run challenge.js, so we navigate to its directory instead.
+_NAVIGABLE_SUFFIXES = frozenset({"", ".html", ".htm", ".php", ".aspx", ".jsp"})
+
+
+def _mint_target(url: str) -> str:
+    """The URL to navigate to in order to raise *url*'s challenge.
+
+    Not the origin root, which is what this used to use. METI challenges paths
+    independently: measured on one client seconds apart, ``/`` answered 202
+    ``challenge`` while a ``/shingikai/...`` committee path answered 200, and the
+    reverse happens too. Navigating to the root therefore *gambles* that the root
+    is guarded at that instant — and when it is not, the visit is unchallenged, no
+    token is minted, and the caller logs "no aws-waf-token issued" a couple of
+    hundred milliseconds later while the path it actually wanted stays blocked.
+    A fresh profile sent straight at the blocked path gets its 202 and a token
+    within a second.
+
+    A file URL is reduced to its directory: navigating to a PDF opens the viewer
+    (or downloads it) instead of rendering a page that can run the challenge.
+    """
+    parts = urlsplit(url)
+    path = parts.path or "/"
+    tail = path.rsplit("/", 1)[-1]
+    suffix = "." + tail.rsplit(".", 1)[-1].lower() if "." in tail else ""
+    if suffix not in _NAVIGABLE_SUFFIXES:
+        path = path[: len(path) - len(tail)] or "/"
+    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
 
 
 def _host_lock(host: str) -> threading.Lock:
@@ -247,13 +278,17 @@ def _hide_headless_ua(context, page) -> None:
         logger.debug("could not override the headless User-Agent: %s", e)
 
 
-def _page(url: str, *, revisit: bool = False):
+def _page(url: str, *, revisit: bool = False, target: str | None = None):
     """A page whose document is on *url*'s origin.
 
     The origin matters: :func:`fetch` runs ``fetch()`` *inside* the document, so
     the request inherits the page's cookies, referer and the browser's own TLS
     stack — which is the entire point. Navigating also triggers (and thereby
     solves) any challenge before the real request is made.
+
+    *target* is where to navigate when a navigation happens, defaulting to the
+    origin. :func:`_mint` overrides it with the path whose challenge it is trying
+    to raise — see :func:`_mint_target`.
 
     *revisit* forces that navigation even when the page is already on the origin.
     Being "already there" is not the same as being somewhere useful: a page parked
@@ -272,7 +307,12 @@ def _page(url: str, *, revisit: bool = False):
         _local.page = page
     origin = _origin(url)
     if revisit or not page.url.startswith(origin):
-        response = page.goto(origin, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT * 1000)
+        response = page.goto(
+            target or origin, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT * 1000
+        )
+        # goto returns at domcontentloaded, which is *before* challenge.js has
+        # finished its proof-of-work — the cookie appears about a second later, so
+        # reading the jar straight after this would always come up empty.
         if response is not None and _is_challenge(response):
             _await_clearance(context, page, url)
     return page
@@ -355,7 +395,9 @@ def _mint(url: str) -> dict[str, str]:
     of the trade.
     """
     context = _context()
-    _page(url, revisit=True)  # navigating is what triggers, and clears, the challenge
+    # Navigating is what triggers, and clears, the challenge — and it has to be
+    # aimed at the path we actually want (see _mint_target), not the origin.
+    _page(url, revisit=True, target=_mint_target(url))
     jar = {c["name"]: c["value"] for c in context.cookies(url)}
     return jar if TOKEN_COOKIE in jar else {}
 
