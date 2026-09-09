@@ -268,21 +268,28 @@ def reset_pacing() -> None:
         _last_request_at.clear()
 
 
-# Per-host request allowance. Some hosts answer a sustained crawl with an
-# escalating block rather than a 429: meti.go.jp lets roughly five requests
-# through, then serves 403 to everything from this IP — real browsers included —
-# for minutes, and walking into it repeatedly teaches the edge to escalate sooner.
-# Pacing does not help, because the rule is not rate-based (see _MIN_HOST_INTERVAL).
+# Per-host request allowance, for hosts that answer a sustained crawl with an
+# escalating block rather than a 429.
 #
-# So a sweep stops just short of the cliff and comes back later. The allowance
-# refills after _BUDGET_WINDOW, which is what lets a long-lived process (web_api's
-# catch-up) keep making progress instead of starving after its first pass.
+# The number was 4, sized against a measurement taken *without* a WAF token on
+# the requesting client — which is the one condition under which meti.go.jp
+# refuses nearly everything, so the "roughly five requests then an IP-wide 403"
+# it appeared to show was mostly the challenge, not a rate rule. Carrying the
+# token (see _WAF_CHALLENGE_HOSTS) 25 URLs at 1s spacing returned 20 × 200 and
+# ~40MB in 29s before the 21st came back 405. 16 keeps a wide margin under that
+# observed cliff, since the 405 was never identified — it may be a rate rule, in
+# which case the ceiling moves with spacing.
+#
+# Pacing is still not the lever (see _MIN_HOST_INTERVAL); a sweep that runs out
+# stops and comes back. The allowance refills after _BUDGET_WINDOW, which is what
+# lets a long-lived process (web_api's catch-up) keep making progress instead of
+# starving after its first pass.
 #
 # Hosts absent from this map are unlimited, so this changes nothing for OCCTO or
 # the TSO/JEPX/EPRX scrapers.
 _HOST_BUDGET: dict[str, int] = {
-    "www.meti.go.jp": 4,
-    "www.egc.meti.go.jp": 4,
+    "www.meti.go.jp": 16,
+    "www.egc.meti.go.jp": 16,
 }
 _BUDGET_WINDOW: float = 300.0
 _budget_used: dict[str, tuple[float, int]] = {}  # host -> (window start, requests)
@@ -560,6 +567,45 @@ _BROWSER_HEADERS: dict[str, str] = {
 # stands between us and the page — see repower.scrapers.browser_clearance.
 _WAF_ACTION_HEADER = "x-amzn-waf-action"
 _WAF_CHALLENGE_ACTION = "challenge"
+
+# Hosts known to sit behind an AWS WAF *challenge* rule, which refuses every
+# tokenless client on its first request — measured: a cold process gets 202 on
+# request #1, and curl_cffi's Chrome fingerprint is challenged identically. So
+# for these hosts the token goes on the client *before* the first request rather
+# than being fetched in response to a 202, which is what made every single URL
+# pay a 202 plus a fallback round trip.
+#
+# Seeded, then extended at runtime: a host that challenges us is remembered, so
+# a newly-protected host pays one reactive round and is pre-cleared afterwards
+# instead of waiting for this list to be updated.
+_WAF_CHALLENGE_HOSTS: frozenset[str] = frozenset(
+    {"www.meti.go.jp", "www.egc.meti.go.jp"}
+)
+_waf_challenge_seen: set[str] = set()
+_waf_seen_lock = threading.Lock()
+
+
+def _expects_waf_challenge(url: str) -> bool:
+    """True if *url*'s host challenges tokenless clients, so pre-clear it."""
+    host = _host_key(url)
+    if host in _WAF_CHALLENGE_HOSTS:
+        return True
+    with _waf_seen_lock:
+        return host in _waf_challenge_seen
+
+
+def _note_waf_challenge(url: str) -> None:
+    """Remember that *url*'s host issues WAF challenges."""
+    host = _host_key(url)
+    with _waf_seen_lock:
+        _waf_challenge_seen.add(host)
+
+
+def reset_waf_challenge_hosts() -> None:
+    """Forget runtime-learned challenge hosts (tests, and manual recovery)."""
+    with _waf_seen_lock:
+        _waf_challenge_seen.clear()
+
 
 # One httpx client per host for the process's lifetime. Previously every request
 # went through module-level ``httpx.get``, i.e. a fresh client: a new TLS
@@ -974,6 +1020,7 @@ def _do_get(
         raise CircuitOpenError(url, waiting)
 
     last_resp: httpx.Response | None = None
+    stale_token_retried = False
     for attempt in range(_TRANSIENT_MAX_RETRIES + 1):
         deadline.check(url)
         _pace_host(url)  # space consecutive same-host requests to a human pace
@@ -981,8 +1028,15 @@ def _do_get(
         # The default UA belongs to this transport only — the curl fallback gets the
         # headers untouched so impersonation supplies a UA matching its fingerprint.
         httpx_headers = {**_BROWSER_HEADERS, **headers}
+        client = _http_client(url)
+        # A challenge host refuses this transport unconditionally without a token,
+        # so put one on the jar first. Cheap after the first call: cookies_for
+        # caches per host for its TTL, and re-setting each time is what picks up a
+        # freshly minted token once the old one expires. Without a browser
+        # installed this returns False and behaviour is exactly as before.
+        carrying_token = _expects_waf_challenge(url) and _apply_clearance(client, url)
         try:
-            resp = _http_client(url).get(
+            resp = client.get(
                 url,
                 timeout=deadline.clamp_timeout(timeout),
                 headers=httpx_headers,
@@ -1001,8 +1055,30 @@ def _do_get(
         if resp.status_code in (403, 202):
             # An AWS WAF *challenge* is a JavaScript proof-of-work, so no amount of
             # waiting will clear it and the backoff ladder is dead time; only a
-            # browser-minted token helps, which _curl_get goes and fetches.
+            # browser-minted token helps. Reaching here means the pre-clearance
+            # above had none to give (no browser installed, or the browser itself
+            # was blocked) or the one it gave has gone stale.
             js_challenge = _is_waf_challenge(resp)
+            if js_challenge:
+                # Pre-clear this host from now on, even if it isn't in the seed set.
+                _note_waf_challenge(url)
+                # Whatever clearance state we hold is stale news: being challenged
+                # here is the evidence that this host is guarding right now. Drop it
+                # — whether that is an expired token or a cached "no token issued"
+                # from a moment when the browser went unchallenged — so the next
+                # mint is a real one rather than a replay of the thing that just
+                # failed. Without this the negative cache would suppress exactly
+                # the mint the fallbacks below depend on.
+                browser_clearance.invalidate(url)
+                # Challenged *while carrying* a token means it expired mid-sweep,
+                # which is the common case once the TTL runs out. Re-minting and
+                # retrying on this transport is far cheaper than the curl fallback
+                # and the browser fetch below. Once only — a token that cannot
+                # clear the challenge twice is not the problem.
+                if carrying_token and not stale_token_retried:
+                    stale_token_retried = True
+                    logger.info("clearance token for %s was stale; re-minting", url)
+                    continue
             # Snapshot before the fallback: it marks the host exhausted on failure,
             # so asking afterwards would report 1 attempt even for the full ladder.
             # This number reaches last_error_detail, so it has to be the truth.
@@ -1066,6 +1142,12 @@ def _do_get(
 
 def _apply_clearance(session: Any, url: str) -> bool:
     """Put a browser-minted WAF token on *session*'s cookie jar.
+
+    *session* is either the host's httpx client or its curl_cffi session — both
+    expose ``cookies.set(name, value, domain=…)``, and both need the token: the
+    plain transport is the one that carries nearly every request. Setting the
+    same name/domain/path again replaces rather than appends, so calling this per
+    request does not grow the jar.
 
     Returns True if one was applied. Best-effort: clearance is an optimisation,
     so a browser that won't start must not turn into a fetch failure.

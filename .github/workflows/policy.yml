@@ -46,8 +46,15 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e .
+          pip install -e ".[browser]"
           pip install "notebooklm-py[browser]"
+          # meti.go.jp answers every tokenless client with an AWS WAF challenge,
+          # and only a real browser can mint the aws-waf-token that clears it.
+          # The pip extras bring the playwright package but not the browser it
+          # drives; without this, clearance degrades to {} and `policy detect`
+          # sees a wall of 202s — quietly, since clearance failures are
+          # non-fatal by design.
+          playwright install --with-deps chromium
 
       - name: Pull latest DB from Hugging Face
         id: pull

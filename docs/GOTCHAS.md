@@ -71,7 +71,9 @@ fixed.
 - **METI's WAF is stateful, not rate-based — going slower makes it worse.** This is the single
   most counter-intuitive thing in the codebase, and it was measured, twice: at 1s spacing 4 of 43
   committees got through; after a 5-minute cooldown at 6s spacing, 1 of 12 did. Once the edge
-  flags the client, waiting does not un-flag it; it clears on its own schedule. So:
+  flags the client, waiting does not un-flag it; it clears on its own schedule. (Both those
+  measurements were taken *tokenless*, so the pass rates say nothing about spacing — which is
+  the point: the variable that mattered was never the interval. With a token, 16/16 at 2s.) So:
   - `_MIN_HOST_INTERVAL` (2.0s) is a **politeness** choice only. Do not "tune" it hoping to
     appease a WAF, and do not lower it below 1s (there is a test pinning that).
   - The right response to a hostile host is to **stop asking**, not to ask more gently. Hence
@@ -117,16 +119,49 @@ fixed.
   it is synced to HF and otherwise grows forever. Eviction is safe — a missing entry costs one
   unconditional re-fetch — and anything still being requested is re-touched every run.
   `repower cache status` reports per-host entries/last-success/failures.
-- **METI's block is an AWS WAF *challenge*, and no HTTP client can ever clear it.** Measured
-  against the live host: a 202 carries `x-amzn-waf-action: challenge` and a page whose
+- **METI's block is an AWS WAF *challenge*: no HTTP client can *solve* one, but any client can
+  carry the answer.** A 202 carries `x-amzn-waf-action: challenge` and a page whose
   `challenge.js` runs a JavaScript proof-of-work to mint an `aws-waf-token` cookie. curl_cffi
   impersonates Chrome's TLS/HTTP2 fingerprint — which beats *fingerprint* rules — but has no JS
-  engine, and once the edge has flagged the caller it is challenged exactly as often as plain
-  httpx. So waiting is not a strategy: `_curl_get(js_challenge=True)` makes one attempt and
+  engine, so waiting is not a strategy: `_curl_get(js_challenge=True)` makes one attempt and
   stops instead of walking the 5s+15s+30s ladder for a cookie that will never arrive.
-  `browser_clearance.fetch` (headless Chromium, optional `[browser]` extra) is the last resort
-  and the only one that works; it runs `fetch()` *inside* the page so the request inherits the
-  browser's TLS stack, cookies and referer, and returns base64 (PDFs are the common case).
+  **The token is portable, and that is the whole game.** Measured: plain httpx carrying a
+  browser-minted `aws-waf-token` fetched 20 consecutive PDFs (~40MB) at 200. So the token goes
+  on the host's httpx client *before* its first request (`_expects_waf_challenge` →
+  `_apply_clearance` in `_do_get`), not in response to a 202. It used to reach only the curl
+  fallback's session, which meant the plain transport was refused every single time and each URL
+  paid a 202 plus a fallback round trip — invisible in the logs as "METI is blocking us".
+  `browser_clearance.fetch` (runs `fetch()` *inside* the page, returns base64) stays as the last
+  resort for when even a fresh token is challenged.
+- **A headless User-Agent gets you *blocked*, not challenged — and a block cannot be cleared.**
+  Headless Chromium advertises `HeadlessChrome/<version>`; against the live host that navigation
+  returns 403 with *no* `x-amzn-waf-action`, so `challenge.js` never runs and
+  `browser_clearance` could never mint a token — the module silently did nothing for every
+  caller. De-headlessing the UA turns the same navigation into a 202 `challenge` and the token
+  appears. `_hide_headless_ua` does this over CDP (`Emulation.setUserAgentOverride`), taking the
+  version from the browser's own UA so it can't drift, and setting `navigator.userAgent` as well
+  as the header so the page and its requests agree. Note
+  `--disable-blink-features=AutomationControlled` does **not** cover this — that hides
+  `navigator.webdriver`, a different signal.
+- **METI's remaining ceiling shows up as `405 Not Allowed`, and it is transient** `(open — P3)`.
+  Seen twice under sustained load — on the 21st URL of a fast burst, and on directory-style index
+  URLs during a full `detect` — then 200 for the same URL spaced a few seconds later, with or
+  without a token. nginx's "Not Allowed" phrasing suggests a layer below CloudFront. It is
+  currently classified `unexpected_status` and **not** retried (`_do_get` treats only 429/5xx as
+  transient), so callers see a hard error and `policy/scraper` re-requests it at a higher level.
+  Whether to make 405 transient *for these hosts* is unresolved — a genuine 405 is not transient,
+  so don't blanket-retry it.
+- **The policy workflows need `playwright install chromium`, not just the pip extra.** `pip
+  install -e ".[browser]"` (and `notebooklm-py[browser]`) bring the *Python package*; the browser
+  binary it drives is a separate download. Without it `browser_clearance.available()` is True but
+  every launch fails, clearance degrades to `{}` — non-fatal by design — and `policy detect` /
+  `policy crosscheck` see a wall of 202s that looks like METI blocking us. Both `policy.yml` and
+  `policy-crosscheck.yml` now run it explicitly; any new workflow that touches meti.go.jp must
+  too.
+- **METI's 403 wears METI's own "page not found" page.** The 5045-byte body titled
+  「指定されたページまたはファイルは存在しません」, served from S3/CloudFront with no WAF header, is
+  what a refused client gets — for URLs that exist perfectly well. Don't read that body (or a
+  bare 403) as a dead link, and don't conclude "not found" from it.
 - **The 202 body is empty unless you ask for HTML.** AWS WAF only serves the challenge
   interstitial to a request whose `Accept` admits `text/html`; with httpx's default `*/*` you
   get a 0-byte 202 and cannot see what you are being asked to do. `_BROWSER_HEADERS` fixes this
@@ -135,21 +170,26 @@ fixed.
   (403), keyed on the client rather than the URL: at the 403 stage even real Chrome is refused.
   A tight burst of cache-busting requests reaches 403 in seconds and takes ~15 minutes to decay.
   Diagnose with single spaced requests, never a loop.
-- **At the 403 stage the block is IP-wide, and no client shape escapes it.** Measured on one URL
-  seconds apart: browser navigation, in-page `fetch()` and Playwright's request context all
-  returned the same 403 block page. So the browser transport only helps at the *challenge*
-  stage; once METI has escalated, the only remedy is time. Budget observed on a real backfill:
-  ~5 requests get through, then 403 for ~5 minutes — which is why healing is incremental by
-  nature and the fix is scheduling, not a better client.
-- **A per-host request budget stops the sweeps before the cliff.** `_HOST_BUDGET` in
-  `http_cache` allows 4 requests per 5 minutes to meti.go.jp and egc.meti.go.jp (unlisted hosts
-  are unlimited, so OCCTO and the TSO/JEPX/EPRX scrapers are untouched). It is **advisory**:
-  `budget_exhausted(url)` is consulted only by work that can be resumed — `detect` and the two
-  backfills, which report the remainder as `deferred` rather than as failures. Indivisible work
-  ignores it on purpose: stopping halfway through one meeting's PDFs would be worse than being
-  blocked. Measured on `doji_shijo`: 22 requests → 5/21 healed plus an IP block and an open
-  circuit, versus 4 requests → 3/3 healed, every response a 200, 13 deferred to the next run.
-  If you raise the number, expect the escalation back.
+- **Once escalated to 403 the block is IP-wide and no client shape escapes it** — browser
+  navigation, in-page `fetch()` and Playwright's request context all return the same 403. The browser
+  helps at the *challenge* stage only; past that the remedy is time. But **do not read a 403 as
+  proof that the address is burned**: the same address that was 403ing served 16/16 PDFs a few
+  minutes later. The state flips on a scale of minutes — verify with a single spaced request
+  before concluding anything.
+- **"~5 requests then blocked" was an artefact of being tokenless.** That figure — which sized
+  the original `_HOST_BUDGET` of 4 — was measured while nothing carried an `aws-waf-token`, the
+  one condition under which METI refuses nearly everything. With the token on the httpx client,
+  25 URLs at 1s spacing gave 20 × 200 and ~40MB in 29s before the 21st returned 405 (never
+  identified; it may be a rate rule, in which case the ceiling moves with spacing). `_HOST_BUDGET`
+  is now 16 per 5 minutes for meti.go.jp and egc.meti.go.jp — a wide margin under that observed
+  cliff. Unlisted hosts are unlimited, so OCCTO and the TSO/JEPX/EPRX scrapers are untouched.
+  It stays **advisory**: `budget_exhausted(url)` is consulted only by work that can be resumed —
+  `detect` and the two backfills, which report the remainder as `deferred` rather than as
+  failures. Indivisible work ignores it on purpose: stopping halfway through one meeting's PDFs
+  would be worse than being blocked. **Note one URL used to spend two budget units**, since
+  `_consume_budget` is called by both `_do_get` and `_curl_get` and the fallback ran every time —
+  so a budget of 4 was really 2 URLs per window. That count is correct (both issue a real
+  request); it stopped hurting because the fallback is now rare.
 - **Every plain request used to open a fresh client.** `_do_get` called module-level
   `httpx.get`, so each request paid a new TLS handshake and — worse — dropped its cookie jar,
   making any clearance cookie unusable by design. `_http_client(url)` now memoises one client

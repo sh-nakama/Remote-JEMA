@@ -42,6 +42,13 @@ TOKEN_COOKIE = "aws-waf-token"
 # costs a whole pass of 202s before anything notices.
 TOKEN_TTL: float = 240.0
 
+# "No token was issued" is cached too, and must be: an unchallenged browser has
+# none to give, and the ordinary fast path now asks before *every* request. Left
+# uncached, each of those would pay a browser round trip to be told the same
+# thing. Shorter than TOKEN_TTL because this is the state we want to leave
+# quickly — the host may start challenging a moment later.
+EMPTY_TTL: float = 60.0
+
 # Wall-clock ceiling for one mint: launch, navigate, run the proof-of-work.
 MINT_TIMEOUT: float = 45.0
 
@@ -129,6 +136,9 @@ def cookies_for(url: str, *, force: bool = False) -> dict[str, str]:
         if not cookies:
             # Common, not alarming: the browser is often trusted where our HTTP
             # clients are not, so no challenge is raised and no token is issued.
+            # Cached briefly so the fast path stops asking for the next minute.
+            with _cache_lock:
+                _cache[host] = (time.monotonic() + EMPTY_TTL, {})
             logger.info("no %s issued for %s", TOKEN_COOKIE, host)
             return {}
         with _cache_lock:
@@ -204,6 +214,39 @@ def close() -> None:
     _local.page = None
 
 
+def _hide_headless_ua(context, page) -> None:
+    """Present a plain Chrome User-Agent rather than HeadlessChrome's.
+
+    Headless Chromium advertises ``HeadlessChrome/<version>``, and AWS WAF reads
+    that as automation and goes straight to *block* rather than *challenge*.
+    Measured against the live host: navigating to meti.go.jp with the default UA
+    returns 403 and no ``x-amzn-waf-action`` — so ``challenge.js`` never runs and
+    no token is ever minted, which quietly defeated this whole module. With the
+    UA de-headlessed the same navigation returns 202 ``challenge`` and the token
+    appears. ``--disable-blink-features=AutomationControlled`` does not cover
+    this; it hides ``navigator.webdriver``, a different signal.
+
+    The version is taken from the browser's own UA rather than hardcoded, so this
+    never drifts out of date, and the CDP override sets ``navigator.userAgent``
+    as well as the request header — a page whose script and headers disagreed
+    would be its own fingerprint. Best-effort: a failure here leaves the default
+    UA in place rather than sinking the launch.
+    """
+    try:
+        ua = page.evaluate("navigator.userAgent")
+        if "HeadlessChrome/" not in ua:
+            return
+        context.new_cdp_session(page).send(
+            "Emulation.setUserAgentOverride",
+            {
+                "userAgent": ua.replace("HeadlessChrome/", "Chrome/"),
+                "acceptLanguage": "ja,en-US;q=0.9,en;q=0.8",
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not override the headless User-Agent: %s", e)
+
+
 def _page(url: str):
     """A page whose document is on *url*'s origin.
 
@@ -216,6 +259,9 @@ def _page(url: str):
     page = getattr(_local, "page", None)
     if page is None or page.is_closed():
         page = context.new_page()
+        # Before the first navigation: the UA is what decides whether this host
+        # challenges us (recoverable) or blocks us outright (not).
+        _hide_headless_ua(context, page)
         _local.page = page
     origin = _origin(url)
     if not page.url.startswith(origin):

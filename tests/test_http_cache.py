@@ -629,11 +629,16 @@ def test_politeness_floor_stays_above_one_second():
 
 
 # ── httpx-level fakes: the failure/fallback paths inside _do_get ─────────────
-def _fake_httpx(monkeypatch, responses):
+def _fake_httpx(monkeypatch, responses, jar=None):
     """Patch the per-host client's ``get`` to yield *responses* in order.
 
     Each entry is either an ``Exception`` (raised) or ``(status, headers, body)``.
     Returns the list recording each call's url/headers.
+
+    *jar*, if given, records ``(name, value)`` for every cookie set on the
+    client — which is how the WAF clearance token reaches this transport. The
+    fake client is a singleton so its jar outlives a single request, as the real
+    per-host client does.
     """
     calls: list[dict] = []
     it = iter(responses)
@@ -660,12 +665,19 @@ def _fake_httpx(monkeypatch, responses):
 
     class _FakeClient:
         get = staticmethod(fake_get)
+        cookies = types.SimpleNamespace(
+            set=lambda name, value, domain=None: (
+                jar.append((name, value)) if jar is not None else None
+            )
+        )
 
-    monkeypatch.setattr(http_cache, "_http_client", lambda url: _FakeClient())
+    client = _FakeClient()
+    monkeypatch.setattr(http_cache, "_http_client", lambda url: client)
     monkeypatch.setattr(http_cache, "_last_request_at", {})
     monkeypatch.setattr(http_cache, "_circuit_failures", {})
     monkeypatch.setattr(http_cache, "_circuit_open_until", {})
     monkeypatch.setattr(http_cache, "_challenge_exhausted", set())
+    monkeypatch.setattr(http_cache, "_waf_challenge_seen", set())
     return calls
 
 
@@ -1172,3 +1184,153 @@ def test_cache_status_breaks_down_errors_by_kind(tmp_path, monkeypatch):
     assert st["entries"] == 3
     assert st["errors"] == 2
     assert st["error_kinds"]["blocked_403"] == 2
+
+
+# ── WAF token on the plain transport ─────────────────────────────────────────
+def _unexpected_fallback(*a, **k):
+    """Stand-in for a fallback that this case must never reach."""
+    raise AssertionError("the expensive fallback was reached")
+
+
+def _fake_clearance(monkeypatch, token="tok"):
+    """Make clearance available and count how often a token was asked for."""
+    asked: list[str] = []
+
+    def cookies_for(url):
+        asked.append(url)
+        return {"aws-waf-token": token} if token else {}
+
+    monkeypatch.setattr(http_cache.browser_clearance, "cookies_for", cookies_for)
+    return asked
+
+
+def test_clearance_token_rides_the_plain_transport(monkeypatch):
+    """The regression this exists to prevent. meti.go.jp challenges every
+    tokenless client on its *first* request, so a token that only ever reaches
+    the curl fallback means httpx is refused every single time and each URL pays
+    a 202 plus a fallback round trip. Measured live: with the token on this
+    client, 20 consecutive PDFs came back 200."""
+    jar: list[tuple] = []
+    calls = _fake_httpx(monkeypatch, [(200, {}, b"%PDF-1.7")], jar=jar)
+    _fake_clearance(monkeypatch)
+
+    status, body, _, _ = http_cache._do_get("https://www.meti.go.jp/a.pdf", {}, True, 30.0)
+
+    assert (status, body) == (200, b"%PDF-1.7")
+    assert jar == [("aws-waf-token", "tok")], "token never reached the httpx client"
+    assert len(calls) == 1, "a pre-cleared request must not need a second attempt"
+
+
+def test_clearance_is_not_sought_for_ordinary_hosts(monkeypatch):
+    """OCCTO, JEPX and the TSOs are not behind a challenge. Asking for a token on
+    their behalf would launch a browser to earn something nobody needs."""
+    _fake_httpx(monkeypatch, [(200, {}, b"rows")])
+    asked = _fake_clearance(monkeypatch)
+
+    http_cache._do_get("https://occto.example/x", {}, True, 30.0)
+
+    assert asked == []
+
+
+def test_stale_token_is_reminted_and_retried_on_the_plain_transport(monkeypatch):
+    """A token outlives its immunity window mid-sweep. Re-minting and retrying
+    here costs one request; falling through to curl_cffi and then a browser fetch
+    costs seconds and two more."""
+    calls = _fake_httpx(
+        monkeypatch,
+        [(202, {"x-amzn-waf-action": "challenge"}, b""), (200, {}, b"%PDF-1.7")],
+    )
+    _fake_clearance(monkeypatch)
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        http_cache.browser_clearance, "invalidate", lambda url: dropped.append(url)
+    )
+    monkeypatch.setattr(http_cache, "_curl_get", _unexpected_fallback)
+    monkeypatch.setattr(http_cache.browser_clearance, "fetch", _unexpected_fallback)
+
+    status, body, _, _ = http_cache._do_get("https://www.meti.go.jp/a.pdf", {}, True, 30.0)
+
+    assert (status, body) == (200, b"%PDF-1.7")
+    assert dropped == ["https://www.meti.go.jp/a.pdf"], "stale token was replayed"
+    assert len(calls) == 2
+
+
+def test_stale_token_is_retried_only_once(monkeypatch):
+    """If a freshly minted token is challenged too, the token is not the problem
+    and the expensive fallbacks are the right next move."""
+    calls = _fake_httpx(
+        monkeypatch,
+        [(202, {"x-amzn-waf-action": "challenge"}, b"")] * 2,
+    )
+    _fake_clearance(monkeypatch)
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+    monkeypatch.setattr(
+        http_cache.browser_clearance, "fetch", lambda url, headers=None: (200, b"ok", None, None)
+    )
+
+    status, body, _, _ = http_cache._do_get("https://www.meti.go.jp/a.pdf", {}, True, 30.0)
+
+    assert (status, body) == (200, b"ok")
+    assert len(calls) == 2, "the plain transport must not loop on the challenge"
+
+
+def test_a_challenge_drops_cached_clearance_before_the_fallbacks_run(monkeypatch):
+    """Being challenged is the evidence the host is guarding *now*. Whatever we
+    hold is stale — including a cached "no token issued" from a moment when the
+    browser went unchallenged, which would otherwise suppress exactly the mint
+    the fallbacks depend on."""
+    _fake_httpx(monkeypatch, [(202, {"x-amzn-waf-action": "challenge"}, b"")])
+    _fake_clearance(monkeypatch, token=None)  # browser had nothing to give
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        http_cache.browser_clearance, "invalidate", lambda url: dropped.append(url)
+    )
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+    monkeypatch.setattr(http_cache.browser_clearance, "fetch", lambda url, headers=None: None)
+
+    with pytest.raises(http_cache.ChallengeNotClearedError):
+        http_cache._do_get("https://www.meti.go.jp/a.pdf", {}, True, 30.0)
+
+    assert dropped == ["https://www.meti.go.jp/a.pdf"]
+
+
+def test_a_challenging_host_is_learned_at_runtime(monkeypatch):
+    """The seed list will go stale. A host that challenges us once is pre-cleared
+    from then on, so it costs one reactive round rather than waiting for someone
+    to notice and edit _WAF_CHALLENGE_HOSTS."""
+    _fake_httpx(monkeypatch, [(202, {"x-amzn-waf-action": "challenge"}, b"")])
+    _fake_clearance(monkeypatch)
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+    monkeypatch.setattr(http_cache.browser_clearance, "fetch", lambda url, headers=None: None)
+
+    url = "https://newly-guarded.example/x"
+    assert http_cache._expects_waf_challenge(url) is False
+    with pytest.raises(http_cache.ChallengeNotClearedError):
+        http_cache._do_get(url, {}, True, 30.0)
+
+    assert http_cache._expects_waf_challenge(url) is True
+
+
+def test_a_plain_block_does_not_mark_the_host_as_challenging(monkeypatch):
+    """Kyuden's 403 is a fingerprint block with no token to earn. Treating it as a
+    challenge would launch a browser before every one of its requests."""
+    _fake_httpx(monkeypatch, [(403, {}, b"")])
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: None)
+
+    with pytest.raises(http_cache.BlockedError):
+        http_cache._do_get("https://kyuden.example/a", {}, True, 30.0)
+
+    assert http_cache._expects_waf_challenge("https://kyuden.example/a") is False
+
+
+def test_a_missing_browser_leaves_the_old_behaviour_intact(monkeypatch):
+    """Playwright is an optional extra. Where it is absent (CI, most dev boxes)
+    cookies_for returns {} and the request must proceed exactly as before, not
+    fail for want of a token."""
+    calls = _fake_httpx(monkeypatch, [(200, {}, b"%PDF-1.7")])
+    _fake_clearance(monkeypatch, token=None)
+
+    status, _, _, _ = http_cache._do_get("https://www.meti.go.jp/a.pdf", {}, True, 30.0)
+
+    assert status == 200
+    assert len(calls) == 1
