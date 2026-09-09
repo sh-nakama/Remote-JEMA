@@ -158,6 +158,15 @@ fixed.
   `policy crosscheck` see a wall of 202s that looks like METI blocking us. Both `policy.yml` and
   `policy-crosscheck.yml` now run it explicitly; any new workflow that touches meti.go.jp must
   too.
+- **Minting a token must *navigate*; "already on the origin" is not "somewhere useful".**
+  `_page` skipped its `goto` whenever the thread's page was already on the host's origin — and a
+  page parked on a WAF **block** page satisfies that check. So one bad navigation wedged the
+  thread permanently: every later `_mint` re-read cookies off the dead page, returned `{}`, and
+  the process could never recover. This was invisible from the CLI (a fresh process navigates
+  once and succeeds) and fatal in `web_api`'s long-lived catch-up, which is exactly where the
+  symptom showed up. `_mint` now passes `revisit=True`; `fetch` deliberately does not, since it
+  makes its own in-page request anyway. **When a clearance change seems not to work, check
+  whether you are testing a fresh process or a server that has been up since before it.**
 - **METI's 403 wears METI's own "page not found" page.** The 5045-byte body titled
   「指定されたページまたはファイルは存在しません」, served from S3/CloudFront with no WAF header, is
   what a refused client gets — for URLs that exist perfectly well. Don't read that body (or a

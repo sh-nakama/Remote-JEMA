@@ -177,3 +177,81 @@ def test_a_failed_override_does_not_sink_the_launch():
     bc._hide_headless_ua(ctx, _FakePage(_HEADLESS_UA))  # must not raise
 
     assert ctx.sent == []
+
+
+# ── Minting must navigate, not trust the current page ────────────────────────
+class _NavPage:
+    """A page that records its navigations and tracks its current url."""
+
+    def __init__(self, url=""):
+        self.url = url
+        self.gotos: list[str] = []
+
+    def is_closed(self):
+        return False
+
+    def goto(self, url, **kwargs):
+        self.gotos.append(url)
+        self.url = url
+        return None  # no response object → treated as "not a challenge"
+
+    def evaluate(self, script):
+        return "Chrome/151.0 Safari/537.36"  # already de-headlessed; no override
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class _NavContext:
+    def __init__(self, cookies=()):
+        self._cookies = list(cookies)
+
+    def cookies(self, url):
+        return self._cookies
+
+    def new_page(self):
+        return _NavPage()
+
+    def new_cdp_session(self, page):
+        raise AssertionError("no override needed for a non-headless UA")
+
+
+def _install_page(monkeypatch, page, context):
+    monkeypatch.setattr(bc, "_context", lambda: context)
+    monkeypatch.setattr(bc._local, "page", page, raising=False)
+
+
+def test_mint_navigates_even_when_already_on_the_origin(monkeypatch):
+    """The bug this exists to prevent: a page parked on a WAF *block* page still
+    satisfies the origin check, so `_page` reused it, no navigation happened, and
+    every later mint re-read cookies off that dead page and returned {} for the
+    life of the process. A fresh CLI run always worked; web_api's long-lived
+    catch-up could never recover."""
+    page = _NavPage("https://www.meti.go.jp/some/blocked/page.html")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    assert bc._mint("https://www.meti.go.jp/a.pdf") == {}
+
+    assert page.gotos == ["https://www.meti.go.jp/"], "minting did not re-navigate"
+
+
+def test_mint_returns_the_token_the_navigation_earned(monkeypatch):
+    page = _NavPage("")
+    ctx = _NavContext([{"name": bc.TOKEN_COOKIE, "value": "tok"}])
+    _install_page(monkeypatch, page, ctx)
+
+    assert bc._mint("https://www.meti.go.jp/a.pdf") == {bc.TOKEN_COOKIE: "tok"}
+    assert page.gotos == ["https://www.meti.go.jp/"]
+
+
+def test_fetch_keeps_the_cheap_origin_reuse(monkeypatch):
+    """`fetch` is about to make its own request inside the page, so it must not
+    pay a navigation per call — only minting needs the forced revisit."""
+    page = _NavPage("https://www.meti.go.jp/already/here.html")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._page("https://www.meti.go.jp/a.pdf")
+
+    assert page.gotos == []

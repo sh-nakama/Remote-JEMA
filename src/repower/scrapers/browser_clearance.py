@@ -247,13 +247,20 @@ def _hide_headless_ua(context, page) -> None:
         logger.debug("could not override the headless User-Agent: %s", e)
 
 
-def _page(url: str):
+def _page(url: str, *, revisit: bool = False):
     """A page whose document is on *url*'s origin.
 
     The origin matters: :func:`fetch` runs ``fetch()`` *inside* the document, so
     the request inherits the page's cookies, referer and the browser's own TLS
     stack — which is the entire point. Navigating also triggers (and thereby
     solves) any challenge before the real request is made.
+
+    *revisit* forces that navigation even when the page is already on the origin.
+    Being "already there" is not the same as being somewhere useful: a page parked
+    on a WAF block page satisfies the origin check, so reusing it would skip the
+    one action that can earn a token. Callers that need a token (:func:`_mint`)
+    must pass this; :func:`fetch` does not, since it wants the cheap reuse and is
+    about to make its own request anyway.
     """
     context = _context()
     page = getattr(_local, "page", None)
@@ -264,7 +271,7 @@ def _page(url: str):
         _hide_headless_ua(context, page)
         _local.page = page
     origin = _origin(url)
-    if not page.url.startswith(origin):
+    if revisit or not page.url.startswith(origin):
         response = page.goto(origin, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT * 1000)
         if response is not None and _is_challenge(response):
             _await_clearance(context, page, url)
@@ -337,9 +344,18 @@ def _mint(url: str) -> dict[str, str]:
 
     ``{}`` when no token was issued — the browser is often trusted where our HTTP
     clients are not, and an unchallenged visit has no token to hand out.
+
+    ``revisit=True`` is load-bearing, not a precaution. Without it a thread whose
+    page had once landed on a block page kept satisfying the origin check, so
+    every later mint re-read cookies off that dead page and returned ``{}`` for
+    the life of the process — a long-lived one (``web_api``'s catch-up) could
+    never recover, while a fresh CLI process always worked. Navigating is the
+    only thing that earns a token, and a mint is already rate-limited by
+    ``cookies_for``'s TTL cache, so paying one navigation here is the cheap side
+    of the trade.
     """
     context = _context()
-    _page(url)  # navigating is what triggers, and clears, the challenge
+    _page(url, revisit=True)  # navigating is what triggers, and clears, the challenge
     jar = {c["name"]: c["value"] for c in context.cookies(url)}
     return jar if TOKEN_COOKIE in jar else {}
 
