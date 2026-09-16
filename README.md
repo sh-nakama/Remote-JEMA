@@ -55,6 +55,11 @@ Requires Python >= 3.11.
 
 ```bash
 pip install -e ".[dev]"
+# Optional, but needed for the policy scrapers: meti.go.jp answers every tokenless
+# client with an AWS WAF challenge, and only a real browser can mint the token that
+# clears it. Without this, METI detection degrades to a wall of 202s.
+pip install -e ".[browser]"
+playwright install chromium
 cp .env.example .env
 # then fill in:
 #   WEBHOOK_URL        notification webhook (e.g. Discord)
@@ -77,7 +82,8 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `pull-hf` | Pull the database from the Hugging Face Dataset. |
 | `init-db-cmd` | Initialize the database (create tables). |
 | `policy detect` | Detect new committee meetings (**no NotebookLM auth**). Options: `--committee` (key or `all`), `--window` (enumerate materials for the newest N), `--dry-run`. |
-| `policy run` | Summarise pending meetings via NotebookLM (**requires auth**). Options: `--committee`, `--max-per-run`. |
+| `policy run` | Summarise pending meetings via NotebookLM (**requires auth**). Options: `--committee`, `--max-per-run`, `--breadth`/`--depth-first`, `--meeting N` (exactly that meeting of `--committee`, bypassing the queue — works on an already-summarised meeting, so it doubles as the repair path). |
+| `policy queue` | Move one meeting to the front of the summarisation queue (no auth). Options: `--committee`, `--meeting`, `--clear` to take it off. |
 | `policy backfill` | Throttled historical backfill for one committee, newest-first (**requires auth**). Options: `--committee` (required), `--since-meeting N` (required), `--max-per-run`. |
 | `policy resume` | Finish meetings left mid-flight after a partial failure (**requires auth**). |
 | `policy status` | Per-committee state: enabled flag, priority, latest summarised meeting + pending counts (no auth). User-added committees are marked `*`. |

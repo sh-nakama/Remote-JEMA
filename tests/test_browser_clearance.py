@@ -1,0 +1,311 @@
+"""Tests for the headless-browser WAF clearance helper.
+
+Network- and browser-free: ``_mint`` (the only part that launches Chromium) is
+monkeypatched, so what is exercised here is the caching and degradation logic
+that decides *whether* a browser is launched at all.
+"""
+
+from __future__ import annotations
+
+from repower.scrapers import browser_clearance as bc
+
+
+def _fake_mint(monkeypatch, cookies):
+    """Patch minting to return *cookies* and count how often it ran."""
+    calls: list[str] = []
+
+    def mint(url):
+        calls.append(url)
+        return dict(cookies)
+
+    monkeypatch.setattr(bc, "_mint", mint)
+    monkeypatch.setattr(bc, "available", lambda: True)
+    monkeypatch.setattr(bc, "_cache", {})
+    return calls
+
+
+def test_token_is_minted_once_per_host(monkeypatch):
+    # A pass over one committee is dozens of URLs; each browser launch costs
+    # seconds, and the token is valid for all of them.
+    calls = _fake_mint(monkeypatch, {bc.TOKEN_COOKIE: "tok"})
+
+    first = bc.cookies_for("https://www.meti.go.jp/a")
+    second = bc.cookies_for("https://www.meti.go.jp/b")
+
+    assert first == second == {bc.TOKEN_COOKIE: "tok"}
+    assert len(calls) == 1
+
+
+def test_invalidate_forces_a_fresh_mint(monkeypatch):
+    # Called when the token demonstrably failed to clear the challenge, so
+    # replaying it would just reproduce the failure.
+    calls = _fake_mint(monkeypatch, {bc.TOKEN_COOKIE: "tok"})
+
+    bc.cookies_for("https://www.meti.go.jp/a")
+    bc.invalidate("https://www.meti.go.jp/a")
+    bc.cookies_for("https://www.meti.go.jp/b")
+
+    assert len(calls) == 2
+
+
+def test_expired_token_is_re_minted(monkeypatch):
+    calls = _fake_mint(monkeypatch, {bc.TOKEN_COOKIE: "tok"})
+    monkeypatch.setattr(bc, "TOKEN_TTL", -1.0)
+
+    bc.cookies_for("https://www.meti.go.jp/a")
+    bc.cookies_for("https://www.meti.go.jp/b")
+
+    assert len(calls) == 2
+
+
+def test_no_playwright_means_no_cookies_and_no_launch(monkeypatch):
+    # The whole feature is optional: without it callers must behave exactly as
+    # they did before, not fail.
+    calls = _fake_mint(monkeypatch, {bc.TOKEN_COOKIE: "tok"})
+    monkeypatch.setattr(bc, "available", lambda: False)
+
+    assert bc.cookies_for("https://www.meti.go.jp/a") == {}
+    assert calls == []
+
+
+def test_opt_out_env_var_disables_clearance(monkeypatch):
+    monkeypatch.setenv("REPOWER_BROWSER_CLEARANCE", "0")
+    assert bc.available() is False
+
+
+def test_a_broken_browser_never_raises(monkeypatch):
+    monkeypatch.setattr(bc, "available", lambda: True)
+    monkeypatch.setattr(bc, "_cache", {})
+
+    def boom(url):
+        raise RuntimeError("chromium is not installed")
+
+    monkeypatch.setattr(bc, "_mint", boom)
+
+    assert bc.cookies_for("https://www.meti.go.jp/a") == {}
+
+
+def test_a_challenge_that_never_solves_yields_nothing(monkeypatch):
+    # _mint returns {} when the token cookie never appears. That is cached, but
+    # briefly and never as if it were a valid token — see EMPTY_TTL below. The
+    # caching matters because the ordinary fast path now asks before *every*
+    # request, and an uncached "no" costs a browser round trip each time.
+    calls = _fake_mint(monkeypatch, {})
+
+    assert bc.cookies_for("https://www.meti.go.jp/a") == {}
+    assert bc.cookies_for("https://www.meti.go.jp/b") == {}
+    assert len(calls) == 1
+
+
+def test_absent_token_is_cached_for_less_time_than_a_real_one(monkeypatch):
+    # "Not guarded right now" is the state we want to leave quickly: the host may
+    # start challenging a moment later, and then a token is what we need.
+    assert bc.EMPTY_TTL < bc.TOKEN_TTL
+
+    calls = _fake_mint(monkeypatch, {})
+    monkeypatch.setattr(bc, "EMPTY_TTL", -1.0)
+
+    bc.cookies_for("https://www.meti.go.jp/a")
+    bc.cookies_for("https://www.meti.go.jp/b")
+
+    assert len(calls) == 2
+
+
+# ── Headless User-Agent ──────────────────────────────────────────────────────
+class _FakePage:
+    def __init__(self, ua):
+        self._ua = ua
+
+    def evaluate(self, script):
+        return self._ua
+
+
+class _FakeContext:
+    def __init__(self, sent=None, fail=False):
+        self.sent = sent if sent is not None else []
+        self.fail = fail
+
+    def new_cdp_session(self, page):
+        if self.fail:
+            raise RuntimeError("no CDP here")
+        return self
+
+    def send(self, method, params):
+        self.sent.append((method, params))
+
+
+_HEADLESS_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) HeadlessChrome/151.0.7922.34 Safari/537.36"
+)
+
+
+def test_headless_user_agent_is_hidden_before_the_first_navigation():
+    # Measured live: with "HeadlessChrome/" in the UA, meti.go.jp answers 403 with
+    # no x-amzn-waf-action — a block, so challenge.js never runs and no token can
+    # ever be minted. De-headlessed, the same navigation is challenged (202) and
+    # the token appears. This is the difference between this module working and
+    # silently doing nothing.
+    ctx = _FakeContext()
+    bc._hide_headless_ua(ctx, _FakePage(_HEADLESS_UA))
+
+    assert len(ctx.sent) == 1
+    method, params = ctx.sent[0]
+    assert method == "Emulation.setUserAgentOverride"
+    assert "HeadlessChrome" not in params["userAgent"]
+    # Version comes from the real browser rather than a hardcoded string, so this
+    # cannot drift out of date.
+    assert "Chrome/151.0.7922.34" in params["userAgent"]
+
+
+def test_a_normal_user_agent_is_left_alone():
+    # Nothing to hide when Playwright is driving real Chrome (channel="chrome"),
+    # and overriding would only risk disagreeing with the actual engine.
+    real = _HEADLESS_UA.replace("HeadlessChrome/", "Chrome/")
+    ctx = _FakeContext()
+
+    bc._hide_headless_ua(ctx, _FakePage(real))
+
+    assert ctx.sent == []
+
+
+def test_a_failed_override_does_not_sink_the_launch():
+    # Best-effort: worst case we keep the default UA and get blocked, which is
+    # the old behaviour — not a crash in the middle of a scrape.
+    ctx = _FakeContext(fail=True)
+
+    bc._hide_headless_ua(ctx, _FakePage(_HEADLESS_UA))  # must not raise
+
+    assert ctx.sent == []
+
+
+# ── Minting must navigate, not trust the current page ────────────────────────
+class _NavPage:
+    """A page that records its navigations and tracks its current url."""
+
+    def __init__(self, url=""):
+        self.url = url
+        self.gotos: list[str] = []
+
+    def is_closed(self):
+        return False
+
+    def goto(self, url, **kwargs):
+        self.gotos.append(url)
+        self.url = url
+        return None  # no response object → treated as "not a challenge"
+
+    def evaluate(self, script):
+        return "Chrome/151.0 Safari/537.36"  # already de-headlessed; no override
+
+    def wait_for_timeout(self, ms):
+        pass
+
+
+class _NavContext:
+    def __init__(self, cookies=()):
+        self._cookies = list(cookies)
+
+    def cookies(self, url):
+        return self._cookies
+
+    def new_page(self):
+        return _NavPage()
+
+    def new_cdp_session(self, page):
+        raise AssertionError("no override needed for a non-headless UA")
+
+
+def _install_page(monkeypatch, page, context):
+    monkeypatch.setattr(bc, "_context", lambda: context)
+    monkeypatch.setattr(bc._local, "page", page, raising=False)
+
+
+def test_mint_navigates_even_when_already_on_the_origin(monkeypatch):
+    """The bug this exists to prevent: a page parked on a WAF *block* page still
+    satisfies the origin check, so `_page` reused it, no navigation happened, and
+    every later mint re-read cookies off that dead page and returned {} for the
+    life of the process. A fresh CLI run always worked; web_api's long-lived
+    catch-up could never recover."""
+    page = _NavPage("https://www.meti.go.jp/some/blocked/page.html")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    assert bc._mint("https://www.meti.go.jp/a.pdf") == {}
+
+    assert page.gotos == ["https://www.meti.go.jp/"], "minting did not re-navigate"
+
+
+def test_mint_returns_the_token_the_navigation_earned(monkeypatch):
+    page = _NavPage("")
+    ctx = _NavContext([{"name": bc.TOKEN_COOKIE, "value": "tok"}])
+    _install_page(monkeypatch, page, ctx)
+
+    assert bc._mint("https://www.meti.go.jp/a.pdf") == {bc.TOKEN_COOKIE: "tok"}
+    assert page.gotos == ["https://www.meti.go.jp/"]
+
+
+def test_fetch_keeps_the_cheap_origin_reuse(monkeypatch):
+    """`fetch` is about to make its own request inside the page, so it must not
+    pay a navigation per call — only minting needs the forced revisit."""
+    page = _NavPage("https://www.meti.go.jp/already/here.html")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._page("https://www.meti.go.jp/a.pdf")
+
+    assert page.gotos == []
+
+
+# ── Minting aims at the blocked path, not the origin ─────────────────────────
+def test_mint_target_keeps_a_directory_url_as_is():
+    assert bc._mint_target(
+        "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+    ) == "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+
+
+def test_mint_target_keeps_an_html_page():
+    assert bc._mint_target(
+        "https://www.egc.meti.go.jp/activity/index_emsc.html"
+    ) == "https://www.egc.meti.go.jp/activity/index_emsc.html"
+
+
+def test_mint_target_reduces_a_pdf_to_its_directory():
+    # Navigating to a PDF opens the viewer or downloads it, rather than rendering
+    # a document that can run challenge.js.
+    assert bc._mint_target(
+        "https://www.meti.go.jp/shingikai/x/pdf/014_07_01.pdf"
+    ) == "https://www.meti.go.jp/shingikai/x/pdf/"
+
+
+def test_mint_target_drops_query_and_fragment():
+    assert bc._mint_target("https://www.meti.go.jp/a/b/?x=1#f") == "https://www.meti.go.jp/a/b/"
+
+
+def test_mint_navigates_to_the_blocked_path_not_the_origin(monkeypatch):
+    """The regression this exists to prevent. METI challenges paths
+    independently, so navigating to `/` gambles that the root happens to be
+    guarded at that instant. When it isn't, the visit is unchallenged, no token is
+    minted, and the caller logs "no aws-waf-token issued" a couple of hundred
+    milliseconds later while the path it wanted stays blocked."""
+    page = _NavPage("")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._mint("https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/")
+
+    assert page.gotos == [
+        "https://www.meti.go.jp/shingikai/enecho/shoene_shinene/sho_energy/"
+    ], "minting navigated somewhere other than the blocked path"
+
+
+def test_fetch_still_navigates_to_the_origin(monkeypatch):
+    """`fetch` only needs a same-origin document to run its in-page fetch from,
+    and must not pay a deep navigation per call."""
+    page = _NavPage("")
+    ctx = _NavContext()
+    _install_page(monkeypatch, page, ctx)
+
+    bc._page("https://www.meti.go.jp/shingikai/x/pdf/1.pdf")
+
+    assert page.gotos == ["https://www.meti.go.jp/"]

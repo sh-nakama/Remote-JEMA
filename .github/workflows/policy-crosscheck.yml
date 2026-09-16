@@ -37,7 +37,13 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e .
+        run: |
+          pip install -e ".[browser]"
+          # meti.go.jp answers every tokenless client with an AWS WAF challenge,
+          # and only a real browser can mint the aws-waf-token that clears it.
+          # Without the binary, clearance degrades to {} and this job sees a wall
+          # of 202s — quietly, since clearance failures are non-fatal by design.
+          playwright install --with-deps chromium
 
       - name: Pull latest DB from Hugging Face (for the current catalog)
         run: python -m repower.cli pull-hf

@@ -250,6 +250,13 @@ class PolicyMeeting(Base):
     # detected → downloading → ingesting → generating → done | error
     state = Column(String(16), default="detected", nullable=False)
     quality_flag = Column(String(32))  # e.g. ocr_suspect, short_output
+    # Why the last attempt failed, in words. `quality_flag` is a coarse slug and is
+    # NULL for the generic NotebookLM failure path, which left "state = error" as
+    # the only trace — enough to know a meeting broke, never enough to know why.
+    # Written by every error path in repower.policy.pipeline and cleared on success,
+    # so it always describes the *current* state rather than an old attempt.
+    last_error = Column(Text)
+    last_error_at = Column(DateTime)
     gen_seconds = Column(Float)
     retry_count = Column(Integer, default=0)
     # True once this meeting's briefing has been folded into the committee synthesis
@@ -349,6 +356,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_synth_done(engine)
             _migrate_add_policy_registry(engine)
             _migrate_add_fetch_observability(engine)
+            _migrate_add_policy_meeting_error(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -467,6 +475,30 @@ def _migrate_add_policy_registry(engine) -> None:
                 conn.execute(sql_text(
                     "ALTER TABLE policy_meeting ADD COLUMN gen_requested BOOLEAN DEFAULT 0"
                 ))
+
+
+def _migrate_add_policy_meeting_error(engine) -> None:
+    """Add ``last_error`` / ``last_error_at`` to ``policy_meeting`` (additive).
+
+    Existing errored rows keep only their ``quality_flag``: the message they failed
+    with was never recorded, so there is nothing to backfill from.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("policy_meeting")}
+    adds = [
+        ("last_error", "ALTER TABLE policy_meeting ADD COLUMN last_error TEXT"),
+        ("last_error_at", "ALTER TABLE policy_meeting ADD COLUMN last_error_at DATETIME"),
+    ]
+    missing = [ddl for col, ddl in adds if col not in cols]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for ddl in missing:
+            conn.execute(sql_text(ddl))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

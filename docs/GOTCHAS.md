@@ -49,6 +49,28 @@ fixed.
   httpx→curl_cffi Chrome-impersonation fallback is the workaround; it's duplicated in ~4 places
   (`http_cache`, `policy/pipeline._download_pdf`, `policy/scraper`, `policy/energy_board`,
   `policy/catalog`) — change all of them or centralize.
+- **OCCTO discovery reads a JSON, not the index — and not the number probe.** OCCTO's committee
+  index is rendered client-side (its raw HTML contains no meeting data at all, which is why
+  discovery used to probe `{n}.html` one number at a time). The page's own JavaScript reads
+  `/_include/json/committees-list_<slug>.json`, where `<slug>` is the last path segment of the
+  committee URL; all 27 tracked committees have one. It lists every meeting with its
+  `meeting_date`, so detection persists dates for free instead of leaving them to
+  `backfill_dates`. Measured: ~240s → ~90s over 27 committees, 81 requests → 27, and it revived
+  `margin_kentoukai` and `unyouyouryou`, which number by **fiscal year** (`26001.html` = FY2026's
+  first) and so could never be found by an upward probe from 1 — both had reported `not_found`
+  indefinitely. Three traps if you touch this:
+  - **The endpoint is keyed by category, not committee.** `chousei_sagyoukai`'s JSON lists
+    `jukyuchousei` URLs. `parse_occto_list_json` keeps only items under the committee's own path;
+    anything else would invent meeting numbers its pages never had.
+  - **It can under-report.** `chousei_sagyoukai` tops out at 72 under its own path while pages
+    through 80 exist. `_discover_occto_json` therefore returns `None` (→ probe) whenever the JSON
+    reports less than `known_latest`. This is also why the JSON is fetched with `force=True`
+    rather than conditionally: a 304 carries no body, the guard could not run, and an
+    under-reporting committee would report `unchanged` forever without probing — the one failure
+    here that loses meetings silently. Both paths are bound by the 2s pacing floor anyway (84s vs
+    52s over 27 committees), so the body is cheap insurance.
+  - `probe_occto_latest` is still the fallback for all of those cases, and for OCCTO
+    restructuring its site. Don't delete it — a missing JSON must cost speed, not correctness.
 - Scrapers **fail soft by design**: per-URL/per-region errors are caught broadly and produce
   0 rows, not exceptions. A systematic outage looks like "0 rows upserted", not a red run —
   check row counts, not just exit codes. Kyushu/Chugoku URL patterns are reverse-engineered
@@ -71,7 +93,9 @@ fixed.
 - **METI's WAF is stateful, not rate-based — going slower makes it worse.** This is the single
   most counter-intuitive thing in the codebase, and it was measured, twice: at 1s spacing 4 of 43
   committees got through; after a 5-minute cooldown at 6s spacing, 1 of 12 did. Once the edge
-  flags the client, waiting does not un-flag it; it clears on its own schedule. So:
+  flags the client, waiting does not un-flag it; it clears on its own schedule. (Both those
+  measurements were taken *tokenless*, so the pass rates say nothing about spacing — which is
+  the point: the variable that mattered was never the interval. With a token, 16/16 at 2s.) So:
   - `_MIN_HOST_INTERVAL` (2.0s) is a **politeness** choice only. Do not "tune" it hoping to
     appease a WAF, and do not lower it below 1s (there is a test pinning that).
   - The right response to a hostile host is to **stop asking**, not to ask more gently. Hence
@@ -117,6 +141,90 @@ fixed.
   it is synced to HF and otherwise grows forever. Eviction is safe — a missing entry costs one
   unconditional re-fetch — and anything still being requested is re-touched every run.
   `repower cache status` reports per-host entries/last-success/failures.
+- **METI's block is an AWS WAF *challenge*: no HTTP client can *solve* one, but any client can
+  carry the answer.** A 202 carries `x-amzn-waf-action: challenge` and a page whose
+  `challenge.js` runs a JavaScript proof-of-work to mint an `aws-waf-token` cookie. curl_cffi
+  impersonates Chrome's TLS/HTTP2 fingerprint — which beats *fingerprint* rules — but has no JS
+  engine, so waiting is not a strategy: `_curl_get(js_challenge=True)` makes one attempt and
+  stops instead of walking the 5s+15s+30s ladder for a cookie that will never arrive.
+  **The token is portable, and that is the whole game.** Measured: plain httpx carrying a
+  browser-minted `aws-waf-token` fetched 20 consecutive PDFs (~40MB) at 200. So the token goes
+  on the host's httpx client *before* its first request (`_expects_waf_challenge` →
+  `_apply_clearance` in `_do_get`), not in response to a 202. It used to reach only the curl
+  fallback's session, which meant the plain transport was refused every single time and each URL
+  paid a 202 plus a fallback round trip — invisible in the logs as "METI is blocking us".
+  `browser_clearance.fetch` (runs `fetch()` *inside* the page, returns base64) stays as the last
+  resort for when even a fresh token is challenged.
+- **A headless User-Agent gets you *blocked*, not challenged — and a block cannot be cleared.**
+  Headless Chromium advertises `HeadlessChrome/<version>`; against the live host that navigation
+  returns 403 with *no* `x-amzn-waf-action`, so `challenge.js` never runs and
+  `browser_clearance` could never mint a token — the module silently did nothing for every
+  caller. De-headlessing the UA turns the same navigation into a 202 `challenge` and the token
+  appears. `_hide_headless_ua` does this over CDP (`Emulation.setUserAgentOverride`), taking the
+  version from the browser's own UA so it can't drift, and setting `navigator.userAgent` as well
+  as the header so the page and its requests agree. Note
+  `--disable-blink-features=AutomationControlled` does **not** cover this — that hides
+  `navigator.webdriver`, a different signal.
+- **METI's remaining ceiling shows up as `405 Not Allowed`, and it is transient** `(open — P3)`.
+  Seen twice under sustained load — on the 21st URL of a fast burst, and on directory-style index
+  URLs during a full `detect` — then 200 for the same URL spaced a few seconds later, with or
+  without a token. nginx's "Not Allowed" phrasing suggests a layer below CloudFront. It is
+  currently classified `unexpected_status` and **not** retried (`_do_get` treats only 429/5xx as
+  transient), so callers see a hard error and `policy/scraper` re-requests it at a higher level.
+  Whether to make 405 transient *for these hosts* is unresolved — a genuine 405 is not transient,
+  so don't blanket-retry it.
+- **The policy workflows need `playwright install chromium`, not just the pip extra.** `pip
+  install -e ".[browser]"` (and `notebooklm-py[browser]`) bring the *Python package*; the browser
+  binary it drives is a separate download. Without it `browser_clearance.available()` is True but
+  every launch fails, clearance degrades to `{}` — non-fatal by design — and `policy detect` /
+  `policy crosscheck` see a wall of 202s that looks like METI blocking us. Both `policy.yml` and
+  `policy-crosscheck.yml` now run it explicitly; any new workflow that touches meti.go.jp must
+  too.
+- **Minting a token must *navigate*; "already on the origin" is not "somewhere useful".**
+  `_page` skipped its `goto` whenever the thread's page was already on the host's origin — and a
+  page parked on a WAF **block** page satisfies that check. So one bad navigation wedged the
+  thread permanently: every later `_mint` re-read cookies off the dead page, returned `{}`, and
+  the process could never recover. This was invisible from the CLI (a fresh process navigates
+  once and succeeds) and fatal in `web_api`'s long-lived catch-up, which is exactly where the
+  symptom showed up. `_mint` now passes `revisit=True`; `fetch` deliberately does not, since it
+  makes its own in-page request anyway. **When a clearance change seems not to work, check
+  whether you are testing a fresh process or a server that has been up since before it.**
+- **METI's 403 wears METI's own "page not found" page.** The 5045-byte body titled
+  「指定されたページまたはファイルは存在しません」, served from S3/CloudFront with no WAF header, is
+  what a refused client gets — for URLs that exist perfectly well. Don't read that body (or a
+  bare 403) as a dead link, and don't conclude "not found" from it.
+- **The 202 body is empty unless you ask for HTML.** AWS WAF only serves the challenge
+  interstitial to a request whose `Accept` admits `text/html`; with httpx's default `*/*` you
+  get a 0-byte 202 and cannot see what you are being asked to do. `_BROWSER_HEADERS` fixes this
+  — don't trim it back to a lone User-Agent.
+- **The WAF escalates, and escalation outlives the burst.** Normal → challenge (202) → block
+  (403), keyed on the client rather than the URL: at the 403 stage even real Chrome is refused.
+  A tight burst of cache-busting requests reaches 403 in seconds and takes ~15 minutes to decay.
+  Diagnose with single spaced requests, never a loop.
+- **Once escalated to 403 the block is IP-wide and no client shape escapes it** — browser
+  navigation, in-page `fetch()` and Playwright's request context all return the same 403. The browser
+  helps at the *challenge* stage only; past that the remedy is time. But **do not read a 403 as
+  proof that the address is burned**: the same address that was 403ing served 16/16 PDFs a few
+  minutes later. The state flips on a scale of minutes — verify with a single spaced request
+  before concluding anything.
+- **"~5 requests then blocked" was an artefact of being tokenless.** That figure — which sized
+  the original `_HOST_BUDGET` of 4 — was measured while nothing carried an `aws-waf-token`, the
+  one condition under which METI refuses nearly everything. With the token on the httpx client,
+  25 URLs at 1s spacing gave 20 × 200 and ~40MB in 29s before the 21st returned 405 (never
+  identified; it may be a rate rule, in which case the ceiling moves with spacing). `_HOST_BUDGET`
+  is now 16 per 5 minutes for meti.go.jp and egc.meti.go.jp — a wide margin under that observed
+  cliff. Unlisted hosts are unlimited, so OCCTO and the TSO/JEPX/EPRX scrapers are untouched.
+  It stays **advisory**: `budget_exhausted(url)` is consulted only by work that can be resumed —
+  `detect` and the two backfills, which report the remainder as `deferred` rather than as
+  failures. Indivisible work ignores it on purpose: stopping halfway through one meeting's PDFs
+  would be worse than being blocked. **Note one URL used to spend two budget units**, since
+  `_consume_budget` is called by both `_do_get` and `_curl_get` and the fallback ran every time —
+  so a budget of 4 was really 2 URLs per window. That count is correct (both issue a real
+  request); it stopped hurting because the fallback is now rare.
+- **Every plain request used to open a fresh client.** `_do_get` called module-level
+  `httpx.get`, so each request paid a new TLS handshake and — worse — dropped its cookie jar,
+  making any clearance cookie unusable by design. `_http_client(url)` now memoises one client
+  per host; keep it that way.
 
 ## The HF dataset sync (shared mutable state)
 
@@ -208,6 +316,19 @@ fixed.
 - `web_api.py` is a **localhost dev helper only**: wildcard CORS, zero auth, DB-mutating +
   subprocess-launching endpoints, no job timeout `(open — P3)`. Never bind it beyond 127.0.0.1
   or reuse it as a "real" backend.
+- **A second `repower web-api` on the same port starts "successfully" and serves nothing.**
+  `ThreadingHTTPServer` inherits `allow_reuse_address = 1`, and on Windows SO_REUSEADDR lets a
+  second process bind a port that is already bound — it logs `listening on http://127.0.0.1:8787`
+  while the *first* process keeps taking every connection. The symptom is a backend edit that
+  appears to have no effect (a new route 404s, a new field is missing from `/api/policy/catalog`)
+  even though the code is right there. Before debugging the code, check who actually owns the
+  port — `Get-NetTCPConnection -LocalPort 8787 -State Listen` — and kill *all* the stale
+  `repower web-api` processes, not just the newest.
+- **Policy exports are three files, not two.** `policy/status.json` (per-meeting pipeline state
+  for the Manage → Status table) is written alongside `committees.json` / `meetings.json`. It is
+  the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/
+  `generating`) and the per-meeting failure message; `meetings.json` collapses those into
+  `pending`. A read-only deployment shows stale meeting status until `repower export-web` reruns.
 - **Capacity-market figures are curated by hand from OCCTO PDFs** (`dashboard/capacity_data.py`)
   — there is no machine-readable feed, so a new auction means re-reading the press release.
   `pdfplumber` is broken in this venv (`cryptography` `_rust` DLL); use PyMuPDF (`fitz`).
@@ -230,6 +351,64 @@ fixed.
 
 ## Policy observer
 
+- **A meeting's PDFs are paced wider than a detection sweep's pages.** The 2s
+  `_MIN_HOST_INTERVAL` floor is sized for one-page-per-host sweeps. A meeting is a dozen
+  files from the *same* host, and METI's edge treats that as a burst: measured
+  2026-08-18, it served six PDFs at 2s spacing and challenged the seventh ~12s in.
+  `pipeline._batch_interval(n)` widens the gap with the batch size (≤4 files → 2s, 6 → 4s,
+  12 → 10s, capped at 12s) via the `http_cache.host_pace()` context manager, which is
+  thread-local and can only ever *slow* requests down. Note this is about **avoidance**
+  (staying under the burst allowance); it does not contradict the recovery finding above —
+  once flagged, waiting still does not un-flag you.
+- **Every path that hands a meeting back to a later run must keep its staged PDFs.**
+  There are three: `blocked` (host refused), `generating` (left for `resume`), and the
+  `_HALTING` reset (rate limit / auth lapse / NotebookLM timeout, which sets the row back
+  to `detected`). The halting one bit hardest — the downloads had all *succeeded*, and
+  wiping them meant the retry re-ran the full burst against a WAF that tolerates a handful
+  of requests, to re-fetch bytes already on disk. If you add another "come back to this
+  later" return, set `keep_scratch = True` with it.
+- **`downloaded` is a claim about disk, and the resume check reads the disk.** When staging
+  is discarded, `store.forget_staged_materials` resets those rows to `detected` so the
+  status table stops reporting documents that are gone. `ingested` rows are left — that
+  did happen, and it stays true after the ephemeral notebook is deleted.
+- **The ingested denominator is `docsPlanned`, not `docs`.** `docs` counts every PDF on the
+  page; only `pipeline.INGESTABLE_KINDS` are ever ingested, so a complete meeting that also
+  lists a 委員名簿 (`kind='other'`) would read as `12/13` and look broken. Report against
+  what the pipeline *meant* to ingest.
+- **Downloaded PDFs survive a blocked meeting; don't "clean up" that scratch dir.**
+  `summarize_meeting` keeps `_scratch()/<key>/<num>/` when it returns `blocked`, and skips
+  any file already on disk on the next attempt. Without it, all-or-nothing staging made a
+  large meeting *unable to ever complete*: each attempt re-requested all 12 files, burned
+  the same ~6-request allowance on bytes it already had, and failed at the same place. The
+  dir is removed on `done` and on the permanent-error path. A meeting that stays blocked
+  forever keeps its partial set (bounded by pending meetings × ~12 PDFs, in the OS temp dir).
+- **Stop requesting at the first hostile response.** `_HOSTILE_FETCH_KINDS`
+  (`challenge_unresolved` / `blocked_403` / `circuit_open`) abandons the rest of the batch.
+  Those requests cannot succeed *and* each one is a strike towards the 3-strike breaker —
+  in the observed failure, running the batch to the end took three strikes and opened the
+  breaker for 300s, taking every other committee on that host down with it. Abandoning at
+  the first takes one.
+- **Source staging is all-or-nothing, deliberately.** It used to proceed whenever *at
+  least one* document downloaded, and the observed result was a meeting where 11 of 12
+  PDFs were blocked mid-download, the one that landed was `配布資料一覧` (the *list* of
+  documents), and NotebookLM produced a fluent summary of a table of contents that was
+  then marked `done` and folded into the committee synthesis. A partial briefing is
+  worse than none because it reads complete. Any download or `add_source` shortfall now
+  aborts the meeting: transient kinds → `blocked` (no retry burned, stays pending),
+  anything else → `error` + a retry, so a permanently-404 handout still leaves the
+  worklist after `MAX_RETRIES` instead of blocking its meeting forever.
+- **`policy_material.status` / `nblm_source_id` are the record of what the briefing
+  actually saw.** They were declared from the start and never written, so every document
+  read `detected` forever and "did this summary see all the papers?" was unanswerable
+  except by reading the summary's own prose. The pipeline writes
+  `downloaded`/`error`/`ingested` per document; the Manage status table shows the
+  `ingested/total` ratio. A `done` meeting showing `0/13` is a briefing to re-run.
+- **The circuit breaker is per-process and in-memory** (`http_cache._circuit_open_until`).
+  `policy run` is a subprocess, so every run starts with a closed breaker — the skip in
+  `run()` only prevents *within-run* thrash, which is the case that hurt: the breaker
+  opened on the third meeting and the rest of the backlog then failed instantly, one
+  meeting per ~15 ms, marking everything blocked. Use the read-only `circuit_cooldown()`
+  for checks; `_circuit_retry_after()` consumes the one probe allowed after a cooldown.
 - `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
   timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
   paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.

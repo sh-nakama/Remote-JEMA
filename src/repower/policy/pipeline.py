@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
 from repower.policy import notebook as nb
@@ -30,6 +31,7 @@ from repower.policy.scraper import list_materials
 from repower.policy.store import (
     clear_generation_request,
     committee_or_config,
+    forget_staged_materials,
     get_committee,
     mark_synthesized,
     meeting_materials,
@@ -37,12 +39,20 @@ from repower.policy.store import (
     pending_meetings,
     record_meeting,
     regenerate_running_doc,
+    reset_synthesized,
+    set_material_state,
     stalled_synthesis_committees,
     synthesized_meeting_nums,
     update_committee,
     update_meeting,
 )
-from repower.scrapers.http_cache import classify, conditional_get
+from repower.scrapers.http_cache import (
+    circuit_cooldown,
+    classify,
+    conditional_get,
+    host_pace,
+    min_host_interval,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +60,11 @@ logger = logging.getLogger(__name__)
 MEETING_SOURCE_BUDGET = min(NOTEBOOKLM_SOURCE_CAP, 12)
 # Kind priority for selecting which documents to ingest (minutes first).
 _KIND_PRIORITY = {"minutes": 0, "brief": 1, "compilation": 2, "handout": 3, "agenda": 4, "appendix": 5}
+# Kinds the pipeline will ever ingest. Exported so reporting can count "how many of
+# this meeting's documents were *meant* to reach NotebookLM" — counting every PDF on
+# the page instead makes a perfectly complete meeting look short by however many
+# 委員名簿-style files it happens to list.
+INGESTABLE_KINDS = frozenset(_KIND_PRIORITY)
 
 _MEETING_PROMPT = """この会合（{name_ja} 第{num}回）の議論を、提供された資料すべてに基づいて詳細に要約してください。
 
@@ -98,6 +113,32 @@ _TRANSIENT_FETCH_KINDS = frozenset({
     "network_error",         # DNS/TLS/connection/timeout
     "server_error",          # 5xx/429 that survived the transient retries
 })
+
+# Fetch outcomes that mean the *host* has turned on us, so the rest of this
+# meeting's documents are already lost. Continuing would spend requests that
+# cannot succeed and, worse, each one is another strike against the per-host
+# circuit breaker — three of them open it for 5 minutes and take every other
+# committee on that host down with it. Observed: a meeting abandoned at the first
+# challenge takes one strike; running the batch to the end took three.
+_HOSTILE_FETCH_KINDS = frozenset({"challenge_unresolved", "blocked_403", "circuit_open"})
+
+# Batch pacing. The 2s floor is sized for detection sweeps, which fetch one page per
+# host; a meeting is a dozen files from the *same* host, and METI's edge treats that
+# as a burst — measured, it served six PDFs at 2s spacing and challenged the seventh
+# ~12s in. So the gap widens with the size of the batch: the more documents a meeting
+# has, the slower we walk through them.
+#
+#   files ≤4 → 2.0s (unchanged) · 6 → 4.0s · 12 → 10.0s · 16+ → 12.0s (capped)
+_BATCH_PACE_FREE = 4      # documents that pace at the ordinary floor
+_BATCH_PACE_STEP = 1.0    # extra seconds per document beyond that
+_BATCH_PACE_CAP = 12.0    # never crawl slower than this, however large the meeting
+
+
+def _batch_interval(n: int) -> float:
+    """Seconds between requests when pulling *n* documents from one host."""
+    return min(_BATCH_PACE_CAP,
+               min_host_interval() + _BATCH_PACE_STEP * max(0, n - _BATCH_PACE_FREE))
+
 
 # Blocked meetings cost no NotebookLM quota, so they don't spend a slot of
 # ``max_per_run`` — but a run still has to stop looking eventually. This bounds one
@@ -162,6 +203,24 @@ def _download_pdf(url: str, dest: Path, *, db_path: str | None = None,
     return "ok"
 
 
+def _fail_meeting(meeting_row: int, db_path: str | None, *, flag: str | None,
+                  message: str, **fields) -> None:
+    """Mark a meeting errored *and say why*, in words.
+
+    ``quality_flag`` is a coarse slug and the generic NotebookLM path has none at
+    all, so on its own the DB could only report "this broke" — never what broke.
+    The message is what the Manage status table shows; it is capped because it can
+    carry an upstream response body, and it rides the Hugging Face sync.
+    """
+    from datetime import UTC, datetime
+
+    update_meeting(
+        meeting_row, db_path=db_path, state="error", quality_flag=flag,
+        last_error=" ".join(str(message).split())[:500],
+        last_error_at=datetime.now(UTC), **fields,
+    )
+
+
 def _select_materials(materials: list[dict]) -> list[dict]:
     """Code-enforced source selection: minutes (or brief if none), handouts,
     compilation, agenda; appendices only if budget remains. Capped to the budget."""
@@ -198,49 +257,106 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         record_meeting(committee.key, meeting_num, None, db_path=db_path)
         meeting_row = _meeting_id(committee.key, meeting_num, db_path)
     if not selected:
-        update_meeting(meeting_row, db_path=db_path, state="error", quality_flag="no_sources")
+        _fail_meeting(
+            meeting_row, db_path, flag="no_sources",
+            message=(
+                f"No usable source documents: the committee page lists {len(materials)} "
+                "material(s), none of an ingestable kind."
+            ),
+        )
         return "error"
 
     work = _scratch() / committee.key / str(meeting_num)
     started = time.monotonic()
     notebook_id: str | None = None
+    # Documents already fetched are kept when a meeting is left pending, so the next
+    # attempt only asks for what is missing (see the `finally` below).
+    keep_scratch = False
     try:
         update_meeting(meeting_row, db_path=db_path, state="downloading")
-        staged: list[Path] = []
+        # (material, staged path) pairs — the material travels with the file so an
+        # ingest failure can name the document it lost, not just a count.
+        staged: list[tuple[dict, Path]] = []
         failures: list[str] = []
-        for m in selected:
-            dest = work / f"{m['pdf_id']}.pdf"
-            kind = _download_pdf(m["url"], dest, db_path=db_path)
-            if kind == "ok":
-                staged.append(dest)
-            else:
+        reused = 0
+        unattempted = 0
+        with host_pace(_batch_interval(len(selected))):
+            for i, m in enumerate(selected):
+                dest = work / f"{m['pdf_id']}.pdf"
+                if dest.exists() and dest.stat().st_size > 0:
+                    # Left by an earlier attempt that couldn't finish the set. Re-asking
+                    # for it would spend one of the few requests this host allows us
+                    # before it starts challenging — on bytes already on disk.
+                    reused += 1
+                    staged.append((m, dest))
+                    set_material_state(committee.key, m["pdf_id"], db_path=db_path,
+                                       status="downloaded", nblm_source_id=None)
+                    continue
+                kind = _download_pdf(m["url"], dest, db_path=db_path)
+                set_material_state(committee.key, m["pdf_id"], db_path=db_path,
+                                   status="downloaded" if kind == "ok" else "error",
+                                   nblm_source_id=None)
+                if kind == "ok":
+                    staged.append((m, dest))
+                    continue
                 failures.append(kind)
-        if not staged:
-            # A host that blocked us is not a meeting beyond saving. Leave the
-            # retry budget alone so the same PDFs are tried again on a calm day —
-            # one mixed verdict counts as blocked, since a single transient kind
-            # is enough to make "these documents are gone" the wrong conclusion.
-            # Documents that are genuinely absent do burn a retry, so a dead
-            # meeting still leaves the worklist after MAX_RETRIES instead of being
-            # re-attempted every run forever.
+                if kind in _HOSTILE_FETCH_KINDS:
+                    # Stop asking. Under all-or-nothing this meeting is already lost,
+                    # and every further request is both futile and a strike towards
+                    # opening the host's breaker on the rest of the run.
+                    unattempted = len(selected) - i - 1
+                    logger.warning(
+                        "policy %s 第%d回: %s on %s — abandoning the batch with %d "
+                        "document(s) unattempted (%d already on disk for the retry)",
+                        committee.key, meeting_num, kind, m["pdf_id"], unattempted, len(staged),
+                    )
+                    break
+        if reused:
+            logger.info("policy %s 第%d回: reused %d document(s) staged by an earlier attempt",
+                        committee.key, meeting_num, reused)
+        if failures:
+            # All-or-nothing: a briefing written from a subset of a meeting's papers
+            # is worse than no briefing, because it reads like a complete one. The
+            # case that forced this: 11 of 12 documents were blocked mid-download and
+            # the only one that landed was 配布資料一覧 — the *list* of documents — so
+            # NotebookLM dutifully summarised a table of contents and the meeting was
+            # marked done.
+            #
+            # A host that blocked us is not a meeting beyond saving, so leave the
+            # retry budget alone and try the same PDFs again on a calm day — one
+            # mixed verdict counts as blocked, since a single transient kind is
+            # enough to make "these documents are gone" the wrong conclusion.
+            # Documents that are genuinely absent do burn a retry, so a meeting with
+            # a permanently dead link leaves the worklist after MAX_RETRIES instead
+            # of being re-attempted every run forever.
             detail = ",".join(sorted(set(failures))) or "no materials"
+            hosts = sorted({urlsplit(m["url"] or "").hostname or "?" for m in selected})
+            why = (
+                f"{len(failures) + unattempted} of {len(selected)} document(s) could not be "
+                f"downloaded ({detail}) from {', '.join(hosts)}"
+                + (f"; {unattempted} not attempted after the host turned us away" if unattempted else "")
+                + f"; {len(staged)} kept for the next attempt"
+            )
             if any(k in _TRANSIENT_FETCH_KINDS for k in failures):
                 logger.warning(
-                    "policy %s 第%d回: no sources downloaded (host blocked: %s) — will retry "
-                    "on a later run without burning a retry",
-                    committee.key, meeting_num, detail,
+                    "policy %s 第%d回: %d/%d sources not downloaded (host blocked: %s) — "
+                    "will retry on a later run without burning a retry",
+                    committee.key, meeting_num, len(failures), len(selected), detail,
                 )
-                update_meeting(meeting_row, db_path=db_path, state="error",
-                               quality_flag="download_blocked")
+                _fail_meeting(meeting_row, db_path, flag="download_blocked",
+                              message=why + " — the host blocked us; will be retried")
+                # Keep what did download: the next attempt then spends its requests
+                # only on the missing files, so a large meeting converges over a
+                # couple of passes instead of re-burning the same budget forever.
+                keep_scratch = True
                 # Not "error" to the caller: nothing reached NotebookLM, so this
                 # must not spend a slot of the run's quota budget.
                 return "blocked"
             else:
-                logger.error("policy %s 第%d回: no sources downloaded (%s)",
-                             committee.key, meeting_num, detail)
-                update_meeting(meeting_row, db_path=db_path, state="error",
-                               quality_flag="download_failed",
-                               retry_count=_bump_retry(committee.key, meeting_num, db_path))
+                logger.error("policy %s 第%d回: %d/%d sources not downloaded (%s)",
+                             committee.key, meeting_num, len(failures), len(selected), detail)
+                _fail_meeting(meeting_row, db_path, flag="download_failed", message=why,
+                              retry_count=_bump_retry(committee.key, meeting_num, db_path))
             return "error"
 
         title = f"{committee.key} 第{meeting_num}回"
@@ -259,11 +375,38 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         update_meeting(meeting_row, db_path=db_path, state="ingesting", notebook_id=notebook_id)
 
         source_ids = []
-        for path in staged:
+        not_ingested: list[str] = []
+        for m, path in staged:
             try:
-                source_ids.append(nb.add_source(notebook_id, str(path)))
+                sid = nb.add_source(notebook_id, str(path))
+            except _HALTING:
+                # Quota spent / session lapsed / NotebookLM stopped answering: the
+                # account is the problem, not this document. Let the outer handlers
+                # halt the run instead of blaming the meeting.
+                raise
             except nb.NotebookLMError as e:
+                # Same rule as a failed download: a notebook missing one of the
+                # meeting's papers writes a briefing that reads complete and isn't.
                 logger.warning("add_source failed (%s): %s", path.name, e)
+                not_ingested.append(f"{m['pdf_id']} ({type(e).__name__})")
+                continue
+            source_ids.append(sid)
+            set_material_state(committee.key, m["pdf_id"], db_path=db_path,
+                               status="ingested", nblm_source_id=sid)
+        if not_ingested:
+            try:
+                nb.delete_notebook(notebook_id)  # nothing was generated from it yet
+            except nb.NotebookLMError as e:
+                logger.warning("could not delete notebook %s: %s", notebook_id, e)
+            notebook_id = None
+            _fail_meeting(
+                meeting_row, db_path, flag="ingest_failed",
+                message=(f"{len(not_ingested)} of {len(staged)} downloaded document(s) could "
+                         f"not be added to the notebook: {', '.join(not_ingested[:4])}"),
+                notebook_id=None,
+                retry_count=_bump_retry(committee.key, meeting_num, db_path),
+            )
+            return "error"
         for sid in source_ids:
             nb.wait_source(notebook_id, sid)
 
@@ -273,10 +416,12 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         task_id = nb.generate_report(notebook_id, prompt, language="ja", fmt="custom")
         update_meeting(meeting_row, db_path=db_path, state="generating", report_task_id=task_id)
         if not nb.wait_artifact(notebook_id, task_id):
+            keep_scratch = True  # resume restages from scratch; don't re-fetch these
             return "generating"  # leave for resume; do NOT delete the notebook
 
         out_md = work / "briefing.md"
         if not nb.download_report(notebook_id, task_id, out_md):
+            keep_scratch = True
             return "generating"
         briefing = out_md.read_text(encoding="utf-8")
 
@@ -293,6 +438,10 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
             digest_en_json=digest_json, quality_flag=quality_flag,
             gen_seconds=round(time.monotonic() - started, 1),
+            # This attempt succeeded, so any message from an earlier failed one no
+            # longer describes the meeting — clear it rather than leave the status
+            # table reporting a resolved error against a summarised meeting.
+            last_error=None, last_error_at=None,
         )
         regenerate_running_doc(committee.key, db_path=db_path)
 
@@ -322,15 +471,30 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         # 'no_sources' from before materials were enumerated) — this attempt got far
         # enough to have sources, so the old flag no longer describes the meeting.
         update_meeting(meeting_row, db_path=db_path, state="detected", notebook_id=None,
-                       quality_flag=None)
+                       quality_flag=None, last_error=None, last_error_at=None)
+        # This meeting is explicitly being handed back to a later run, so its
+        # documents must survive with it. Losing them here was worse than losing
+        # them on the blocked path: the downloads had all *succeeded*, and throwing
+        # them away meant the retry re-ran the whole burst against a WAF that only
+        # tolerates a handful of requests — to fetch bytes we already had.
+        keep_scratch = True
         raise
     except nb.NotebookLMError as e:
         logger.error("summarize_meeting %s 第%d回 failed: %s", committee.key, meeting_num, e)
-        update_meeting(meeting_row, db_path=db_path, state="error",
-                       retry_count=_bump_retry(committee.key, meeting_num, db_path))
+        # No slug fits this one — it is whatever NotebookLM refused to do — so the
+        # message is the only record of the cause. Name the exception type too: the
+        # text alone is often an opaque upstream string.
+        _fail_meeting(meeting_row, db_path, flag=None,
+                      message=f"NotebookLM {type(e).__name__}: {e}",
+                      retry_count=_bump_retry(committee.key, meeting_num, db_path))
         return "error"
     finally:
-        shutil.rmtree(work, ignore_errors=True)
+        if not keep_scratch:
+            shutil.rmtree(work, ignore_errors=True)
+            # The staged files are gone, so "downloaded" would be a claim about
+            # disk that is no longer true and the next attempt's resume check
+            # would disagree with. Ingested rows keep their state — that happened.
+            forget_staged_materials(committee.key, meeting_num, db_path=db_path)
 
 
 def _ocr_guard(notebook_id: str, source_ids: list[str]) -> str | None:
@@ -465,13 +629,19 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
 
 def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         db_path: str | None = None, states: tuple[str, ...] | None = None,
-        breadth_first: bool = False) -> dict:
+        breadth_first: bool = False, meeting_num: int | None = None) -> dict:
     """Summarise pending meetings (gated on auth), then refresh each committee's synthesis.
 
     ``states`` lets ``resume`` target in-flight rows; default is all not-done work.
     ``breadth_first`` spreads the run across committees (newest meeting of each, in
     priority order) rather than draining one committee's backlog — see
     ``pending_meetings``. Returns a summary dict.
+
+    ``meeting_num`` (with exactly one committee key) targets that one meeting and
+    nothing else, *bypassing the pending worklist entirely* — so an already-``done``
+    meeting can be re-summarised. That is the repair path for a briefing written
+    from an incomplete source set; it clears ``synth_done`` so the corrected
+    briefing is folded back into the committee synthesis.
 
     Past the opening ``require_auth`` gate, an ``_HALTING`` error stops the run
     cleanly and names itself in the summary's ``stopped_early`` rather than
@@ -483,11 +653,20 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     # When no committees are named ("all"), restrict to tracked (enabled) ones so
     # untracking a committee removes it from the daily run. Explicit --committee
     # keys are an intentional override and run regardless of the enabled flag.
-    work = pending_meetings(db_path=db_path, only_enabled=(not keys), breadth_first=breadth_first)
-    if keys:
-        work = [m for m in work if m["committee_key"] in keys]
-    if states:
-        work = [m for m in work if m["state"] in states]
+    if meeting_num is not None:
+        if not keys or len(keys) != 1:
+            raise ValueError("meeting_num needs exactly one committee key")
+        work = [{"committee_key": keys[0], "meeting_num": meeting_num, "state": "targeted"}]
+        # A re-run replaces the briefing, so the copy already folded into the
+        # synthesis is stale — let the synthesis pick the new one up.
+        reset_synthesized(keys[0], meeting_num, db_path=db_path)
+    else:
+        work = pending_meetings(db_path=db_path, only_enabled=(not keys),
+                                breadth_first=breadth_first)
+        if keys:
+            work = [m for m in work if m["committee_key"] in keys]
+        if states:
+            work = [m for m in work if m["state"] in states]
 
     # ``max_per_run`` exists to guard the NotebookLM daily quota, so it counts the
     # attempts that actually reach NotebookLM. A meeting whose source host blocked
@@ -497,6 +676,10 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     done = errored = blocked = charged = 0
     stop_reason: str | None = None
     touched_committees: set[str] = set()
+    # Meetings passed over because their source host is cooling down, per host.
+    # Skipping is free (no request is issued) and changes no DB state, so these
+    # stay pending and are simply reported at the end.
+    skipped_hosts: dict[str, int] = {}
     for item in work:
         if max_per_run and charged >= max_per_run:
             break
@@ -509,6 +692,16 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             break
         committee = committee_or_config(item["committee_key"], db_path=db_path)
         if committee is None:
+            continue
+        # Don't queue work at a host that is already short-circuiting. Every
+        # download would fail instantly with `circuit_open`, marking meeting after
+        # meeting blocked and burning the round's blocked budget — while committees
+        # on healthy hosts (OCCTO, EGC) never got a turn. Skipping keeps those
+        # moving through a METI outage.
+        cooldown = circuit_cooldown(committee.url) if committee.url else 0.0
+        if cooldown > 0:
+            host = urlsplit(committee.url).hostname or "?"
+            skipped_hosts[host] = skipped_hosts.get(host, 0) + 1
             continue
         try:
             state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
@@ -554,10 +747,17 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
                                stop_reason, key, e)
                 break
 
+    for host, n in sorted(skipped_hosts.items()):
+        logger.warning(
+            "policy run: skipped %d meeting(s) on %s — its circuit breaker is open "
+            "(they stay pending; retry once the host cools down)", n, host,
+        )
+
     # 'processed' counts meetings actually attempted, not the whole worklist the
     # run was free to draw from.
     return {"processed": charged + blocked, "done": done, "errored": errored,
             "blocked": blocked, "synthesized": synthesized,
+            "skipped": sum(skipped_hosts.values()), "skipped_hosts": skipped_hosts,
             "rate_limited": stop_reason == "rate_limited", "stopped_early": stop_reason}
 
 

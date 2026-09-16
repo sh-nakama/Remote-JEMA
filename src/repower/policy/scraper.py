@@ -18,6 +18,7 @@ done only for genuinely new meetings.
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 import re
 import time
@@ -37,6 +38,14 @@ REQUEST_TIMEOUT = 30.0
 POLITE_DELAY = 1.0  # seconds between consecutive page fetches (be a good citizen)
 PROBE_GAP_TOLERANCE = 3  # consecutive missing OCCTO pages before declaring "no more"
 PROBE_HARD_CAP = 400  # absolute ceiling on probe range, just in case
+
+# OCCTO's committee index is rendered client-side from this per-committee JSON,
+# which is what the page's own JavaScript fetches. It is strictly better than the
+# number probe it replaces: one request instead of PROBE_GAP_TOLERANCE, it carries
+# ETag/Last-Modified so a settled committee 304s (a probe for an absent page can
+# never be cached), and every item carries its meeting date — which detection then
+# persists for free instead of leaving it to a second crawl.
+OCCTO_LIST_JSON = "https://www.occto.or.jp/_include/json/committees-list_{slug}.json"
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -68,8 +77,9 @@ class Discovery:
     to the meeting link, so detection gets them for free and must persist them —
     otherwise a meeting's date depends on ``backfill_dates`` completing a second
     full crawl of the (WAF-throttled) committee pages, which routinely doesn't
-    finish and leaves meetings showing a 検出 (detection) date instead. Empty for
-    OCCTO, whose JS-rendered index carries no dates.
+    finish and leaves meetings showing a 検出 (detection) date instead. OCCTO's
+    list JSON carries dates too; only the (fallback) number probe cannot, since it
+    learns nothing but which pages exist.
 
     ``error_kind``/``error_detail``/``error_url`` say *why* a failure happened.
     Without them ``status == "error"`` collapses a blocked host, an uncleared WAF
@@ -492,6 +502,59 @@ def _occto_base(committee: Committee) -> str:
     return re.sub(r"index\.html$", "", committee.url).rstrip("/")
 
 
+def _occto_slug(committee: Committee) -> str:
+    """The last path segment of an OCCTO committee URL, which names its JSON."""
+    return _occto_base(committee).rsplit("/", 1)[-1]
+
+
+def occto_list_json_url(committee: Committee) -> str:
+    return OCCTO_LIST_JSON.format(slug=_occto_slug(committee))
+
+
+def parse_occto_list_json(
+    raw: bytes | str, committee: Committee
+) -> tuple[list[int], dict[int, datetime.date]]:
+    """``(meeting_nums desc, {num: date})`` from an OCCTO committee-list JSON.
+
+    Items are kept only when their ``url`` sits under *committee*'s own base. The
+    endpoint is keyed by *category*, not strictly by committee, so one committee's
+    JSON can list another's pages — ``chousei_sagyoukai``'s 80 items are all
+    ``jukyuchousei`` URLs. Attributing those to the requester would invent meetings
+    that its own numbering never had, so they are dropped and the caller falls back
+    to the probe.
+
+    Meeting numbers are taken from the page filename rather than the 第N回 title,
+    because two committees (``margin_kentoukai``, ``unyouyouryou``) number by
+    fiscal year — ``26001.html`` is FY2026's first — and the filename is what
+    :func:`list_materials` will need to fetch.
+    """
+    try:
+        items = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+    except (ValueError, UnicodeDecodeError) as e:
+        logger.warning("policy: OCCTO list JSON for %s is unreadable: %s", committee.key, e)
+        return ([], {})
+    if not isinstance(items, list):
+        return ([], {})
+
+    own_path = urlparse(_occto_base(committee)).path.rstrip("/")
+    nums: set[int] = set()
+    dates: dict[int, datetime.date] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        m = re.match(rf"^{re.escape(own_path)}/(\d+)\.html$", str(item.get("url") or ""))
+        if not m:
+            continue
+        num = int(m.group(1))
+        nums.add(num)
+        raw_date = str(item.get("meeting_date") or "")[:10]
+        try:
+            dates[num] = datetime.date.fromisoformat(raw_date)
+        except ValueError:
+            pass  # a null/odd date is not a reason to drop the meeting
+    return (sorted(nums, reverse=True), dates)
+
+
 def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
                        max_probes: int | None = None) -> tuple[int | None, str | None]:
     """Find the latest OCCTO meeting by a linear upward-window probe.
@@ -543,6 +606,58 @@ def probe_occto_latest(committee: Committee, *, start_from: int | None = None,
     return (latest, None)
 
 
+def _discover_occto_json(
+    committee: Committee, *, db_path: str | None, known_latest: int | None = None,
+) -> Discovery | None:
+    """Discover an OCCTO committee's meetings from its list JSON.
+
+    ``None`` means "no usable answer here, fall back to the probe" — the endpoint
+    was unreachable, unparseable, listed nothing belonging to this committee, or
+    reported *less* than we already know. That is deliberately not an error: the
+    probe is still a working path, so a change at OCCTO's end degrades this to the
+    old speed rather than to a failure.
+
+    The ``known_latest`` guard matters more than it looks. ``chousei_sagyoukai``'s
+    JSON lists only up to 72 under its own path while pages through 80 demonstrably
+    exist, so trusting it would park that committee below its real frontier and
+    silently stop detecting new meetings — a probe, whose whole job is to scan
+    *above* the frontier, cannot make that mistake. Under-reporting is therefore
+    treated as "this JSON is not authoritative for this committee".
+
+    ``force=True`` on the fetch is what makes that guard reliable, and it is a
+    deliberate trade. A 304 would be cheaper, but it carries no body, so the guard
+    cannot run and an under-reporting committee would report ``unchanged`` forever
+    without ever probing — the one failure mode here that loses meetings silently.
+    Measured over all 27 OCCTO committees the difference is 84s (always a body)
+    versus 52s (304s), because both are bound by the 2s per-host pacing floor
+    rather than by transfer; the probe this replaces took ~240s. Paying 30s to keep
+    the frontier check honest is worth it. (Contrast ``_list_meti``, which forces
+    for the same "we need a real body to parse" reason.)
+    """
+    url = occto_list_json_url(committee)
+    res = _fetch_ex(url, db_path=db_path, force=True)
+    if res.status != "ok" or res.content is None:
+        logger.info(
+            "policy: OCCTO list JSON unavailable for %s (%s); falling back to the probe",
+            committee.key, res.kind or res.status,
+        )
+        return None
+    nums, dates = parse_occto_list_json(res.content, committee)
+    if not nums:
+        logger.info(
+            "policy: OCCTO list JSON for %s listed no meetings of its own; "
+            "falling back to the probe", committee.key,
+        )
+        return None
+    if known_latest is not None and nums[0] < known_latest:
+        logger.info(
+            "policy: OCCTO list JSON for %s tops out at %d but %d is already known; "
+            "falling back to the probe", committee.key, nums[0], known_latest,
+        )
+        return None
+    return Discovery("ok", nums, dates)
+
+
 # ── Discovery (which meetings exist) ─────────────────────────────────────────
 def discover_meetings(committee: Committee, *, db_path: str | None = None,
                       known_latest: int | None = None, force: bool = False,
@@ -565,6 +680,11 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
     different fixes and used to be indistinguishable.
     """
     if committee.is_occto:
+        json_disc = _discover_occto_json(
+            committee, db_path=db_path, known_latest=known_latest
+        )
+        if json_disc is not None:
+            return json_disc
         latest, probe_err = probe_occto_latest(committee, start_from=known_latest,
                                                max_probes=max_probes)
         if probe_err is not None:

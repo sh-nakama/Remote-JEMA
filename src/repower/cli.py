@@ -454,6 +454,19 @@ def _warn_if_stopped_early(summary: dict, retry_hint: str) -> None:
                    err=True)
 
 
+def _report_deferred(count: int, noun: str) -> None:
+    """Say that a pass stopped early, so a partial result doesn't read as a final one.
+
+    Hosts like meti.go.jp only allow a handful of requests before blocking, so the
+    sweeps stop short and come back later; without this the run looks complete.
+    """
+    if count:
+        typer.echo(
+            f"-- {count} {noun}(s) deferred: the host's request budget is spent. "
+            "Re-run in a few minutes to continue. --"
+        )
+
+
 @policy_app.command("detect")
 def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
@@ -472,6 +485,7 @@ def policy_detect(
             f"{str(r['latest_online'] or '-'):>7}{str(r['known_latest'] or '-'):>7}{r['new']:>5}"
         )
     typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
+    _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
 
 
 @policy_app.command("dates")
@@ -497,6 +511,7 @@ def policy_dates(
     for r in results:
         typer.echo(f"{r['key']:<28}{r['source']:<6}{r['dated']:>6}")
     typer.echo(f"-- {sum(r['dated'] for r in results)} meeting date(s) set --")
+    _report_deferred(sum(1 for r in results if r["deferred"]), "committee")
 
 
 @policy_app.command("schedule")
@@ -537,6 +552,7 @@ def policy_materials(
             typer.echo(f"{r['key']:<28}{r['source']:<6} materialised {r['materialised']}/{r['checked']}")
             total += r["materialised"]
     typer.echo(f"-- {total} meeting(s) populated with materials --")
+    _report_deferred(sum(r["deferred"] for r in results), "meeting")
 
 
 @policy_app.command("run")
@@ -551,22 +567,60 @@ def policy_run(
              "to breadth-first for '--committee all' and depth-first for a single "
              "committee; pass --breadth/--depth-first to override.",
     ),
+    meeting: int | None = typer.Option(
+        None, "--meeting",
+        help="Summarise exactly this meeting number of --committee and nothing else. "
+             "Bypasses the pending queue, so an already-summarised meeting can be "
+             "re-run (e.g. after a briefing was written from an incomplete source set).",
+    ),
 ):
     """Summarise pending meetings via NotebookLM (requires `notebooklm login`)."""
     from repower.policy.pipeline import run
 
     _require_auth_or_exit()
+    if meeting is not None and committee == "all":
+        typer.echo("--meeting needs a specific --committee")
+        raise typer.Exit(code=2)
     keys = None if committee == "all" else [committee]
     # Default: breadth-first across the whole tracked set (get the latest meeting of
     # each committee current first), depth-first when draining a single committee.
     breadth_first = (committee == "all") if breadth is None else breadth
-    summary = run(keys, max_per_run=max_per_run, breadth_first=breadth_first)
+    summary = run(keys, max_per_run=(1 if meeting is not None else max_per_run),
+                  breadth_first=breadth_first, meeting_num=meeting)
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} blocked={summary.get('blocked', 0)} "
-        f"synthesized={summary['synthesized']}"
+        f"skipped={summary.get('skipped', 0)} synthesized={summary['synthesized']}"
     )
+    for host, n in sorted((summary.get("skipped_hosts") or {}).items()):
+        typer.echo(f"  skipped {n} meeting(s) on {host} - its circuit breaker is open; "
+                   f"they stay pending.")
     _warn_if_stopped_early(summary, "remaining meetings stay pending - retry later.")
+
+
+@policy_app.command("queue")
+def policy_queue(
+    committee: str = typer.Option(..., help="Committee key"),
+    meeting: int = typer.Option(..., help="Meeting number to move to the front of the queue"),
+    clear: bool = typer.Option(False, "--clear", help="Remove it from the front instead"),
+):
+    """Put one meeting at the front of the summarisation queue (or take it off).
+
+    The queue is otherwise ordered by committee priority then newest-meeting-first;
+    a queued meeting outranks all of that, so this is how a specific meeting jumps
+    ahead without re-prioritising its whole committee. The flag is cleared
+    automatically once the meeting has been processed.
+    """
+    from repower.policy.store import clear_generation_request, request_generation
+
+    if clear:
+        clear_generation_request(committee, meeting, db_path=None)
+        typer.echo(f"{committee} 第{meeting}回 removed from the front of the queue")
+        return
+    if not request_generation(committee, meeting, db_path=None):
+        typer.echo(f"no such meeting: {committee} 第{meeting}回")
+        raise typer.Exit(code=1)
+    typer.echo(f"{committee} 第{meeting}回 queued - the next `policy run` takes it first")
 
 
 @policy_app.command("backfill")

@@ -594,6 +594,11 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
     last_date_by_com: dict[str, str] = {}
     n_meetings_by_com: dict[str, int] = {}
     rollup: dict[str, dict[str, int]] = {}
+    # Most recently *touched* meeting per committee — the row the Manage status
+    # table leads with. Distinct from `last_date` (newest meeting *held*) and from
+    # `latest_meeting` (highest number summarised): what a reader needs to answer
+    # "when did the pipeline last do anything here, and how did it go?".
+    last_update_by_com: dict[str, tuple[tuple[str, int], dict]] = {}
     for m in meetings:
         k = m["committee_key"]
         n_meetings_by_com[k] = n_meetings_by_com.get(k, 0) + 1
@@ -605,6 +610,15 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             ds = str(m["meeting_date"])[:10]
             if k not in last_date_by_com or ds > last_date_by_com[k]:
                 last_date_by_com[k] = ds
+        upd = str(m["updated_at"]) if "updated_at" in m.keys() and m["updated_at"] else None
+        if upd:
+            # Tie-break on meeting number. Two meetings touched in the same pass can
+            # share a timestamp to the microsecond, and without a second key the
+            # winner is whatever order the SELECT happened to return — so the row
+            # would report a different "last update" run to run.
+            rank = (upd, m["meeting_num"] if "meeting_num" in m.keys() and m["meeting_num"] else 0)
+            if k not in last_update_by_com or rank > last_update_by_com[k][0]:
+                last_update_by_com[k] = (rank, dict(m))
 
     def _opt(c, col):
         """Read a column that may be absent from the caller's SELECT."""
@@ -613,6 +627,23 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
     def _iso_or_none(v):
         """Timestamps must be JSON-serialisable — these columns are DATETIME."""
         return str(v) if v else None
+
+    def _last_update(key: str) -> dict:
+        """The newest meeting-level pipeline event for *key*, flattened onto the row."""
+        entry = last_update_by_com.get(key)
+        if entry is None:
+            return {
+                "lastUpdateAt": None, "lastUpdateNum": None, "lastUpdateState": None,
+                "lastUpdateFlag": None, "lastUpdateError": None,
+            }
+        (at, _num), m = entry
+        return {
+            "lastUpdateAt": at,
+            "lastUpdateNum": m.get("meeting_num"),
+            "lastUpdateState": m.get("state"),
+            "lastUpdateFlag": m.get("quality_flag"),
+            "lastUpdateError": m.get("last_error"),
+        }
 
     data = [
         {
@@ -653,6 +684,11 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             "fetchAt": _iso_or_none(_opt(c, "last_fetch_at")),
             "lastOkAt": _iso_or_none(_opt(c, "last_ok_at")),
             "fetchFailures": _opt(c, "consecutive_failures") or 0,
+            # Newest meeting-level pipeline event: when, which meeting, what state
+            # it landed in and (on failure) why. Drives the Manage status table's
+            # ordering — a committee is "recent" by when we last did something to
+            # it, which is what a reader watching a backfill actually wants.
+            **_last_update(c["committee_key"]),
         }
         for c in committees
     ]
@@ -673,7 +709,8 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
             "FROM policy_committee"
         )).mappings().all()
         meetings = con.execute(text(
-            "SELECT committee_key, meeting_date, state FROM policy_meeting"
+            "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
+            "last_error, updated_at FROM policy_meeting"
         )).mappings().all()
         mat_counts = {
             r["committee_key"]: r["n"]
@@ -682,6 +719,104 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
             )).mappings()
         }
     return build_committees_payload(committees, meetings, mat_counts)
+
+
+# Per-committee cap for the status payload. Meetings that failed or are mid-flight
+# are kept whatever the cap — they are the reason this payload exists — so this only
+# trims the quiet `detected` backlog, which is thousands of rows across the catalog
+# and says nothing a per-committee "N pending" count doesn't.
+STATUS_MEETINGS_PER_COMMITTEE = 20
+# States that never get trimmed: something went wrong, or the meeting is stranded
+# part-way through the pipeline (a run that died between stages leaves rows here).
+_STATUS_ALWAYS_KEEP = frozenset({"error", "downloading", "ingesting", "generating"})
+
+
+def build_policy_status(db_path: str | None = None) -> dict:
+    """Per-meeting pipeline status for the Manage status table.
+
+    The Deep Dive payload (:func:`build_policy_snapshot`) is written for *readers*:
+    it drops meetings with no materials and collapses every non-terminal state into
+    "pending", which is exactly the detail an operator asking "what is stuck, and
+    why?" needs. This one keeps the raw lifecycle state, the failure message, the
+    retry count and both timestamps.
+
+    Returns ``{"meetings": [...], "truncated": {key: n}, "perCommittee": cap}`` —
+    ``truncated`` so the UI can say a committee's list was capped instead of
+    implying the backlog it shows is all of it.
+    """
+    init_db(db_path)
+    eng = get_engine(db_path)
+    with eng.connect() as con:
+        rows = con.execute(text(
+            "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
+            "last_error, last_error_at, retry_count, gen_requested, has_minutes, "
+            "has_torimatome, gen_seconds, updated_at, detected_at FROM policy_meeting"
+        )).mappings().all()
+        # Documents on the page, how many the pipeline would ingest, and how many
+        # actually reached the notebook. The gap between the last two is the point: a
+        # briefing written from 1 of 12 papers reads exactly like one written from all
+        # 12, and this is the only place that difference shows. The middle number is
+        # the honest denominator — counting every PDF would make a complete meeting
+        # look short by however many non-ingestable files (委員名簿 etc.) it lists.
+        from repower.policy.pipeline import INGESTABLE_KINDS
+
+        mat_counts: dict[tuple, tuple[int, int, int]] = {}
+        for r in con.execute(text(
+            "SELECT committee_key, meeting_num, kind, status FROM policy_material"
+        )).mappings():
+            k = (r["committee_key"], r["meeting_num"])
+            total, planned, got = mat_counts.get(k, (0, 0, 0))
+            mat_counts[k] = (
+                total + 1,
+                planned + (1 if (r["kind"] or "") in INGESTABLE_KINDS else 0),
+                got + (1 if r["status"] == "ingested" else 0),
+            )
+
+    def _stamp(m) -> str:
+        """Newest-first sort key; a row never touched since detection uses that."""
+        return str(m["updated_at"] or m["detected_at"] or "")
+
+    by_com: dict[str, list] = {}
+    for m in rows:
+        by_com.setdefault(m["committee_key"], []).append(m)
+
+    meetings: list[dict] = []
+    truncated: dict[str, int] = {}
+    for key in sorted(by_com):
+        group = sorted(by_com[key], key=_stamp, reverse=True)
+        pinned = [m for m in group if m["state"] in _STATUS_ALWAYS_KEEP]
+        rest = [m for m in group if m["state"] not in _STATUS_ALWAYS_KEEP]
+        room = max(0, STATUS_MEETINGS_PER_COMMITTEE - len(pinned))
+        if len(rest) > room:
+            truncated[key] = len(rest) - room
+        for m in sorted(pinned + rest[:room], key=_stamp, reverse=True):
+            meetings.append({
+                "com": key,
+                "num": m["meeting_num"],
+                "date": str(m["meeting_date"])[:10] if m["meeting_date"] else None,
+                # Raw lifecycle state, NOT the Deep Dive's done/pending/error rollup.
+                "state": m["state"],
+                "flag": m["quality_flag"],
+                "error": m["last_error"],
+                "errorAt": str(m["last_error_at"]) if m["last_error_at"] else None,
+                "retries": m["retry_count"] or 0,
+                "requested": bool(m["gen_requested"]),
+                "minutes": bool(m["has_minutes"]),
+                "tori": bool(m["has_torimatome"]),
+                "docs": mat_counts.get((key, m["meeting_num"]), (0, 0, 0))[0],
+                # How many of them the pipeline intends to ingest…
+                "docsPlanned": mat_counts.get((key, m["meeting_num"]), (0, 0, 0))[1],
+                # …and how many the last attempt actually got in.
+                "docsIngested": mat_counts.get((key, m["meeting_num"]), (0, 0, 0))[2],
+                "genSeconds": m["gen_seconds"],
+                "updatedAt": str(m["updated_at"]) if m["updated_at"] else None,
+                "detectedAt": str(m["detected_at"]) if m["detected_at"] else None,
+            })
+    return {
+        "meetings": meetings,
+        "truncated": truncated,
+        "perCommittee": STATUS_MEETINGS_PER_COMMITTEE,
+    }
 
 
 def build_policy_snapshot(db_path: str | None = None) -> dict:
@@ -710,8 +845,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         meetings = con.execute(
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
-                "has_minutes, has_torimatome, state, quality_flag, updated_at, detected_at "
-                "FROM policy_meeting"
+                "has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
+                "detected_at FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(
@@ -866,11 +1001,14 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
 def export_policy(out: Path, db_path: str | None = None) -> dict:
     """Write ``policy/committees.json`` + ``policy/meetings.json`` from the snapshot
     built by :func:`build_policy_snapshot` (committees, meetings with parsed EN digest
-    + JP briefing + materials, and scheduled meetings)."""
+    + JP briefing + materials, and scheduled meetings), plus ``policy/status.json``
+    (:func:`build_policy_status`) so the Manage status table works on a read-only
+    deployment, where there is no local API to query."""
     snap = build_policy_snapshot(db_path)
     committees_data, meetings_data, upcoming_data = (
         snap["committees"], snap["meetings"], snap["upcoming"],
     )
+    status = build_policy_status(db_path)
     files = 0
     total = 0
     total += _write_json(out / "policy" / "committees.json", {"schema": SCHEMA_VERSION, "committees": committees_data})
@@ -880,6 +1018,8 @@ def export_policy(out: Path, db_path: str | None = None) -> dict:
         {"schema": SCHEMA_VERSION, "meetings": meetings_data, "upcoming": upcoming_data},
     )
     files += 1
+    total += _write_json(out / "policy" / "status.json", {"schema": SCHEMA_VERSION, **status})
+    files += 1
     return {
         "files": files,
         "bytes": total,
@@ -887,6 +1027,7 @@ def export_policy(out: Path, db_path: str | None = None) -> dict:
         "meetings": len(meetings_data),
         "upcoming": len(upcoming_data),
         "summarised": sum(1 for m in meetings_data if m["status"] == "done"),
+        "status_meetings": len(status["meetings"]),
     }
 
 

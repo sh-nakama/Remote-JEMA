@@ -57,3 +57,21 @@ def test_numeric_args_clamped_and_unknown_cmd_rejected(tmp_path):
         _build_policy_argv("rm -rf /", {}, db)
     with pytest.raises(ValueError):
         _build_policy_argv("run", {"committee": "system_review", "max_per_run": "abc"}, db)
+
+
+def test_single_meeting_run_is_targeted_and_validated(tmp_path):
+    """"Run now" must reach exactly one meeting of one real committee — never the
+    whole tracked set — so the meeting number and the key are both validated."""
+    db = _db(tmp_path)
+    assert _build_policy_argv("run", {"committee": "system_review", "meeting": 114}, db) == [
+        "policy", "run", "--committee", "system_review", "--meeting", "114",
+    ]
+    # A meeting number without a real committee must not silently widen to 'all'.
+    with pytest.raises(ValueError):
+        _build_policy_argv("run", {"meeting": 3}, db)
+    with pytest.raises(ValueError):
+        _build_policy_argv("run", {"committee": "system_review", "meeting": "not-a-number"}, db)
+    # "Latest only" is the ordinary run with a budget of one.
+    assert _build_policy_argv("run", {"committee": "system_review", "max_per_run": 1}, db) == [
+        "policy", "run", "--committee", "system_review", "--max-per-run", "1",
+    ]

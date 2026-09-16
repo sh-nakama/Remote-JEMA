@@ -179,6 +179,73 @@ def test_build_policy_snapshot_synthesis_rollup_and_discovered(tmp_path: Path):
     assert {c["key"]: c for c in build_policy_snapshot(db)["committees"]}["gx_demand"]["tracked"] is True
 
 
+def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Path):
+    """The status payload keeps every errored/mid-flight meeting whatever the cap,
+    trims only the quiet `detected` backlog (reporting how much it dropped), and
+    carries the recorded failure message through to the UI."""
+    from repower.dashboard import export_web
+    from repower.dashboard.export_web import build_policy_status
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+
+    # One failure, one meeting stranded mid-pipeline, and a pending backlog that
+    # overflows the cap.
+    store.record_meeting("emissions_trading", 1, [
+        Material(1, "001_min", "https://x/1.pdf", "議事録", "minutes")], db_path=db)
+    store.record_meeting("emissions_trading", 2, None, db_path=db)
+    for n in range(3, 3 + export_web.STATUS_MEETINGS_PER_COMMITTEE + 4):
+        store.record_meeting("emissions_trading", n, None, db_path=db)
+
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
+    store.update_meeting(by_num[1], db_path=db, state="error", quality_flag="download_blocked",
+                         last_error="2 document(s) could not be downloaded (blocked_403)")
+    store.update_meeting(by_num[2], db_path=db, state="generating")
+
+    out = build_policy_status(db)
+    mine = [m for m in out["meetings"] if m["com"] == "emissions_trading"]
+    assert len(mine) == export_web.STATUS_MEETINGS_PER_COMMITTEE
+
+    err = next(m for m in mine if m["num"] == 1)
+    assert err["state"] == "error" and err["flag"] == "download_blocked"
+    assert "blocked_403" in err["error"]
+    # The raw lifecycle state survives — the Deep Dive payload would say "pending".
+    assert next(m for m in mine if m["num"] == 2)["state"] == "generating"
+    # …and what was trimmed is reported rather than silently dropped: CAP+4
+    # detected meetings competing for the CAP-2 slots the two pinned rows leave.
+    assert out["truncated"]["emissions_trading"] == 6
+    assert all(m["state"] == "detected" for m in mine if m["num"] not in (1, 2))
+
+
+def test_committees_payload_reports_last_pipeline_event(tmp_path: Path):
+    """Each committee row carries its newest meeting-level event — the field the
+    status table sorts on — and a committee nothing has run for reports None."""
+    from repower.dashboard.export_web import build_policy_catalog
+    from repower.policy import store
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    store.record_meeting("emissions_trading", 4, None, db_path=db)
+    store.record_meeting("emissions_trading", 5, None, db_path=db)
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
+    store.update_meeting(by_num[4], db_path=db, state="done")
+    # Touched last, so this is the event the row must report — not the higher number.
+    store.update_meeting(by_num[5], db_path=db, state="error", quality_flag="no_sources",
+                         last_error="No usable source documents")
+
+    by = {c["key"]: c for c in build_policy_catalog(db)}
+    et = by["emissions_trading"]
+    assert et["lastUpdateNum"] == 5
+    assert et["lastUpdateState"] == "error" and et["lastUpdateFlag"] == "no_sources"
+    assert et["lastUpdateError"] == "No usable source documents"
+    assert et["lastUpdateAt"]
+
+    quiet = next(c for c in by.values() if c["key"] != "emissions_trading")
+    assert quiet["lastUpdateAt"] is None and quiet["lastUpdateState"] is None
+
+
 def test_slot_col_fills_missing_slots_with_none():
     # pivot with a couple of the 48 slots present; the rest must come back None
     piv = pd.DataFrame({"2026-07-04": [10.0, 12.5]}, index=["00:00", "14:30"])

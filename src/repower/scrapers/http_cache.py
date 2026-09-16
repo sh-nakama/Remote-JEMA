@@ -30,6 +30,7 @@ import logging
 import random
 import threading
 import time
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
@@ -38,6 +39,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from repower.db import HttpCache, get_session, init_db
+from repower.scrapers import browser_clearance
 
 logger = logging.getLogger(__name__)
 
@@ -199,17 +201,48 @@ def _host_key(url: str) -> str:
     return host
 
 
+# Per-thread override of the pacing gap, set by :func:`host_pace` for the duration
+# of a batch. Thread-local because ``web_api`` runs jobs on a background thread
+# while other work may be in flight, and a batch's wider gap must not leak into it.
+_pace_override = threading.local()
+
+
+def min_host_interval() -> float:
+    """The politeness floor between same-host requests."""
+    return _MIN_HOST_INTERVAL
+
+
+@contextmanager
+def host_pace(interval: float):
+    """Widen the inter-request gap to *interval* seconds for this block.
+
+    For pulling a *batch* of files from one host. The floor
+    (:data:`_MIN_HOST_INTERVAL`) is a politeness choice sized for one-page-per-host
+    sweeps; a meeting with a dozen PDFs is a different shape of request and, as
+    measured against METI, a burst that the edge starts challenging partway through.
+    Clamped to the floor, so this can only ever slow requests down.
+    """
+    prev = getattr(_pace_override, "interval", None)
+    _pace_override.interval = max(float(interval), _MIN_HOST_INTERVAL)
+    try:
+        yield
+    finally:
+        _pace_override.interval = prev
+
+
 def _pace_host(url: str) -> None:
     """Sleep just long enough that consecutive requests to *url*'s host are at
-    least ``_MIN_HOST_INTERVAL`` seconds apart. A host's first request never
-    waits; distinct hosts don't block each other."""
+    least ``_MIN_HOST_INTERVAL`` seconds apart (or the wider gap a surrounding
+    :func:`host_pace` asked for). A host's first request never waits; distinct
+    hosts don't block each other."""
     host = _host_key(url)
     if not host:
         return
+    gap = getattr(_pace_override, "interval", None) or _MIN_HOST_INTERVAL
     with _pace_lock:
         now = time.monotonic()
         prev = _last_request_at.get(host)
-        wait = 0.0 if prev is None else _MIN_HOST_INTERVAL - (now - prev)
+        wait = 0.0 if prev is None else gap - (now - prev)
         if wait < 0:
             wait = 0.0
         # Claim our slot before releasing: the next caller paces off the moment we
@@ -233,6 +266,72 @@ def reset_pacing() -> None:
     """Forget all host pacing state (tests; nothing in production needs this)."""
     with _pace_lock:
         _last_request_at.clear()
+
+
+# Per-host request allowance, for hosts that answer a sustained crawl with an
+# escalating block rather than a 429.
+#
+# The number was 4, sized against a measurement taken *without* a WAF token on
+# the requesting client — which is the one condition under which meti.go.jp
+# refuses nearly everything, so the "roughly five requests then an IP-wide 403"
+# it appeared to show was mostly the challenge, not a rate rule. Carrying the
+# token (see _WAF_CHALLENGE_HOSTS) 25 URLs at 1s spacing returned 20 × 200 and
+# ~40MB in 29s before the 21st came back 405. 16 keeps a wide margin under that
+# observed cliff, since the 405 was never identified — it may be a rate rule, in
+# which case the ceiling moves with spacing.
+#
+# Pacing is still not the lever (see _MIN_HOST_INTERVAL); a sweep that runs out
+# stops and comes back. The allowance refills after _BUDGET_WINDOW, which is what
+# lets a long-lived process (web_api's catch-up) keep making progress instead of
+# starving after its first pass.
+#
+# Hosts absent from this map are unlimited, so this changes nothing for OCCTO or
+# the TSO/JEPX/EPRX scrapers.
+_HOST_BUDGET: dict[str, int] = {
+    "www.meti.go.jp": 16,
+    "www.egc.meti.go.jp": 16,
+}
+_BUDGET_WINDOW: float = 300.0
+_budget_used: dict[str, tuple[float, int]] = {}  # host -> (window start, requests)
+_budget_lock = threading.Lock()
+
+
+def _consume_budget(url: str) -> None:
+    """Count one request against *url*'s host allowance."""
+    host = _host_key(url)
+    if host not in _HOST_BUDGET:
+        return
+    now = time.monotonic()
+    with _budget_lock:
+        start, used = _budget_used.get(host, (now, 0))
+        if now - start >= _BUDGET_WINDOW:
+            start, used = now, 0
+        _budget_used[host] = (start, used + 1)
+
+
+def budget_exhausted(url: str) -> bool:
+    """True if *url*'s host has spent its request allowance for now.
+
+    **Advisory.** Only work that can be resumed later consults it — the crawl
+    sweeps, which stop and leave the rest for the next pass. Work that is
+    indivisible (every PDF of one meeting, or a user asking for one committee by
+    name) ignores it and takes its chances, exactly as before.
+    """
+    host = _host_key(url)
+    cap = _HOST_BUDGET.get(host)
+    if cap is None:
+        return False
+    with _budget_lock:
+        start, used = _budget_used.get(host, (0.0, 0))
+        if time.monotonic() - start >= _BUDGET_WINDOW:
+            return False
+        return used >= cap
+
+
+def reset_budgets() -> None:
+    """Forget all host budget state (tests, and manual recovery)."""
+    with _budget_lock:
+        _budget_used.clear()
 
 
 # Per-host circuit breaker. Once a host has blocked/challenged us this many times
@@ -283,6 +382,26 @@ def _circuit_retry_after(url: str) -> float:
             _circuit_failures[host] = _CIRCUIT_FAILURE_THRESHOLD - 1
             return 0.0
         return remaining
+
+
+def circuit_cooldown(url: str) -> float:
+    """Seconds until *url*'s host is allowed again; ``0.0`` if it is allowed now.
+
+    Read-only, unlike :func:`_circuit_retry_after`, which consumes the single probe
+    allowed once a cooldown elapses. Callers use this to *skip* work aimed at a host
+    that is currently cooling down, rather than queueing thousands of requests that
+    will each fail instantly — the failure mode this was written for was a run
+    walking an entire committee backlog in under a second, marking every meeting
+    blocked, because the breaker had opened on its third meeting.
+    """
+    host = _host_key(url)
+    if not host:
+        return 0.0
+    with _circuit_lock:
+        until = _circuit_open_until.get(host)
+        if until is None:
+            return 0.0
+        return max(0.0, until - time.monotonic())
 
 
 def _circuit_record_failure(url: str) -> None:
@@ -422,6 +541,109 @@ _DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
+
+# The rest of a browser's navigation headers. A lone User-Agent is a tell — and
+# more concretely, AWS WAF only serves its challenge *page* to a request whose
+# Accept admits text/html; with httpx's default ``*/*`` the 202 comes back with an
+# empty body, so the client cannot even see what it is being asked to do.
+# Accept-Encoding is deliberately absent: httpx sets it from the codecs it can
+# actually decode, and advertising one we can't is worse than not looking like a
+# browser.
+_BROWSER_HEADERS: dict[str, str] = {
+    "User-Agent": _DEFAULT_UA,
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# AWS WAF names the action it took. ``challenge`` means a JavaScript proof-of-work
+# stands between us and the page — see repower.scrapers.browser_clearance.
+_WAF_ACTION_HEADER = "x-amzn-waf-action"
+_WAF_CHALLENGE_ACTION = "challenge"
+
+# Hosts known to sit behind an AWS WAF *challenge* rule, which refuses every
+# tokenless client on its first request — measured: a cold process gets 202 on
+# request #1, and curl_cffi's Chrome fingerprint is challenged identically. So
+# for these hosts the token goes on the client *before* the first request rather
+# than being fetched in response to a 202, which is what made every single URL
+# pay a 202 plus a fallback round trip.
+#
+# Seeded, then extended at runtime: a host that challenges us is remembered, so
+# a newly-protected host pays one reactive round and is pre-cleared afterwards
+# instead of waiting for this list to be updated.
+_WAF_CHALLENGE_HOSTS: frozenset[str] = frozenset(
+    {"www.meti.go.jp", "www.egc.meti.go.jp"}
+)
+_waf_challenge_seen: set[str] = set()
+_waf_seen_lock = threading.Lock()
+
+
+def _expects_waf_challenge(url: str) -> bool:
+    """True if *url*'s host challenges tokenless clients, so pre-clear it."""
+    host = _host_key(url)
+    if host in _WAF_CHALLENGE_HOSTS:
+        return True
+    with _waf_seen_lock:
+        return host in _waf_challenge_seen
+
+
+def _note_waf_challenge(url: str) -> None:
+    """Remember that *url*'s host issues WAF challenges."""
+    host = _host_key(url)
+    with _waf_seen_lock:
+        _waf_challenge_seen.add(host)
+
+
+def reset_waf_challenge_hosts() -> None:
+    """Forget runtime-learned challenge hosts (tests, and manual recovery)."""
+    with _waf_seen_lock:
+        _waf_challenge_seen.clear()
+
+
+# One httpx client per host for the process's lifetime. Previously every request
+# went through module-level ``httpx.get``, i.e. a fresh client: a new TLS
+# handshake each time and, worse, a cookie jar that was discarded before the next
+# request could use it — so no clearance or session cookie could ever accumulate.
+_http_clients: dict[str, httpx.Client] = {}
+_http_client_lock = threading.Lock()
+
+
+def _http_client(url: str) -> httpx.Client:
+    """The persistent client for *url*'s host, created on first use.
+
+    Per host so one server's cookies and connections stay its own, and so a
+    wedged client can be discarded without disturbing the others.
+    """
+    host = _host_key(url)
+    with _http_client_lock:
+        client = _http_clients.get(host)
+        if client is None:
+            client = httpx.Client(follow_redirects=True)
+            _http_clients[host] = client
+        return client
+
+
+def reset_http_clients() -> None:
+    """Close and forget every per-host client (tests, and manual recovery)."""
+    with _http_client_lock:
+        clients = list(_http_clients.values())
+        _http_clients.clear()
+    for client in clients:
+        _close_quietly(client)
+
+
+def _is_waf_challenge(resp: Any) -> bool:
+    """True if *resp* is an AWS WAF JavaScript challenge rather than a plain block."""
+    action = resp.headers.get(_WAF_ACTION_HEADER) or ""
+    return action.strip().casefold() == _WAF_CHALLENGE_ACTION
+
 
 # One curl_cffi session per host, reused for the process's lifetime, so a WAF
 # clearance cookie earned on one URL is replayed on the host's later URLs instead
@@ -798,17 +1020,25 @@ def _do_get(
         raise CircuitOpenError(url, waiting)
 
     last_resp: httpx.Response | None = None
+    stale_token_retried = False
     for attempt in range(_TRANSIENT_MAX_RETRIES + 1):
         deadline.check(url)
         _pace_host(url)  # space consecutive same-host requests to a human pace
+        _consume_budget(url)
         # The default UA belongs to this transport only — the curl fallback gets the
         # headers untouched so impersonation supplies a UA matching its fingerprint.
-        httpx_headers = {"User-Agent": _DEFAULT_UA, **headers}
+        httpx_headers = {**_BROWSER_HEADERS, **headers}
+        client = _http_client(url)
+        # A challenge host refuses this transport unconditionally without a token,
+        # so put one on the jar first. Cheap after the first call: cookies_for
+        # caches per host for its TTL, and re-setting each time is what picks up a
+        # freshly minted token once the old one expires. Without a browser
+        # installed this returns False and behaviour is exactly as before.
+        carrying_token = _expects_waf_challenge(url) and _apply_clearance(client, url)
         try:
-            resp = httpx.get(
+            resp = client.get(
                 url,
                 timeout=deadline.clamp_timeout(timeout),
-                follow_redirects=True,
                 headers=httpx_headers,
             )
         except Exception:
@@ -823,13 +1053,47 @@ def _do_get(
         # behind CloudFront + WAF and answers plain HTTP stacks with either). Both
         # yield to the browser-impersonating fallback.
         if resp.status_code in (403, 202):
+            # An AWS WAF *challenge* is a JavaScript proof-of-work, so no amount of
+            # waiting will clear it and the backoff ladder is dead time; only a
+            # browser-minted token helps. Reaching here means the pre-clearance
+            # above had none to give (no browser installed, or the browser itself
+            # was blocked) or the one it gave has gone stale.
+            js_challenge = _is_waf_challenge(resp)
+            if js_challenge:
+                # Pre-clear this host from now on, even if it isn't in the seed set.
+                _note_waf_challenge(url)
+                # Whatever clearance state we hold is stale news: being challenged
+                # here is the evidence that this host is guarding right now. Drop it
+                # — whether that is an expired token or a cached "no token issued"
+                # from a moment when the browser went unchallenged — so the next
+                # mint is a real one rather than a replay of the thing that just
+                # failed. Without this the negative cache would suppress exactly
+                # the mint the fallbacks below depend on.
+                browser_clearance.invalidate(url)
+                # Challenged *while carrying* a token means it expired mid-sweep,
+                # which is the common case once the TTL runs out. Re-minting and
+                # retrying on this transport is far cheaper than the curl fallback
+                # and the browser fetch below. Once only — a token that cannot
+                # clear the challenge twice is not the problem.
+                if carrying_token and not stale_token_retried:
+                    stale_token_retried = True
+                    logger.info("clearance token for %s was stale; re-minting", url)
+                    continue
             # Snapshot before the fallback: it marks the host exhausted on failure,
             # so asking afterwards would report 1 attempt even for the full ladder.
             # This number reaches last_error_detail, so it has to be the truth.
-            attempts = len(_challenge_ladder_for(url)) + 1
+            attempts = 1 if js_challenge else len(_challenge_ladder_for(url)) + 1
             if allow_curl_fallback:
-                r = _curl_get(url, headers, timeout, deadline)
+                r = _curl_get(url, headers, timeout, deadline, js_challenge=js_challenge)
                 if r is not None:
+                    _circuit_record_success(url)
+                    return r
+            if js_challenge:
+                # Last resort, and the only one that can actually work: a real
+                # browser runs the proof-of-work. Costly, so it is reached only
+                # after the cheap transports have been refused.
+                r = browser_clearance.fetch(url, httpx_headers)
+                if r is not None and r[0] in (200, 304, 404):
                     _circuit_record_success(url)
                     return r
             # Fallback unavailable, or it could not clear the block either.
@@ -876,7 +1140,37 @@ def _do_get(
     raise UnexpectedStatusError(url, last_resp.status_code)
 
 
-def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | None = None):
+def _apply_clearance(session: Any, url: str) -> bool:
+    """Put a browser-minted WAF token on *session*'s cookie jar.
+
+    *session* is either the host's httpx client or its curl_cffi session — both
+    expose ``cookies.set(name, value, domain=…)``, and both need the token: the
+    plain transport is the one that carries nearly every request. Setting the
+    same name/domain/path again replaces rather than appends, so calling this per
+    request does not grow the jar.
+
+    Returns True if one was applied. Best-effort: clearance is an optimisation,
+    so a browser that won't start must not turn into a fetch failure.
+    """
+    try:
+        cookies = browser_clearance.cookies_for(url)
+        if not cookies:
+            return False
+        for name, value in cookies.items():
+            session.cookies.set(name, value, domain=_host_key(url))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("could not apply clearance cookies for %s: %s", url, e)
+        return False
+    return True
+
+
+def _curl_get(
+    url: str,
+    headers: dict,
+    timeout: float,
+    deadline: _Deadline | None = None,
+    js_challenge: bool = False,
+):
     """curl_cffi Chrome-impersonation fallback. Returns the same 4-tuple, or
     None if curl_cffi is unavailable or the request did not yield a usable
     status. Conditional headers are forwarded so 304s still work for Kyuden.
@@ -887,11 +1181,15 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
 
     The host's session is reused across calls (see ``_curl_sessions``), so a
     WAF/Akamai clearance cookie earned once is replayed by the host's later URLs
-    rather than being re-earned per URL. A 202 is retried with the lengthening
-    ``_CHALLENGE_RETRY_DELAYS`` backoff — but only until that ladder fails once for
-    the host (see ``_challenge_exhausted``), after which its URLs get a single
-    unbacked-off attempt each. If the budget is exhausted the cookie jar has failed
-    to clear, so it is discarded rather than carried forward.
+    rather than being re-earned per URL.
+
+    ``js_challenge`` says the block was an AWS WAF challenge. That changes the
+    strategy completely: impersonation alone cannot solve a proof-of-work, so
+    instead of backing off we ask :mod:`repower.scrapers.browser_clearance` for a
+    browser-minted token and make a single attempt carrying it. Otherwise (a
+    fingerprint-style 403, or a 202 from some other edge) the lengthening
+    ``_CHALLENGE_RETRY_DELAYS`` ladder still applies, once per host — see
+    ``_challenge_exhausted``.
 
     Retries are paced like any other request, and the whole ladder is bounded by
     *deadline* so a hostile host can't consume the run.
@@ -909,14 +1207,17 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
         session = _curl_session_for(host, cr)
         if session is None:
             return None
+        if js_challenge:
+            _apply_clearance(session, url)
         # Don't slam the fallback request in the same instant as the httpx 202 — a
         # short warm-up gap keeps the initial fallback from re-tripping the challenge.
         if not deadline.allows(_CHALLENGE_INITIAL_DELAY):
             return None
         time.sleep(_CHALLENGE_INITIAL_DELAY)
-        # Empty once this host has already failed a ladder: one real attempt is
-        # still made (the WAF may have relented), but without the long backoff.
-        delays = _challenge_ladder_for(url)
+        # Empty for a JS challenge (waiting cannot mint a token), and once this
+        # host has already failed a ladder: one real attempt is still made (the
+        # WAF may have relented), but without the long backoff.
+        delays = () if js_challenge else _challenge_ladder_for(url)
         for attempt in range(len(delays) + 1):
             if deadline.expired():
                 # Out of time: the jar hasn't cleared, so don't carry it forward.
@@ -925,6 +1226,7 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
             # Retries go through the same politeness gate as any other request —
             # this is the host that is least tolerant of unpaced bursts.
             _pace_host(url)
+            _consume_budget(url)
             try:
                 r = session.get(
                     url,
@@ -960,6 +1262,10 @@ def _curl_get(url: str, headers: dict, timeout: float, deadline: _Deadline | Non
                 continue
             # Out of retries (or an unusable status): these cookies aren't working.
             if r.status_code == 202:
+                if js_challenge:
+                    # The token we carried (if any) did not clear the challenge, so
+                    # don't hand the same one to the next URL — re-mint instead.
+                    browser_clearance.invalidate(url)
                 _mark_challenge_exhausted(url)
             reset_curl_sessions(host)
             return None
