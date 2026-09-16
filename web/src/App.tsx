@@ -11,8 +11,10 @@ const ROOT =
 
 // Toast markup ported from the exports (position switched to fixed for the
 // global overlay): bottom-right pill with a teal left border.
+// z-index must beat the modal backdrop (200) — most toasts are fired from inside
+// a modal, and under it they read as "nothing happened".
 const TOAST =
-  'position:fixed;bottom:24px;right:24px;background:var(--bg1);border-left:3px solid var(--ac);border-radius:12px;box-shadow:var(--sh2a);padding:12px 18px;font-size:13px;color:var(--tx);z-index:100;max-width:420px'
+  'position:fixed;bottom:24px;right:24px;background:var(--bg1);border-left:3px solid var(--ac);border-radius:12px;box-shadow:var(--sh2a);padding:12px 18px;font-size:13px;color:var(--tx);z-index:300;max-width:420px'
 
 function CurrentScreen() {
   const { screen } = useApp()

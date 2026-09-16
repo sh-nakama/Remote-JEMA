@@ -621,11 +621,14 @@ function WatchlistPanel() {
 // ---------------------------------------------------------------------------
 // Committees — manage the tracked set + browse the full energy catalog
 // ---------------------------------------------------------------------------
-const PANEL_WIDE =
-  'width:1120px;max-width:96vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
+// Both panels are column flex boxes capped to the viewport: the meeting list is
+// the only part that scrolls, so the job log and footer below it stay on screen
+// on short windows instead of being pushed past the bottom edge.
+const PANEL_FRAME =
+  'background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden;display:flex;flex-direction:column;max-height:88vh'
+const PANEL_WIDE = `width:1120px;max-width:96vw;${PANEL_FRAME}`
 // The status table carries nine columns; at the card width they'd all be ellipsis.
-const PANEL_TABLE =
-  'width:1340px;max-width:97vw;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden'
+const PANEL_TABLE = `width:1340px;max-width:97vw;${PANEL_FRAME}`
 const VIEW_KEY = 'jema-manage-view'
 const I_LIST =
   '<line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line>'
@@ -1451,8 +1454,10 @@ function CommitteesManage() {
       .catch(() => {})
   }
 
-  const postJob = (cmd: string, params: Record<string, unknown> = {}, label?: string) => {
+  const postJob = (cmd: string, params: Record<string, unknown> = {}, label?: string, labelJa?: string) => {
     if (!app.interactive) return
+    const name = label || cmd
+    const nameJa = labelJa || name
     fetch('/api/policy/job', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1465,7 +1470,24 @@ function CommitteesManage() {
           if (j) setJob(j)
           if (jobTimer.current) window.clearTimeout(jobTimer.current)
           jobTimer.current = window.setTimeout(pollJob, 1200)
-          app.toast(pick(`Started: ${label || cmd}`, `実行開始: ${label || cmd}`))
+          app.toast(pick(`Started: ${name}`, `実行開始: ${nameJa}`))
+          // Also mirror it into the global progress panel: the inline log below
+          // lives inside this modal, so without this a job started here has no
+          // visible outcome once the modal is closed (or on a short window).
+          app.trackJob({
+            kind: 'command',
+            title: name,
+            titleJa: nameJa,
+            onDone: (run) => {
+              const last = run.output.length ? run.output[run.output.length - 1] : ''
+              if (run.state === 'error') {
+                app.toast(pick(`Failed: ${name} — ${run.error || last || 'see the activity panel'}`,
+                               `失敗: ${nameJa} — ${run.error || last || '進捗パネルをご確認ください'}`))
+              } else {
+                app.toast(pick(`Finished: ${name}`, `完了: ${nameJa}`))
+              }
+            },
+          })
         } else if (r.status === 409) {
           app.toast(pick('A job is already running — wait for it to finish', '実行中のジョブがあります。完了までお待ちください'))
         } else {
@@ -1479,13 +1501,13 @@ function CommitteesManage() {
   // queue, so this also re-runs an already-summarised meeting — the repair path
   // for a briefing written from an incomplete source set.
   const runMeeting = (key: string, num: number) =>
-    postJob('run', { committee: key, meeting: num }, `run ${key} 第${num}回`)
+    postJob('run', { committee: key, meeting: num }, `Summarise ${key} 第${num}回`, `${key} 第${num}回を要約`)
 
   // Newest pending meeting of one committee, then stop. No meeting number needed:
   // a single-committee run is depth-first (newest first), so a budget of 1 is
   // exactly "the latest one".
   const runLatest = (c: CatalogCommittee) =>
-    postJob('run', { committee: c.key, max_per_run: 1 }, `run ${c.key} (latest)`)
+    postJob('run', { committee: c.key, max_per_run: 1 }, `Summarise ${c.key} (latest)`, `${c.key} の最新会合を要約`)
 
   // Move a meeting to the front of the summarisation queue. Ordering only — it
   // changes nothing about what gets summarised, so unlike the job actions it stays
@@ -1521,7 +1543,7 @@ function CommitteesManage() {
       app.toast(pick('Enter a meeting number', '会合番号を入力してください'))
       return
     }
-    postJob('backfill', { committee: c.key, since_meeting: n }, `backfill ${c.key} ≥#${n}`)
+    postJob('backfill', { committee: c.key, since_meeting: n }, `Backfill ${c.key} ≥#${n}`, `${c.key} 第${n}回以降を遡及要約`)
   }
 
   // Surface an in-flight job (e.g. started before the modal opened) + clean up.
@@ -1616,7 +1638,7 @@ function CommitteesManage() {
   return (
     <Modal onClose={app.closeOverlay}>
       <div style={s(view === 'table' ? PANEL_TABLE : PANEL_WIDE)}>
-        <div style={s('display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--bd)')}>
+        <div style={s('flex-shrink:0;display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--bd)')}>
           {icon(I_LIST, 17, 'var(--ac)')}
           <span style={s('font-size:16px;font-weight:700;color:var(--tx);margin-left:9px')}>{pick('Committees', '委員会管理')}</span>
           <span style={s('font-size:12px;color:var(--mut);margin-left:8px')}>
@@ -1652,7 +1674,7 @@ function CommitteesManage() {
           </Hoverable>
         </div>
 
-        <div style={s('display:flex;align-items:center;gap:9px;margin:12px 20px 4px;padding:7px 12px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;color:var(--mut)')}>
+        <div style={s('flex-shrink:0;display:flex;align-items:center;gap:9px;margin:12px 20px 4px;padding:7px 12px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;color:var(--mut)')}>
           {icon(I_SEARCH, 15)}
           <input
             value={q}
@@ -1678,7 +1700,7 @@ function CommitteesManage() {
         </div>
 
         {app.interactive && urlToAdd && (
-          <div style={s('display:flex;align-items:center;gap:9px;margin:6px 20px 0;padding:7px 12px;background:var(--acTint);border:1px dashed var(--ac);border-radius:10px')}>
+          <div style={s('flex-shrink:0;display:flex;align-items:center;gap:9px;margin:6px 20px 0;padding:7px 12px;background:var(--acTint);border:1px dashed var(--ac);border-radius:10px')}>
             <span style={s('font-size:11.5px;color:var(--tx2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1')}>
               {pick('METI committee page URL', 'METI委員会ページのURL')}
             </span>
@@ -1694,7 +1716,7 @@ function CommitteesManage() {
         )}
 
         {app.interactive && (
-          <div style={s('display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 20px 4px')}>
+          <div style={s('flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:2px 20px 4px')}>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>{pick('REFRESH', '取得')}</span>
             <Hoverable
               as="span"
@@ -1710,13 +1732,16 @@ function CommitteesManage() {
             </Hoverable>
             <span style={s('width:1px;height:18px;background:var(--dv);margin:0 2px')}></span>
             <span style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut)')} title={pick('Needs `notebooklm login`', '`notebooklm login`が必要')}>{pick('SUMMARISE ⚿', '要約 ⚿')}</span>
-            {([['run', pick('Summarise all', '全件要約'), { breadth: true, max_per_run: 8 }, 'run all'], ['resume', pick('Resume', '再開'), {}, 'resume']] as const).map(([cmd, label, params, lbl]) => (
+            {([
+              ['run', pick('Summarise all', '全件要約'), { breadth: true, max_per_run: 8 }, 'Summarise all', '全件要約'],
+              ['resume', pick('Resume', '再開'), {}, 'Resume interrupted run', '中断した要約を再開'],
+            ] as const).map(([cmd, label, params, lbl, lblJa]) => (
               <Hoverable
                 as="span"
                 key={cmd}
                 base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:4px 11px;white-space:nowrap;border:1px solid var(--bd2);background:var(--bg1);color:${actionBusy ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${actionBusy ? 'default' : 'pointer'}`}
                 hover={actionBusy ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
-                onClick={() => !actionBusy && postJob(cmd, params, lbl)}
+                onClick={() => !actionBusy && postJob(cmd, params, lbl, lblJa)}
                 title={pick('NotebookLM — needs `notebooklm login`', 'NotebookLM — `notebooklm login`が必要')}
               >
                 {label}
@@ -1726,7 +1751,7 @@ function CommitteesManage() {
         )}
 
         {view === 'table' && (
-          <div style={s('display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 20px 6px')}>
+          <div style={s('flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 20px 6px')}>
             {([
               ['all', pick(`All ${rows.length}`, `全 ${rows.length}`)],
               ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`)],
@@ -1756,7 +1781,7 @@ function CommitteesManage() {
           </div>
         )}
 
-        <div style={s(`max-height:64vh;overflow:auto;padding:${view === 'table' ? '0 16px 12px' : '4px 16px 16px'}`)}>
+        <div style={s(`flex:1 1 auto;min-height:120px;overflow:auto;padding:${view === 'table' ? '0 16px 12px' : '4px 16px 16px'}`)}>
           {loading && (
             <div style={s('padding:26px;text-align:center;color:var(--mut);font-size:13px')}>{pick('Loading…', '読み込み中…')}</div>
           )}
@@ -1770,7 +1795,7 @@ function CommitteesManage() {
               onTrack={setTracked}
               onArchive={setArchived}
               onPriority={setPriority}
-              onRun={(c) => postJob('run', { committee: c.key }, `run ${c.key}`)}
+              onRun={(c) => postJob('run', { committee: c.key }, `Summarise ${c.key}`, `${c.key} を要約`)}
               onRunLatest={runLatest}
               onBackfill={backfill}
               onRunMeeting={runMeeting}
@@ -1935,7 +1960,7 @@ function CommitteesManage() {
                                 as="span"
                                 base={`display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:999px;flex-shrink:0;border:1px solid var(--bd2);color:${running ? 'var(--fnt3)' : 'var(--warnTx)'};cursor:${running ? 'default' : 'pointer'}`}
                                 hover={running ? '' : 'border-color:var(--warnTx);background:var(--warnBg)'}
-                                onClick={() => !running && postJob('run', { committee: c.key }, `run ${c.key}`)}
+                                onClick={() => !running && postJob('run', { committee: c.key }, `Summarise ${c.key}`, `${c.key} を要約`)}
                                 title={pick('Summarise pending meetings only (policy run) — needs notebooklm login', '未要約の会合のみ要約（policy run）— notebooklm loginが必要')}
                                 aria-label="Summarise pending meetings"
                               >
@@ -1967,7 +1992,7 @@ function CommitteesManage() {
         </div>
 
         {job && job.state !== 'idle' && (
-          <div style={s('margin:0 20px 6px;border:1px solid var(--bd);border-radius:10px;overflow:hidden')}>
+          <div style={s('flex-shrink:0;margin:0 20px 6px;border:1px solid var(--bd);border-radius:10px;overflow:hidden')}>
             <div style={s('display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg2);font-size:11.5px')}>
               <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${job.state === 'running' ? 'var(--okDot)' : job.state === 'error' ? 'var(--dn)' : 'var(--up)'}`)}></span>
               <span style={s('font-weight:600;color:var(--tx)')}>{job.cmd || 'job'}</span>
@@ -2013,7 +2038,7 @@ function CommitteesManage() {
 
         <div
           style={s(
-            `padding:11px 20px;border-top:1px solid var(--bd);font-size:11px;line-height:1.5;color:${
+            `flex-shrink:0;padding:11px 20px;border-top:1px solid var(--bd);font-size:11px;line-height:1.5;color:${
               !app.interactive && import.meta.env.DEV ? 'var(--warnTx)' : 'var(--mut)'
             };${!app.interactive && import.meta.env.DEV ? 'background:var(--warnBg)' : ''}`,
           )}
@@ -2141,7 +2166,7 @@ export function ProgressPanel() {
         : 'Activity'
     return (
       <Hoverable
-        base="position:fixed;left:16px;bottom:16px;z-index:150;display:flex;align-items:center;gap:9px;background:var(--bg1);border:1px solid var(--bd);box-shadow:var(--sh1);border-radius:999px;padding:8px 14px;cursor:pointer;color:var(--tx2)"
+        base="position:fixed;left:16px;bottom:16px;z-index:250;display:flex;align-items:center;gap:9px;background:var(--bg1);border:1px solid var(--bd);box-shadow:var(--sh1);border-radius:999px;padding:8px 14px;cursor:pointer;color:var(--tx2)"
         hover="background:var(--bg2);color:var(--tx)"
         onClick={() => setPanelMinimized(false)}
         title={L === 'ja' ? 'パネルを開く' : 'Expand activity panel'}
@@ -2176,7 +2201,11 @@ export function ProgressPanel() {
   }
 
   const resultLine = (r: JobRun): string | null => {
-    if (r.state === 'error') return r.error || (L === 'ja' ? '失敗しました' : 'failed')
+    // Command jobs (Summarise/backfill/resume) report no stages or structured
+    // result, so their last stdout line is the only outcome the user can act on
+    // — e.g. "Run `notebooklm login` locally".
+    const lastOut = r.output.length ? r.output[r.output.length - 1] : ''
+    if (r.state === 'error') return r.error || lastOut || (L === 'ja' ? '失敗しました' : 'failed')
     if (r.kind === 'catchup' && r.result) {
       const x = r.result
       if (!x.new_meetings && !x.discovered && !x.dated) {
@@ -2192,12 +2221,14 @@ export function ProgressPanel() {
         ? `新規 ${x.new_meetings ?? 0} · 発見 ${x.discovered ?? 0} · 要約待ち ${x.pending ?? 0}`
         : `${x.new_meetings ?? 0} new · ${x.discovered ?? 0} discovered · ${x.pending ?? 0} pending`
     }
-    if (r.state === 'done') return L === 'ja' ? '完了' : 'done'
+    if (r.state === 'done') return lastOut || (L === 'ja' ? '完了' : 'done')
     return null
   }
 
+  // z-index beats the modal backdrop (200): jobs are started from inside the
+  // manage modal, so the panel has to stay visible on top of it.
   return (
-    <div style={s('position:fixed;left:16px;bottom:16px;z-index:150;width:340px;max-width:calc(100vw - 32px);background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);overflow:hidden')}>
+    <div style={s('position:fixed;left:16px;bottom:16px;z-index:250;width:340px;max-width:calc(100vw - 32px);background:var(--bg1);border:1px solid var(--bd);border-radius:14px;box-shadow:var(--shPop);overflow:hidden')}>
       {/* header */}
       <div style={s('display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--dv)')}>
         <StatusDot state={active ? 'running' : jobRuns[0].state} />
