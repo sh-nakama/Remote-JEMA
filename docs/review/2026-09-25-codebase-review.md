@@ -249,7 +249,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 2 | Atomic EPRX Parquet write | P0 | Fixed (`review/2026-09-25`) |
 | 3 | Explicit `bootstrap` input gates pull tolerance and push | P0 | Fixed (`review/2026-09-25`) |
 | 4 | push-hf uploads a checked snapshot in one commit | P0 | Fixed (`review/2026-09-25`) |
-| 5 | Vite dev server bound to localhost; token via proxy; Vite upgrade | P1 | Partial (`review/2026-09-25`) — localhost binding, `/api` loopback-only guard, proxy token injection; Vite major upgrade pending |
+| 5 | Vite dev server bound to localhost; token via proxy; Vite upgrade | P1 | Fixed (`review/2026-09-25`) — localhost binding, `/api` loopback-only guard, proxy token injection, Vite 8 + plugin-react 6 (`npm audit`: 0) |
 | 6 | web-api Content-Type / Origin / Host guards | P1 | Fixed (`review/2026-09-25`) — loopback peer + `Host` + `Origin`/`Sec-Fetch-Site` instead of a Content-Type check, which would have missed the DB-writing `GET /api/policy/crosscheck` |
 | 7 | Read-only Streamlit Space; host-restricted `probe_url` | P1 | Open |
 | 8 | No raw error text in the public export | P1 | Open |
@@ -257,7 +257,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 10 | Close per-thread browsers in web-api jobs | P1 | Open |
 | 11 | Process-wide Space DB pull | P1 | Open |
 | 12 | Freshness gate in the daily cron | P1 | Open |
-| 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Open |
+| 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Partial — Pages build on Node 24 |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Open |
 | F1–F5 | Frontend items | P2 | Open |
 | T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`) |
