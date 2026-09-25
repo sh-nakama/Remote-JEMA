@@ -236,6 +236,11 @@ fixed.
   (fail hard on cron; manual dispatch keeps the bootstrap fallback). Preserve this pattern, and
   never give push-hf an unconditional `if: always()` without also checking the pull outcome
   (see `policy.yml`'s push condition).
+- **`pull-hf` skips a Parquet only when the repo listing lacks it; every other download failure
+  raises.** A scrape into a missing Parquet rebuilds it from the current fiscal year alone, the
+  earlier years' ZIPs 304 against the ETags in the (successfully pulled) DB, and push-hf then
+  uploads that fragment over the full history — permanently. Don't widen the skip back into a
+  blanket `except`.
 
 ## GitHub Actions semantics (learned the hard way)
 

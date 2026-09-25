@@ -24,8 +24,9 @@ logger = logging.getLogger(__name__)
 
 # (local path, repo filename) for every synced artifact. The DB is required;
 # the Parquet files are optional (older snapshots predate them).
+_DB_FILE = "repower.db"
 _SYNC_FILES = [
-    (DB_PATH, "repower.db"),
+    (DB_PATH, _DB_FILE),
     (EPRX_BALANCING_PARQUET, "eprx_balancing.parquet"),
     (EPRX_TIELINE_PARQUET, "eprx_tieline.parquet"),
 ]
@@ -66,30 +67,31 @@ def push_db_to_hf() -> None:
 def pull_db_from_hf() -> None:
     """Download the SQLite DB and EPRX Parquet files from the HF Dataset repo.
 
-    The DB is required; the Parquet files are optional (older snapshots may not
-    have them yet) and are skipped if absent from the repo.
+    A Parquet is skipped only when the repo lacks it; any other failure raises, since
+    a scrape into a missing Parquet rebuilds it from one fiscal year and push-hf would
+    upload that over the full history.
     """
     if not HF_TOKEN or not HF_DATASET_REPO:
         raise RuntimeError("HF_TOKEN and HF_DATASET_REPO must be set in environment")
 
+    remote = set(HfApi(token=HF_TOKEN).list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset"))
     for local_path, repo_name in _SYNC_FILES:
-        required = repo_name == "repower.db"
+        if repo_name not in remote:
+            if repo_name == _DB_FILE:
+                raise FileNotFoundError(f"{repo_name} is not in dataset {HF_DATASET_REPO}")
+            logger.info("Skip pull (%s not in repo yet)", repo_name)
+            continue
         local_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            downloaded = Path(hf_hub_download(
-                repo_id=HF_DATASET_REPO,
-                repo_type="dataset",
-                filename=repo_name,
-                token=HF_TOKEN,
-                local_dir=str(local_path.parent),
-            ))
-            # The download lands at <dir>/<repo_name>. When the configured local
-            # filename differs (e.g. a custom REPOWER_DB_PATH), move it into place
-            # so the app reads what was pulled — the repo filename stays stable.
-            if downloaded.name != local_path.name:
-                downloaded.replace(local_path)
-            logger.info("Pulled %s -> %s", repo_name, local_path)
-        except Exception as e:  # noqa: BLE001
-            if required:
-                raise
-            logger.info("Skip pull (%s not in repo yet): %s", repo_name, e)
+        downloaded = Path(hf_hub_download(
+            repo_id=HF_DATASET_REPO,
+            repo_type="dataset",
+            filename=repo_name,
+            token=HF_TOKEN,
+            local_dir=str(local_path.parent),
+        ))
+        # The download lands at <dir>/<repo_name>. When the configured local
+        # filename differs (e.g. a custom REPOWER_DB_PATH), move it into place
+        # so the app reads what was pulled — the repo filename stays stable.
+        if downloaded.name != local_path.name:
+            downloaded.replace(local_path)
+        logger.info("Pulled %s -> %s", repo_name, local_path)
