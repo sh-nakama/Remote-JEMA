@@ -1120,8 +1120,8 @@ export function PolicyDeepDiveScreen() {
                 </div>
                 {/* sort: most recently held (default) vs by meeting number */}
                 <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;margin-top:9px;width:fit-content')}>
-                  <span style={comSortS(feedSort === 'recent')} onClick={() => setFeedSort('recent')} title={L === 'ja' ? '直近に開催された会合を上に（要約の有無を問わない）' : 'Most recently held first, across committees — summarised or not'}>{L === 'ja' ? '開催順' : 'Recent'}</span>
-                  <span style={comSortS(feedSort === 'committee')} onClick={() => setFeedSort('committee')} title={L === 'ja' ? '委員会ごとに回次の新しい順' : 'By meeting number within a committee'}>{L === 'ja' ? '会合順' : 'By committee'}</span>
+                  <Hoverable as="span" style={comSortS(feedSort === 'recent')} aria-pressed={feedSort === 'recent'} onClick={() => setFeedSort('recent')} title={L === 'ja' ? '直近に開催された会合を上に（要約の有無を問わない）' : 'Most recently held first, across committees — summarised or not'}>{L === 'ja' ? '開催順' : 'Recent'}</Hoverable>
+                  <Hoverable as="span" style={comSortS(feedSort === 'committee')} aria-pressed={feedSort === 'committee'} onClick={() => setFeedSort('committee')} title={L === 'ja' ? '委員会ごとに回次の新しい順' : 'By meeting number within a committee'}>{L === 'ja' ? '会合順' : 'By committee'}</Hoverable>
                 </div>
                 <div style={s('font-size:11px;color:var(--mut);margin-top:5px')}>{feedNote}</div>
                 <div style={s('display:flex;flex-direction:column;margin-top:8px')}>
