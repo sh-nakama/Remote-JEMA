@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 import re
 import zipfile
 from datetime import date as _date
@@ -400,7 +401,13 @@ def _merge_parquet(path, rows: list[dict], keys: list[str]) -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         combined = new
     combined = combined.drop_duplicates(subset=keys, keep="last").reset_index(drop=True)
-    combined.to_parquet(path, compression="zstd", index=False)
+    # Swap a finished file in: a crash mid-write must not truncate the only copy of the history.
+    tmp = path.with_name(f"{path.stem}.{os.getpid()}.tmp{path.suffix}")
+    try:
+        combined.to_parquet(tmp, compression="zstd", index=False)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
     return len(new)
 
 

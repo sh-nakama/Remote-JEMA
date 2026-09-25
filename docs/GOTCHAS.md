@@ -29,7 +29,9 @@ fixed.
   weeks. `dashboard/read.py` shows the correct pattern.
 - **EPRX data lives in Parquet, not SQLite** (`eprx_balancing.parquet` / `eprx_tieline.parquet`,
   merge-dedup last-write-wins). It syncs to HF alongside the DB — a workflow that pushes the DB
-  but not the parquets desyncs them.
+  but not the parquets desyncs them. `_merge_parquet` writes a temp file and `os.replace`s it in;
+  keep it that way — an in-place write that dies midway truncates the only copy, and push-hf
+  uploads the wreck.
 - `db.py::_migrate_add_area_column` rebuilds the table from a **hardcoded `old_cols` list** —
   adding a column to `DemandSupply30m` requires updating that list or pre-`area` DBs silently
   drop it on migration.

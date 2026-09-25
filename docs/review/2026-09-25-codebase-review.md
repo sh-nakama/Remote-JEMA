@@ -246,7 +246,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | # | Item | Priority | Status |
 |---|---|---|---|
 | 1 | Pull skips a Parquet only when the repo lacks it | P0 | Fixed (`review/2026-09-25`) |
-| 2 | Atomic EPRX Parquet write | P0 | Open |
+| 2 | Atomic EPRX Parquet write | P0 | Fixed (`review/2026-09-25`) |
 | 3 | Explicit `bootstrap` input gates pull tolerance and push | P0 | Open |
 | 4 | push-hf uploads a checked snapshot in one commit | P0 | Open |
 | 5 | Vite dev server bound to localhost; token via proxy; Vite upgrade | P1 | Open |
