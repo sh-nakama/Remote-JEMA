@@ -539,7 +539,9 @@ fixed.
   `/shingikai/.../` committee, stay under `/shingikai/`). Meeting numbers use the *URL* file number,
   so a joint `第15回` linking to `.../suiso_seisaku/014.html` is recorded as 14 — expected, not a bug.
 - **A meeting with no `meeting_date` renders as `検出 YYYY-MM-DD`** (the detection timestamp), not
-  as the date it was held — `build_policy_snapshot` falls back to `updated_at`/`detected_at` and
+  as the date it was held — `build_policy_snapshot` falls back to the JST day of `detected_at`
+  (not `updated_at`, which every retry or materials backfill bumps, and which made healed old
+  meetings look brand new) and
   sets `dateReal: false`, which `PolicyDeepDive.tsx` labels `検出` / `detected`. So a "wrong date"
   report is really a *missing date*, never a display bug: check
   `SELECT meeting_num, meeting_date FROM policy_meeting WHERE committee_key=…` first.

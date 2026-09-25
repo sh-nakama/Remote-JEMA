@@ -42,7 +42,7 @@ from repower.db import (  # noqa: E402
     get_session,
     init_db,
 )
-from repower.timeutil import today_jst  # noqa: E402
+from repower.timeutil import JST, today_jst  # noqa: E402
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
 AREAS: list[str] = [
@@ -107,6 +107,16 @@ def _jsonable(obj: object) -> object:
     if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
         return None
     return obj
+
+
+def _jst_day(ts: object) -> str:
+    """``YYYY-MM-DD`` in JST for a DB timestamp, which SQLite holds as naive UTC."""
+    if not ts:
+        return ""
+    dt = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(JST).date().isoformat()
 
 
 def _write_json(path: Path, obj: object) -> int:
@@ -882,10 +892,11 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         name_en = (c["name_en"] if c else None) or _humanize_key(m["committee_key"])
         name_ja = (c["name_ja"] if c else None) or m["committee_key"]
         num = m["meeting_num"]
-        # Prefer the real meeting date (backfilled from the committee page); fall
-        # back to the summary/detection timestamp only when it isn't known yet.
+        # Prefer the real meeting date (backfilled from the committee page). Until it
+        # is known, show the JST day the meeting was *detected* — what the UI labels it
+        # — not updated_at, which every retry or materials backfill bumps.
         mdate = str(m["meeting_date"])[:10] if m["meeting_date"] else None
-        upd = mdate or (str(m["updated_at"] or m["detected_at"] or ""))[:10]
+        upd = mdate or _jst_day(m["detected_at"] or m["updated_at"])
         mats = mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])
         docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": x["url"] or ""} for x in mats]
         has_digest = m["state"] == "done" and bool(m["digest_en_json"])

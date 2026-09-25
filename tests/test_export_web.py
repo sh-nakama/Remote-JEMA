@@ -179,6 +179,32 @@ def test_build_policy_snapshot_synthesis_rollup_and_discovered(tmp_path: Path):
     assert {c["key"]: c for c in build_policy_snapshot(db)["committees"]}["gx_demand"]["tracked"] is True
 
 
+def test_undated_meeting_shows_its_jst_detection_day_not_its_last_update(tmp_path: Path):
+    """A materials backfill or retry bumps updated_at; the card must still show the day
+    the meeting was detected (what the UI labels it), in JST."""
+    from sqlalchemy import text
+
+    from repower.dashboard.export_web import build_policy_snapshot
+    from repower.db import get_engine
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    store.record_meeting("emissions_trading", 7, [
+        Material(7, "007_a", "https://x/7.pdf", "資料", "handout")], db_path=db)
+    with get_engine(db).begin() as con:
+        # 16:30 UTC is 01:30 JST the next day.
+        con.execute(text("UPDATE policy_meeting SET meeting_date = NULL, "
+                         "detected_at = '2026-07-01 16:30:00', updated_at = '2026-09-20 03:00:00' "
+                         "WHERE committee_key = 'emissions_trading' AND meeting_num = 7"))
+
+    m = next(x for x in build_policy_snapshot(db)["meetings"] if x["com"] == "emissions_trading" and x["num"] == 7)
+
+    assert m["date"] == "2026-07-02" and m["dateReal"] is False
+    assert m["sub"].endswith("検出 2026-07-02")
+
+
 def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Path):
     """The status payload keeps every errored/mid-flight meeting whatever the cap,
     trims only the quiet `detected` backlog (reporting how much it dropped), and
