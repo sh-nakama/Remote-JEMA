@@ -219,6 +219,36 @@ def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Pa
     assert all(m["state"] == "detected" for m in mine if m["num"] not in (1, 2))
 
 
+def test_export_policy_keeps_raw_failure_text_off_the_public_site(tmp_path: Path):
+    """Raw last_error can quote local paths (the notebooklm argv) and stderr; the
+    static export keeps the flag, and only a neutral line for unflagged failures."""
+    from repower.dashboard.export_web import build_policy_status, export_policy
+    from repower.policy import store
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    local_path = r"C:\Users\someone\AppData\Local\Temp\repower\x.pdf"
+    store.record_meeting("emissions_trading", 1, None, db_path=db)
+    store.record_meeting("emissions_trading", 2, None, db_path=db)
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
+    store.update_meeting(by_num[1], db_path=db, state="error", quality_flag=None,
+                         last_error=f"NotebookLM NotebookLMError: notebooklm source add {local_path} -> exit 1")
+    store.update_meeting(by_num[2], db_path=db, state="error", quality_flag="download_blocked",
+                         last_error=f"1 of 3 document(s) could not be downloaded; staged at {local_path}")
+
+    export_policy(tmp_path / "out", db)
+
+    files = {p.name: p.read_text(encoding="utf-8") for p in (tmp_path / "out" / "policy").glob("*.json")}
+    assert set(files) == {"committees.json", "meetings.json", "status.json"}
+    assert not [name for name, text in files.items() if "someone" in text], "local path leaked"
+    status = {m["num"]: m for m in json.loads(files["status.json"])["meetings"] if m["com"] == "emissions_trading"}
+    assert status[1]["error"] and status[1]["flag"] is None
+    assert status[2]["error"] is None and status[2]["flag"] == "download_blocked"
+    # The live API (local only) still carries the raw text for debugging.
+    live = {m["num"]: m for m in build_policy_status(db)["meetings"] if m["com"] == "emissions_trading"}
+    assert "someone" in live[1]["error"]
+
+
 def test_committees_payload_reports_last_pipeline_event(tmp_path: Path):
     """Each committee row carries its newest meeting-level event — the field the
     status table sorts on — and a committee nothing has run for reports None."""

@@ -354,6 +354,10 @@ fixed.
   the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/
   `generating`) and the per-meeting failure message; `meetings.json` collapses those into
   `pending`. A read-only deployment shows stale meeting status until `repower export-web` reruns.
+- **The static export never carries raw failure text.** `last_error` can quote the `notebooklm`
+  command line (local temp paths, the user name) and stderr, and the Pages site is public, so
+  `export_policy` passes `error` / `lastUpdateError` through `_public_error` (flag wins, else a
+  neutral line); the live API keeps the raw text. Route any new free-text failure field the same way.
 - **Capacity-market figures are curated by hand from OCCTO PDFs** (`dashboard/capacity_data.py`)
   — there is no machine-readable feed, so a new auction means re-reading the press release.
   `pdfplumber` is broken in this venv (`cryptography` `_rust` DLL); use PyMuPDF (`fitz`).

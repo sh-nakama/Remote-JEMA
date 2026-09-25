@@ -998,6 +998,16 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
     return {"committees": committees_data, "meetings": meetings_data, "upcoming": upcoming_data}
 
 
+def _public_error(error: str | None, flag: str | None) -> str | None:
+    """Failure text for the public export, where raw text can quote local paths and stderr.
+
+    A flagged failure returns None so the UI shows the flag's own bilingual wording.
+    """
+    if not error or flag:
+        return None
+    return "failed — the details stay in the local app"
+
+
 def export_policy(out: Path, db_path: str | None = None) -> dict:
     """Write ``policy/committees.json`` + ``policy/meetings.json`` from the snapshot
     built by :func:`build_policy_snapshot` (committees, meetings with parsed EN digest
@@ -1009,6 +1019,10 @@ def export_policy(out: Path, db_path: str | None = None) -> dict:
         snap["committees"], snap["meetings"], snap["upcoming"],
     )
     status = build_policy_status(db_path)
+    for c in committees_data:
+        c["lastUpdateError"] = _public_error(c["lastUpdateError"], c["lastUpdateFlag"])
+    for m in status["meetings"]:
+        m["error"] = _public_error(m["error"], m["flag"])
     files = 0
     total = 0
     total += _write_json(out / "policy" / "committees.json", {"schema": SCHEMA_VERSION, "committees": committees_data})
