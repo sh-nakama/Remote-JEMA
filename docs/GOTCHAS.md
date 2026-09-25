@@ -336,6 +336,11 @@ fixed.
   Keep new routes behind `_check_access` (GETs too — `/api/policy/crosscheck` writes). With the
   token set, the token replaces those checks. Never bind beyond 127.0.0.1 without one, or reuse
   it as a "real" backend.
+- **Through the Vite proxy, every request reaches `web-api` from 127.0.0.1**, so web-api's own
+  loopback check can't tell a LAN visitor from you. The dev server therefore binds `localhost`,
+  and `apiLoopbackOnly` in `vite.config.ts` refuses `/api` to non-loopback peers —
+  `npm run dev -- --host` shares the app on the LAN but never the API. In token mode the proxy
+  adds `X-API-Token` from `REPOWER_API_TOKEN`, so the browser never holds it.
 - **A second `repower web-api` on the same port starts "successfully" and serves nothing.**
   `ThreadingHTTPServer` inherits `allow_reuse_address = 1`, and on Windows SO_REUSEADDR lets a
   second process bind a port that is already bound — it logs `listening on http://127.0.0.1:8787`
