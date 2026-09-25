@@ -574,6 +574,11 @@ fixed.
 
 ## Streamlit dashboard
 
+- **The HF Space runs the same `app_main` as local, so its writes must be switched off by hand.**
+  The Space's DB is a throwaway copy that is never pushed back, and its fetches come from
+  HF's network. `_hosted()` (true when HF sets `SPACE_ID`) hides the committee manager and the
+  Generate buttons; any new write control must check it too. Add-by-URL's `probe_url` fetches
+  only METI / OCCTO hosts (`_PROBE_DOMAINS`) — it runs on pasted input, so don't widen it.
 - The `_cache_buster` args are **underscore-prefixed, so Streamlit excludes them from cache
   keys** — the inline comments claiming they key the cache are wrong. Refresh works only
   because the sidebar button calls `st.cache_data.clear()`; don't remove that explicit clear.

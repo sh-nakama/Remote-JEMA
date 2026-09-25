@@ -1534,6 +1534,29 @@ def test_probe_url_rejects_non_http():
                                   tracked_urls=set(), tracked_keys=set()) is None
 
 
+@pytest.mark.parametrize("url", [
+    "https://evil.example/shingikai/x/",
+    "https://www.meti.go.jp@evil.example/shingikai/x/",  # userinfo: the host is evil.example
+    "https://www.occto.or.jp.evil.example/iinkai/x/",
+    "https://notmeti.go.jp/shingikai/x/",
+    "http://127.0.0.1:8787/api/health",
+    "http://169.254.169.254/latest/meta-data/",
+    "file:///etc/passwd",
+])
+def test_probe_url_only_fetches_the_observed_sites(url):
+    fetched = []
+    cand = discover_mod.probe_url(url, fetch=lambda u: fetched.append(u) or ("ok", b""),
+                                  validate=False, tracked_urls=set(), tracked_keys=set())
+    assert cand is None and fetched == []
+
+
+def test_probe_url_accepts_egc_and_occto_hosts():
+    for url in ("https://www.egc.meti.go.jp/activity/index_x.html",
+                "https://www.occto.or.jp/iinkai/x/"):
+        assert discover_mod.probe_url(url, fetch=lambda u: ("ok", b"<title>x</title>"),
+                                      validate=False, tracked_urls=set(), tracked_keys=set())
+
+
 def test_probe_url_default_path_survives_cached_url(monkeypatch, tmp_path):
     """Regression: probe_url fetches the pasted URL, then its validation
     (discover_meetings) re-fetches it — so both must force a body, or the

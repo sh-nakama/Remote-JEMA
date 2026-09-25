@@ -96,8 +96,10 @@ _STRINGS: dict[str, dict[str, str]] = {
                                  "ja": "NotebookLMが応答しなくなりました — 待機のまま。後で再実行してください。"},
     "policy_gen_requested":     {"en": "queued",                   "ja": "要約待ち"},
     "policy_gen_error":         {"en": "Summarisation failed: {err}","ja": "要約に失敗しました: {err}"},
-    "policy_gen_local_note":    {"en": "Summaries are generated on this machine and need `notebooklm login`. On the hosted dashboard, use the queue.",
-                                 "ja": "要約はこの端末で生成され、`notebooklm login` が必要です。ホスティング版ではキューをご利用ください。"},
+    "policy_gen_local_note":    {"en": "Summaries are generated on this machine and need `notebooklm login`.",
+                                 "ja": "要約はこの端末で生成され、`notebooklm login` が必要です。"},
+    "policy_hosted_read_only":  {"en": "This hosted copy is read-only — committees are managed and summaries generated in the local app.",
+                                 "ja": "このホスティング版は閲覧専用です。委員会の管理と要約の生成はローカル版で行います。"},
 
     # ── Metric labels ────────────────────────────────────────────────
     # Looked up dynamically as f"met_{key}" for every key in
