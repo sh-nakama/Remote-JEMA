@@ -344,6 +344,13 @@ def get_engine(db_path: str | None = None) -> Engine:
         return engine
 
 
+def dispose_engines() -> None:
+    """Close pooled connections, e.g. once a pull has replaced the DB file under them."""
+    with _LOCK:
+        for engine in _ENGINES.values():
+            engine.dispose()
+
+
 def init_db(db_path: str | None = None) -> Engine:
     engine = get_engine(db_path)
     path = db_path or str(DB_PATH)

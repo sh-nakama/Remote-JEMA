@@ -7,6 +7,7 @@ upload that fragment over the full history.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
@@ -93,6 +94,35 @@ def test_pull_moves_the_db_to_a_custom_local_filename(hub, tmp_path, monkeypatch
 
     assert custom.read_bytes() == b"db"
     assert not (tmp_path / "repower.db").exists()
+
+
+def test_a_pull_over_an_open_db_is_what_the_next_query_reads(hub, tmp_path, monkeypatch):
+    """Pooled connections must not keep serving the file a pull just replaced."""
+    from sqlalchemy import text
+
+    from repower.db import get_engine
+
+    db = hub.local["repower.db"]
+    _make_db(db, ["old"])
+    fresh = tmp_path / "fresh.db"
+    _make_db(fresh, ["new"])
+    hub.remote = {"repower.db": fresh.read_bytes()}
+
+    def replacing_download(*, repo_id, repo_type, filename, token, local_dir):
+        # How hf_hub_download lands a file on Linux (the Space): rename over the target.
+        part = Path(local_dir) / (filename + ".incomplete")
+        part.write_bytes(hub.remote[filename])
+        os.replace(part, Path(local_dir) / filename)
+        return str(Path(local_dir) / filename)
+
+    monkeypatch.setattr(hf_sync, "hf_hub_download", replacing_download)
+    with get_engine(str(db)).connect() as con:  # leaves a pooled connection behind
+        assert con.execute(text("SELECT v FROM t")).scalar() == "old"
+
+    hf_sync.pull_db_from_hf()
+
+    with get_engine(str(db)).connect() as con:
+        assert con.execute(text("SELECT v FROM t")).scalar() == "new"
 
 
 def _make_db(path: Path, rows: list[str]) -> None:

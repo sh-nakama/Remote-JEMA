@@ -255,7 +255,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 8 | No raw error text in the public export | P1 | Fixed (`review/2026-09-25`) — also `lastUpdateError` in `committees.json` |
 | 9 | Dispatch inputs through `env:` | P1 | Fixed (`review/2026-09-25`) |
 | 10 | Close per-thread browsers in web-api jobs | P1 | Fixed (`review/2026-09-25`) |
-| 11 | Process-wide Space DB pull | P1 | Open |
+| 11 | Process-wide Space DB pull | P1 | Fixed (`review/2026-09-25`) — plus pooled connections released around every pull, without which pulled data never became visible |
 | 12 | Freshness gate in the daily cron | P1 | Open |
 | 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Partial — Pages build on Node 24 |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Open |

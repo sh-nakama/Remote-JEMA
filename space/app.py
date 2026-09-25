@@ -1,27 +1,32 @@
 """HF Space entry point for RePower Tokyo dashboard (Docker SDK).
 
-On cold start the DB is pulled from the private HF Dataset. A sidebar
-Refresh button lets users pull the latest data without restarting the Space.
+The DB is pulled from the private HF Dataset once per process and re-checked
+hourly — not once per visitor. The sidebar Refresh button pulls on demand.
 """
 
 import streamlit as st
 
 st.set_page_config(page_title="RePower — Tokyo Market", layout="wide", page_icon="⚡")
 
-# ── Cold-start DB pull ────────────────────────────────────────────────────
-if "db_ready" not in st.session_state:
-    with st.spinner("⏳ Loading market database…"):
-        try:
-            from repower.hf_sync import pull_db_from_hf
-            pull_db_from_hf()
-            st.session_state["db_ready"] = True
-        except Exception as exc:
-            st.warning(
-                f"⚠️ Could not fetch database from Hugging Face: {exc}\n\n"
-                "Dashboard may show empty data until the next scheduled update."
-            )
-            st.session_state["db_ready"] = False
+
+@st.cache_resource(ttl=3600, show_spinner="⏳ Loading market database…")
+def _pull_db() -> str | None:
+    """Pull the DB for the whole process; returns the failure text, if any."""
+    try:
+        from repower.hf_sync import pull_db_from_hf
+        pull_db_from_hf()
+    except Exception as exc:  # noqa: BLE001
+        return str(exc)
+    return None
+
+
+if (error := _pull_db()) is not None:
+    st.warning(
+        f"⚠️ Could not fetch database from Hugging Face: {error}\n\n"
+        "Dashboard may show empty data until the next scheduled update."
+    )
 
 # ── Render dashboard ──────────────────────────────────────────────────────
-from repower.dashboard import main
+from repower.dashboard import main  # noqa: E402 — must follow set_page_config
+
 main(show_refresh=True)

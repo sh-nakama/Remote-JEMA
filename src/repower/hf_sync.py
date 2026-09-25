@@ -21,6 +21,7 @@ from repower.config import (
     HF_DATASET_REPO,
     HF_TOKEN,
 )
+from repower.db import dispose_engines
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,7 @@ def pull_db_from_hf() -> None:
         raise RuntimeError("HF_TOKEN and HF_DATASET_REPO must be set in environment")
 
     remote = set(HfApi(token=HF_TOKEN).list_repo_files(repo_id=HF_DATASET_REPO, repo_type="dataset"))
+    dispose_engines()  # on Windows the download overwrites the DB in place, under open connections
     for local_path, repo_name in _SYNC_FILES:
         if repo_name not in remote:
             if repo_name == _DB_FILE:
@@ -122,3 +124,5 @@ def pull_db_from_hf() -> None:
         if downloaded.name != local_path.name:
             downloaded.replace(local_path)
         logger.info("Pulled %s -> %s", repo_name, local_path)
+    # Connections opened meanwhile still read the replaced file (POSIX keeps its inode).
+    dispose_engines()

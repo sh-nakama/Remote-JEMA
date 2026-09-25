@@ -257,6 +257,14 @@ fixed.
   rolls back a hot journal left by a killed run), `PRAGMA quick_check` refuses a damaged DB before
   anything reaches the Hub, and one `create_commit` keeps the DB — which holds the ETags — from
   landing without the Parquet rows they vouch for. Don't go back to per-file `upload_file`.
+- **A pull replaces the DB under whoever has it open.** `db.get_engine` pools connections per
+  path; on Linux they keep reading the replaced file's old inode, and on Windows
+  `hf_hub_download` falls back to overwriting the file in place. `pull_db_from_hf` therefore
+  calls `db.dispose_engines()` before and after downloading. That only covers this process —
+  stop `web-api` (or anything else holding the DB) before a local `pull-hf`.
+- The Space pulls once per **process** (`st.cache_resource`, re-checked hourly), not once per
+  visitor — it used to key the pull on `st.session_state`, so every new browser session
+  re-downloaded the dataset under the sessions already reading it.
 
 ## GitHub Actions semantics (learned the hard way)
 

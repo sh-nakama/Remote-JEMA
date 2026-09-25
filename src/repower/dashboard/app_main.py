@@ -270,7 +270,6 @@ def _render_sidebar(show_refresh: bool) -> dict:
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state["cache_buster"] = st.session_state.get("cache_buster", 0) + 1
-            st.session_state.pop("db_ready", None)
             if not hf_ready:
                 st.sidebar.info("Hugging Face not configured — reloaded local data only.")
             st.rerun()
