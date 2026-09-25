@@ -586,10 +586,9 @@ export function PolicyDeepDiveScreen() {
       click: () => selectMeeting(m.key),
     }
   }
-  const feed = feedList.map(mapFeed)
   // Cap what is rendered: the feed can hold the entire detected archive.
-  const feedShown = feed.slice(0, feedLimit)
-  const feedMore = feed.length - feedShown.length
+  const feedShown = feedList.slice(0, feedLimit).map(mapFeed)
+  const feedMore = feedList.length - feedShown.length
   const showMoreFeed = () => setFeedLimit((n) => n + FEED_PAGE)
 
   const upList = upcoming.filter((m) => {
@@ -662,8 +661,8 @@ export function PolicyDeepDiveScreen() {
     : []
 
   const feedNote = qNorm
-    ? 'Searching all METI meetings 全会合を検索中 · ' + (feed.length + feedUp.length) + ((feed.length + feedUp.length) === 1 ? ' match' : ' matches')
-    : feedUp.length + ' upcoming 開催予定 · ' + feed.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
+    ? 'Searching all METI meetings 全会合を検索中 · ' + (feedList.length + feedUp.length) + ((feedList.length + feedUp.length) === 1 ? ' match' : ' matches')
+    : feedUp.length + ' upcoming 開催予定 · ' + feedList.length + ' recent' + (coverage === 'all' ? ' · incl. untracked 未追跡含む' : '')
 
   // "Newly summarised": meetings that reached `done`, newest first — keyed off
   // updatedAt (the summarisation timestamp), NOT the meeting date. `newlyDone` is
@@ -1144,14 +1143,14 @@ export function PolicyDeepDiveScreen() {
                       )}
                     </div>
                   ))}
-                  {feed.length > 0 && (
+                  {feedList.length > 0 && (
                     <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 4px')}>
                       {feedSort === 'recent' ? 'RECENTLY HELD · 直近開催' : 'RECENT · 開催済み'}
                     </div>
                   )}
                   {/* The archive can run to thousands of rows, so the held-meeting
                       list scrolls inside the column instead of stretching the page. */}
-                  <div style={feed.length > 8 ? s('max-height:560px;overflow-y:auto;margin:0 -4px;padding:0 4px') : undefined}>
+                  <div style={feedList.length > 8 ? s('max-height:560px;overflow-y:auto;margin:0 -4px;padding:0 4px') : undefined}>
                     {feedShown.map((f) => (
                       <div key={f.key} style={f.s} onClick={f.click}>
                         <div style={s('display:flex;justify-content:space-between;align-items:center;gap:8px')}>
@@ -1174,8 +1173,8 @@ export function PolicyDeepDiveScreen() {
                         onClick={showMoreFeed}
                       >
                         {L === 'ja'
-                          ? `さらに${Math.min(feedMore, FEED_PAGE)}件を表示（${feedShown.length}/${feed.length}件）`
-                          : `Show ${Math.min(feedMore, FEED_PAGE)} more · showing ${feedShown.length} of ${feed.length}`}
+                          ? `さらに${Math.min(feedMore, FEED_PAGE)}件を表示（${feedShown.length}/${feedList.length}件）`
+                          : `Show ${Math.min(feedMore, FEED_PAGE)} more · showing ${feedShown.length} of ${feedList.length}`}
                       </Hoverable>
                     )}
                   </div>
