@@ -1,15 +1,15 @@
-name: Weekly Policy Summaries
+name: Daily Policy Summaries
 
 # Detection runs daily (folded into the data pipeline's `run-all`). This separate
-# weekly job does the slow, *authenticated* NotebookLM summarisation and emits a
+# daily job does the slow, *authenticated* NotebookLM summarisation and emits a
 # digest. NotebookLM cookies go stale and only a human can re-login, so the job
 # gates on `auth check --test`: if auth is stale it alerts and exits cleanly
 # (never fabricating summaries) until the NOTEBOOKLM_AUTH_JSON secret is refreshed.
 
 on:
   schedule:
-    # 21:30 UTC Sun = 06:30 JST Mon — after the daily data cron + detection.
-    - cron: "30 21 * * 0"
+    # 21:30 UTC = 06:30 JST — after the daily data cron + detection.
+    - cron: "30 21 * * *"
   workflow_dispatch:
     inputs:
       committee:

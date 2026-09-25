@@ -30,7 +30,7 @@ on:
       - "Daily Scrape & Analyze"
       - "Weekly Deep Re-validation"
       - "Historical Backfill"
-      - "Weekly Policy Summaries"
+      - "Daily Policy Summaries"
       - "Monthly Committee Cross-check"
     types: [completed]
   schedule:
