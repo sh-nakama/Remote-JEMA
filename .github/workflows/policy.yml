@@ -80,9 +80,14 @@ jobs:
 
       - name: Summarise pending meetings + emit digest
         if: steps.auth.outputs.ok == 'true'
+        # Inputs go through env: spliced into the script, a crafted value would run as shell
+        # in a job that holds the NotebookLM session.
+        env:
+          COMMITTEE: ${{ github.event.inputs.committee || 'all' }}
+          MAX_PER_RUN: ${{ github.event.inputs.max_per_run || '8' }}
         run: |
           python -m repower.cli policy resume
-          python -m repower.cli policy run --committee "${{ github.event.inputs.committee || 'all' }}" --max-per-run "${{ github.event.inputs.max_per_run || '8' }}"
+          python -m repower.cli policy run --committee "$COMMITTEE" --max-per-run "$MAX_PER_RUN"
           python -m repower.cli policy digest --since-days 7
 
       - name: Alert when auth is stale (manual re-login needed)

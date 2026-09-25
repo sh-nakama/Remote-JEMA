@@ -267,8 +267,10 @@ fixed.
 - Failure alerting convention: last step, `if: failure()`, `::error::` + curl POST
   `{"content": …}` to `$WEBHOOK_URL` guarded by `[ -n "$WEBHOOK_URL" ]`. Every cron has one —
   new workflows should too.
-- `workflow_dispatch` string inputs spliced directly into `run:` blocks are shell-injectable
-  (`backfill.yml` still does this) `(open — P3)` — pass through `env:` instead.
+- **Never splice `workflow_dispatch` inputs into a `run:` script** — `${{ inputs.x }}` is pasted
+  in before the shell parses it, so a crafted value runs as shell, and `policy.yml`'s job holds
+  the NotebookLM session. Pass them through `env:` and quote the variables, as `backfill.yml`
+  and `policy.yml` do.
 
 ## Exported JSON & the web frontend
 

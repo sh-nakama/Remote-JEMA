@@ -253,7 +253,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 6 | web-api Content-Type / Origin / Host guards | P1 | Fixed (`review/2026-09-25`) — loopback peer + `Host` + `Origin`/`Sec-Fetch-Site` instead of a Content-Type check, which would have missed the DB-writing `GET /api/policy/crosscheck` |
 | 7 | Read-only Streamlit Space; host-restricted `probe_url` | P1 | Fixed (`review/2026-09-25`) — Generate buttons hidden on the Space too |
 | 8 | No raw error text in the public export | P1 | Fixed (`review/2026-09-25`) — also `lastUpdateError` in `committees.json` |
-| 9 | Dispatch inputs through `env:` | P1 | Open |
+| 9 | Dispatch inputs through `env:` | P1 | Fixed (`review/2026-09-25`) |
 | 10 | Close per-thread browsers in web-api jobs | P1 | Open |
 | 11 | Process-wide Space DB pull | P1 | Open |
 | 12 | Freshness gate in the daily cron | P1 | Open |

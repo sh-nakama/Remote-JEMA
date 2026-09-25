@@ -48,10 +48,11 @@ jobs:
         continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Run backfill
-        run: |
-          python -m repower.cli backfill \
-            --since "${{ inputs.since }}" \
-            --area "${{ inputs.area }}"
+        # Inputs go through env: spliced into the script, a crafted value would run as shell.
+        env:
+          SINCE: ${{ inputs.since }}
+          AREA: ${{ inputs.area }}
+        run: python -m repower.cli backfill --since "$SINCE" --area "$AREA"
 
       - name: Push refreshed DB to Hugging Face
         run: python -m repower.cli push-hf
