@@ -70,6 +70,8 @@ _ALLOWED_ORIGINS = frozenset(
     if o.strip()
 )
 _LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+# Largest body a refused request gets drained of; beyond it the connection is dropped.
+_REFUSED_BODY_MAX = 1 << 20
 
 
 def _origin_allowed(origin: str) -> bool:
@@ -450,6 +452,19 @@ class _Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight (no auth: preflights can't carry custom headers)
         self._send(200, {})
 
+    def _refuse(self, code: int, error: str) -> None:
+        # Closing with the body unread makes the OS reset the connection, which can
+        # destroy the refusal before the client reads it (seen ~10% of the time on Windows).
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if 0 < n <= _REFUSED_BODY_MAX:
+            self.rfile.read(n)
+        elif n:
+            self.close_connection = True
+        self._send(code, {"error": error})
+
     def _check_access(self) -> bool:
         """With REPOWER_API_TOKEN set, the token is the gate; without it, only this
         machine's own pages get in (see :meth:`_local_refusal`)."""
@@ -457,11 +472,11 @@ class _Handler(BaseHTTPRequestHandler):
         if token:
             if hmac.compare_digest(self.headers.get("X-API-Token") or "", token):
                 return True
-            self._send(401, {"error": "missing or invalid X-API-Token"})
+            self._refuse(401, "missing or invalid X-API-Token")
             return False
         reason = self._local_refusal()
         if reason:
-            self._send(403, {"error": f"forbidden: {reason}"})
+            self._refuse(403, f"forbidden: {reason}")
             return False
         return True
 

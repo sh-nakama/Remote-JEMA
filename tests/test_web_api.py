@@ -8,6 +8,7 @@ the catalog, require mandatory args, and clamp numeric ones.
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import threading
 from http.server import ThreadingHTTPServer
@@ -115,6 +116,18 @@ def test_local_requests_are_allowed(headers):
 ])
 def test_foreign_requests_are_refused(headers, peer, reason):
     assert reason in (_bare_handler(headers, peer)._local_refusal() or "")
+
+
+@pytest.mark.parametrize(("length", "drained"), [(60, True), (web_api._REFUSED_BODY_MAX + 1, False)])
+def test_refusal_drains_the_body_it_leaves_unread(length, drained):
+    """Unread request bytes turn the close into a reset that can eat the 403."""
+    h = _bare_handler({"Host": "127.0.0.1:8787", "Content-Length": str(length)})
+    h.rfile, h.wfile = io.BytesIO(b"x" * length), io.BytesIO()
+    h.request_version, h.command, h.requestline, h.close_connection = "HTTP/1.1", "POST", "", False
+    h._refuse(403, "forbidden")
+    assert (h.rfile.tell() == length) is drained
+    assert h.close_connection is not drained
+    assert h.wfile.getvalue().split(b" ", 2)[1] == b"403"
 
 
 @pytest.fixture

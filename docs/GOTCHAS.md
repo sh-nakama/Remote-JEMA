@@ -358,6 +358,11 @@ fixed.
   Keep new routes behind `_check_access` (GETs too — `/api/policy/crosscheck` writes). With the
   token set, the token replaces those checks. Never bind beyond 127.0.0.1 without one, or reuse
   it as a "real" backend.
+- **Answering before reading the request body can lose the answer.** If the connection closes
+  with body bytes unread, the OS resets it, and the reset can arrive before the client has read
+  the response. A refused POST then shows up as `ConnectionAbortedError` or a browser network
+  error instead of a 403 (about 1 in 10 on Windows). `_refuse` drains up to
+  `_REFUSED_BODY_MAX` first; any new early-exit path on a POST must do the same.
 - **Through the Vite proxy, every request reaches `web-api` from 127.0.0.1**, so web-api's own
   loopback check can't tell a LAN visitor from you. The dev server therefore binds `localhost`,
   and `apiLoopbackOnly` in `vite.config.ts` refuses `/api` to non-loopback peers —
