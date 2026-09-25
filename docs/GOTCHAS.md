@@ -75,8 +75,10 @@ fixed.
     restructuring its site. Don't delete it — a missing JSON must cost speed, not correctness.
 - Scrapers **fail soft by design**: per-URL/per-region errors are caught broadly and produce
   0 rows, not exceptions. A systematic outage looks like "0 rows upserted", not a red run —
-  check row counts, not just exit codes. Kyushu/Chugoku URL patterns are reverse-engineered
-  with hardcoded version suffixes and may silently go stale.
+  which is why `daily.yml` ends with `repower check-freshness` (per-source lag limits in
+  `freshness.py`; exits 1 so the failure webhook fires). Kyushu/Chugoku URL patterns are
+  reverse-engineered with hardcoded version suffixes and may silently go stale — the per-area
+  60-day limit is what catches that. A new data source needs a row in `freshness.py` too.
 - Upserts are idempotent everywhere (`on_conflict_do_update/nothing` on the real unique
   constraints; Parquet merge-dedup for EPRX). Keep new writers idempotent — the crons re-run.
 - **`allow_curl_fallback` now defaults to `True`.** It is a no-op unless the plain request

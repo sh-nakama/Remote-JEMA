@@ -61,6 +61,11 @@ jobs:
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf
 
+      - name: Check data freshness
+        # After the push, so fresh sources still land. Scrapers fail soft, so without this
+        # an upstream break is a green run with 0 rows; stale data now fails the run.
+        run: python -m repower.cli check-freshness
+
       - name: Alert on failure
         if: failure()
         run: |

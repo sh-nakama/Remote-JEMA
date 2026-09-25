@@ -263,6 +263,22 @@ def pull_hf():
     typer.echo("Database pulled from Hugging Face")
 
 
+@app.command("check-freshness")
+def check_freshness():
+    """Exit 1 if any market-data source lags past its limit (the daily cron's outage alarm)."""
+    from repower.freshness import source_ages
+
+    rows = source_ages()
+    for r in rows:
+        age = "missing" if r["age"] is None else f"{r['age']}d"
+        typer.echo(f"   {'STALE' if r['stale'] else 'ok':5} {r['source']:<24} "
+                   f"{str(r['latest'] or '-'):<10} {age:>7}  (limit {r['limit']}d)")
+    stale = [r["source"] for r in rows if r["stale"]]
+    if stale:
+        typer.echo(f"Stale market data: {', '.join(stale)}", err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def export_web(out: str = "web/public/data/web"):
     """Export static JSON snapshots for the web frontend (served at /data/web/**)."""
