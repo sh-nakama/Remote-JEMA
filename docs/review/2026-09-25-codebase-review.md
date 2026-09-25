@@ -250,7 +250,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 3 | Explicit `bootstrap` input gates pull tolerance and push | P0 | Fixed (`review/2026-09-25`) |
 | 4 | push-hf uploads a checked snapshot in one commit | P0 | Fixed (`review/2026-09-25`) |
 | 5 | Vite dev server bound to localhost; token via proxy; Vite upgrade | P1 | Open |
-| 6 | web-api Content-Type / Origin / Host guards | P1 | Open |
+| 6 | web-api Content-Type / Origin / Host guards | P1 | Fixed (`review/2026-09-25`) — loopback peer + `Host` + `Origin`/`Sec-Fetch-Site` instead of a Content-Type check, which would have missed the DB-writing `GET /api/policy/crosscheck` |
 | 7 | Read-only Streamlit Space; host-restricted `probe_url` | P1 | Open |
 | 8 | No raw error text in the public export | P1 | Open |
 | 9 | Dispatch inputs through `env:` | P1 | Open |

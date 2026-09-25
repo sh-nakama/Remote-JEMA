@@ -328,9 +328,14 @@ fixed.
 - No keyboard/ARIA semantics anywhere (`Hoverable` renders divs; 167 onClick handlers)
   `(open — P3)`. The ⌘K palette and global Escape are the only keyboard paths — don't break
   them, and prefer real `<button>`s in new UI.
-- `web_api.py` is a **localhost dev helper only**: wildcard CORS, zero auth, DB-mutating +
-  subprocess-launching endpoints, no job timeout `(open — P3)`. Never bind it beyond 127.0.0.1
-  or reuse it as a "real" backend.
+- `web_api.py` is a **localhost dev helper only**: DB-mutating + subprocess-launching
+  endpoints, time-capped jobs. **CORS does not protect it** — a foreign page's no-cors POST
+  still executes, it just can't read the answer. So without `REPOWER_API_TOKEN` it refuses
+  non-loopback peers, a non-loopback `Host` (DNS rebinding) and a cross-site `Origin` /
+  `Sec-Fetch-Site`; any loopback origin is allowed, since Vite changes port when 5173 is taken.
+  Keep new routes behind `_check_access` (GETs too — `/api/policy/crosscheck` writes). With the
+  token set, the token replaces those checks. Never bind beyond 127.0.0.1 without one, or reuse
+  it as a "real" backend.
 - **A second `repower web-api` on the same port starts "successfully" and serves nothing.**
   `ThreadingHTTPServer` inherits `allow_reuse_address = 1`, and on Windows SO_REUSEADDR lets a
   second process bind a port that is already bound — it logs `listening on http://127.0.0.1:8787`
