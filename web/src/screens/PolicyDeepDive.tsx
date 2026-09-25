@@ -20,6 +20,11 @@ const EMPTY_MEETING: Meeting = {
   key: '', en: '', ja: '', date: '', status: '', title: '', titleJa: '', sub: '', docs: [],
 }
 
+// How many recent meetings the Meetings feed renders before "show more". The
+// snapshot carries every detected meeting (thousands), so the list is capped and
+// scrolls rather than rendering the whole archive into the column.
+const FEED_PAGE = 50
+
 // dUntil: days between a date string and the given "today" anchor (real today).
 function dUntil(ds: string, anchor: Date): number {
   return Math.round((new Date(ds).getTime() - anchor.getTime()) / 864e5)
@@ -101,6 +106,14 @@ export function PolicyDeepDiveScreen() {
   // Committee explorer sort: default (priority) order, or reorder by the most
   // recently updated committee (max meeting updatedAt).
   const [comSort, setComSort] = useState<'priority' | 'recent'>('priority')
+  // Meetings-feed sort. 'recent' orders every card by the real meeting date,
+  // newest first — the "what was actually held most recently" view, which is what
+  // you want straight after a catch-up run, summarised or not. 'committee' keeps
+  // the by-meeting-number order, which only reads correctly for a single committee
+  // (across committees 第618回 of one body would outrank yesterday's 第16回 of another).
+  const [feedSort, setFeedSort] = useState<'recent' | 'committee'>('recent')
+  // Rendered slice of the recent feed; "show more" raises it in FEED_PAGE steps.
+  const [feedLimit, setFeedLimit] = useState(FEED_PAGE)
   // "Archived" committees group in the Explorer — collapsed by default.
   const [archivedExpanded, setArchivedExpanded] = useState(false)
   // "Newly summarised" banner: collapsed shows the 3 most-recent cards; "View all"
@@ -162,6 +175,13 @@ export function PolicyDeepDiveScreen() {
     }
     clearFocusCommittee()
   }, [focusCommittee, pol.ready, pol.meetings, clearFocusCommittee])
+
+  // Any change to what the feed contains (or how it is ordered) collapses it back
+  // to the first page — keeping an expanded cap would leave the user 300 rows deep
+  // in a list they just re-filtered.
+  useEffect(() => {
+    setFeedLimit(FEED_PAGE)
+  }, [committee, followedOnly, coverage, dateFilter, q, feedSort])
 
   // ---- handlers ----
   const selAll = () => {
@@ -304,6 +324,13 @@ export function PolicyDeepDiveScreen() {
     let s = v.replace(' ', 'T')
     if (!/[zZ]|[+-]\d\d:?\d\d$/.test(s)) s += 'Z'
     return Date.parse(s)
+  }
+  // Parse a feed row's `date` ("YYYY-MM-DD", occasionally a full timestamp) to
+  // epoch ms for date-ordering. Unparseable dates sort last.
+  const dayTs = (v?: string | null): number => {
+    if (!v) return -Infinity
+    const t = Date.parse(v.length <= 10 ? v + 'T00:00:00Z' : v.replace(' ', 'T') + 'Z')
+    return Number.isNaN(t) ? -Infinity : t
   }
   const comRecency: Record<string, number> = {}
   for (const m of meetings) {
@@ -506,8 +533,16 @@ export function PolicyDeepDiveScreen() {
     }
     return true
   }).sort((a, b) => {
-    // Chronological within a committee: meeting_date is null upstream, so order by
-    // meeting number (newest first). Fall back to the summary date for fixtures.
+    if (feedSort === 'recent') {
+      // Most recently *held* first, across committees. `date` is the real meeting
+      // date whenever `dateReal`; when it isn't backfilled yet it's the detection
+      // timestamp, which is still the best recency signal we have for that row.
+      const d = dayTs(b.date) - dayTs(a.date)
+      if (d) return d
+      return (b.num ?? 0) - (a.num ?? 0)
+    }
+    // By committee: order by meeting number (newest first), which is the natural
+    // reading order within one body. Fall back to the date for fixtures.
     if (typeof a.num === 'number' && typeof b.num === 'number' && a.num !== b.num) return b.num - a.num
     return b.date < a.date ? -1 : 1
   })
@@ -551,6 +586,10 @@ export function PolicyDeepDiveScreen() {
     }
   }
   const feed = feedList.map(mapFeed)
+  // Cap what is rendered: the feed can hold the entire detected archive.
+  const feedShown = feed.slice(0, feedLimit)
+  const feedMore = feed.length - feedShown.length
+  const showMoreFeed = () => setFeedLimit((n) => n + FEED_PAGE)
 
   const upList = upcoming.filter((m) => {
     if (!showUpcoming) return false
@@ -1079,6 +1118,11 @@ export function PolicyDeepDiveScreen() {
                     <span style={covAS} onClick={covAll}>All すべて</span>
                   </div>
                 </div>
+                {/* sort: most recently held (default) vs by meeting number */}
+                <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;margin-top:9px;width:fit-content')}>
+                  <span style={comSortS(feedSort === 'recent')} onClick={() => setFeedSort('recent')} title={L === 'ja' ? '直近に開催された会合を上に（要約の有無を問わない）' : 'Most recently held first, across committees — summarised or not'}>{L === 'ja' ? '開催順' : 'Recent'}</span>
+                  <span style={comSortS(feedSort === 'committee')} onClick={() => setFeedSort('committee')} title={L === 'ja' ? '委員会ごとに回次の新しい順' : 'By meeting number within a committee'}>{L === 'ja' ? '会合順' : 'By committee'}</span>
+                </div>
                 <div style={s('font-size:11px;color:var(--mut);margin-top:5px')}>{feedNote}</div>
                 <div style={s('display:flex;flex-direction:column;margin-top:8px')}>
                   {feedUp.length > 0 && (
@@ -1099,24 +1143,41 @@ export function PolicyDeepDiveScreen() {
                       )}
                     </div>
                   ))}
-                  {feedUp.length > 0 && (
-                    <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 4px')}>RECENT · 開催済み</div>
-                  )}
-                  {feed.map((f) => (
-                    <div key={f.key} style={f.s} onClick={f.click}>
-                      <div style={s('display:flex;justify-content:space-between;align-items:center;gap:8px')}>
-                        <span style={s('display:inline-flex;align-items:center;gap:7px;min-width:0')}>
-                          <span style={f.dot}></span>
-                          <span style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{f.title}</span>
-                        </span>
-                        <span style={f.stS}>{f.st}</span>
-                      </div>
-                      <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{f.meta}</div>
-                      {f.hasPrev && (
-                        <div style={s('font-size:11.5px;color:var(--tx2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{f.preview}</div>
-                      )}
+                  {feed.length > 0 && (
+                    <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 4px')}>
+                      {feedSort === 'recent' ? 'RECENTLY HELD · 直近開催' : 'RECENT · 開催済み'}
                     </div>
-                  ))}
+                  )}
+                  {/* The archive can run to thousands of rows, so the held-meeting
+                      list scrolls inside the column instead of stretching the page. */}
+                  <div style={feed.length > 8 ? s('max-height:560px;overflow-y:auto;margin:0 -4px;padding:0 4px') : undefined}>
+                    {feedShown.map((f) => (
+                      <div key={f.key} style={f.s} onClick={f.click}>
+                        <div style={s('display:flex;justify-content:space-between;align-items:center;gap:8px')}>
+                          <span style={s('display:inline-flex;align-items:center;gap:7px;min-width:0')}>
+                            <span style={f.dot}></span>
+                            <span style={s('font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{f.title}</span>
+                          </span>
+                          <span style={f.stS}>{f.st}</span>
+                        </div>
+                        <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{f.meta}</div>
+                        {f.hasPrev && (
+                          <div style={s('font-size:11.5px;color:var(--tx2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{f.preview}</div>
+                        )}
+                      </div>
+                    ))}
+                    {feedMore > 0 && (
+                      <Hoverable
+                        base="display:block;width:100%;text-align:center;margin-top:8px;padding:7px 10px;border:1px solid var(--bd2);border-radius:10px;font-size:11.5px;font-weight:600;color:var(--tx2);cursor:pointer;background:var(--bg1)"
+                        hover="border-color:var(--ac);color:var(--acT)"
+                        onClick={showMoreFeed}
+                      >
+                        {L === 'ja'
+                          ? `さらに${Math.min(feedMore, FEED_PAGE)}件を表示（${feedShown.length}/${feed.length}件）`
+                          : `Show ${Math.min(feedMore, FEED_PAGE)} more · showing ${feedShown.length} of ${feed.length}`}
+                      </Hoverable>
+                    )}
+                  </div>
                 </div>
               </div>
 
