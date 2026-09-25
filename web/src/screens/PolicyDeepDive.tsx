@@ -534,17 +534,18 @@ export function PolicyDeepDiveScreen() {
     return true
   }).sort((a, b) => {
     if (feedSort === 'recent') {
-      // Most recently *held* first, across committees. `date` is the real meeting
-      // date whenever `dateReal`; when it isn't backfilled yet it's the detection
-      // timestamp, which is still the best recency signal we have for that row.
-      const d = dayTs(b.date) - dayTs(a.date)
-      if (d) return d
-      return (b.num ?? 0) - (a.num ?? 0)
+      // Most recently *held* first, across committees. A row whose held date isn't
+      // backfilled yet sorts after every dated one: its `date` is only when we saw it,
+      // so a backfill would otherwise float old meetings above this week's.
+      const au = a.dateReal === false
+      const bu = b.dateReal === false
+      if (au !== bu) return au ? 1 : -1
+      return dayTs(b.date) - dayTs(a.date) || (b.num ?? 0) - (a.num ?? 0)
     }
     // By committee: order by meeting number (newest first), which is the natural
     // reading order within one body. Fall back to the date for fixtures.
     if (typeof a.num === 'number' && typeof b.num === 'number' && a.num !== b.num) return b.num - a.num
-    return b.date < a.date ? -1 : 1
+    return b.date < a.date ? -1 : b.date > a.date ? 1 : 0
   })
 
   const mapFeed = (m: AnyMeeting) => {
