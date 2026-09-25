@@ -248,7 +248,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 1 | Pull skips a Parquet only when the repo lacks it | P0 | Fixed (`review/2026-09-25`) |
 | 2 | Atomic EPRX Parquet write | P0 | Fixed (`review/2026-09-25`) |
 | 3 | Explicit `bootstrap` input gates pull tolerance and push | P0 | Fixed (`review/2026-09-25`) |
-| 4 | push-hf uploads a checked snapshot in one commit | P0 | Open |
+| 4 | push-hf uploads a checked snapshot in one commit | P0 | Fixed (`review/2026-09-25`) |
 | 5 | Vite dev server bound to localhost; token via proxy; Vite upgrade | P1 | Open |
 | 6 | web-api Content-Type / Origin / Host guards | P1 | Open |
 | 7 | Read-only Streamlit Space; host-restricted `probe_url` | P1 | Open |
@@ -260,5 +260,5 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Open |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Open |
 | F1–F5 | Frontend items | P2 | Open |
-| T1–T8 | Tooling, tests, docs items | P2 | Open |
+| T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`) |
 | S1 | Primary UI decision | — | Open |

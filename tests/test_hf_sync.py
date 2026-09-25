@@ -7,6 +7,7 @@ upload that fragment over the full history.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,8 @@ def hub(tmp_path, monkeypatch):
         remote={},  # repo filename -> bytes
         failing=set(),  # repo filenames whose download raises
         local={name: tmp_path / name for name in _NAMES},
+        hub_calls=[],  # every create_repo / create_commit, in order
+        commits=[],  # {repo filename: bytes} per create_commit
     )
 
     class FakeApi:
@@ -32,6 +35,14 @@ def hub(tmp_path, monkeypatch):
 
         def list_repo_files(self, repo_id, *, repo_type=None, **_):
             return list(state.remote)
+
+        def create_repo(self, **_):
+            state.hub_calls.append("create_repo")
+
+        def create_commit(self, *, operations, **_):
+            state.hub_calls.append("create_commit")
+            # The DB snapshot lives in a temp dir that is gone once the push returns.
+            state.commits.append({op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations})
 
     def fake_download(*, repo_id, repo_type, filename, token, local_dir):
         if filename in state.failing:
@@ -82,3 +93,60 @@ def test_pull_moves_the_db_to_a_custom_local_filename(hub, tmp_path, monkeypatch
 
     assert custom.read_bytes() == b"db"
     assert not (tmp_path / "repower.db").exists()
+
+
+def _make_db(path: Path, rows: list[str]) -> None:
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE t (v TEXT)")
+    con.executemany("INSERT INTO t VALUES (?)", [(r,) for r in rows])
+    con.commit()
+    con.close()
+
+
+def _rows(db_bytes: bytes, tmp_path: Path) -> list[str]:
+    copy = tmp_path / "uploaded.db"
+    copy.write_bytes(db_bytes)
+    con = sqlite3.connect(copy)
+    try:
+        return [r[0] for r in con.execute("SELECT v FROM t ORDER BY v")]
+    finally:
+        con.close()
+
+
+def test_push_uploads_a_db_snapshot_and_the_parquets_in_one_commit(hub, tmp_path):
+    _make_db(hub.local["repower.db"], ["a", "b"])
+    hub.local["eprx_balancing.parquet"].write_bytes(b"bal")
+    hub.local["eprx_tieline.parquet"].write_bytes(b"tie")
+    # A writer mid-transaction: its row must not reach the Hub.
+    writer = sqlite3.connect(hub.local["repower.db"], isolation_level=None)
+    writer.execute("BEGIN IMMEDIATE")
+    writer.execute("INSERT INTO t VALUES ('uncommitted')")
+    try:
+        hf_sync.push_db_to_hf()
+    finally:
+        writer.execute("ROLLBACK")
+        writer.close()
+
+    assert len(hub.commits) == 1
+    files = hub.commits[0]
+    assert set(files) == set(_NAMES)
+    assert files["eprx_balancing.parquet"] == b"bal"
+    assert files["eprx_tieline.parquet"] == b"tie"
+    assert _rows(files["repower.db"], tmp_path) == ["a", "b"]
+
+
+def test_push_skips_parquets_that_do_not_exist_locally(hub):
+    _make_db(hub.local["repower.db"], ["a"])
+
+    hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [{"repower.db"}]
+
+
+def test_push_refuses_a_damaged_db_before_touching_the_hub(hub):
+    hub.local["repower.db"].write_bytes(b"this is not a sqlite database" * 200)
+
+    with pytest.raises(sqlite3.DatabaseError):
+        hf_sync.push_db_to_hf()
+
+    assert hub.hub_calls == []

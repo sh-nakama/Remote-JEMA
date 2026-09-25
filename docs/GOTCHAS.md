@@ -247,6 +247,11 @@ fixed.
   earlier years' ZIPs 304 against the ETags in the (successfully pulled) DB, and push-hf then
   uploads that fragment over the full history — permanently. Don't widen the skip back into a
   blanket `except`.
+- **`push-hf` uploads a checked snapshot, never the live file, and everything in one commit.**
+  SQLite's backup API copies committed pages only (safe beside a writer; opening the source also
+  rolls back a hot journal left by a killed run), `PRAGMA quick_check` refuses a damaged DB before
+  anything reaches the Hub, and one `create_commit` keeps the DB — which holds the ETags — from
+  landing without the Parquet rows they vouch for. Don't go back to per-file `upload_file`.
 
 ## GitHub Actions semantics (learned the hard way)
 
