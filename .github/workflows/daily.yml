@@ -23,6 +23,9 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # Runs take 8-15 min; without a cap a hung scrape holds the shared hf-dataset
+    # queue for GitHub's 6-hour default.
+    timeout-minutes: 60
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}

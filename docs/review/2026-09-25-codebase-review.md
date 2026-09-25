@@ -257,7 +257,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 10 | Close per-thread browsers in web-api jobs | P1 | Fixed (`review/2026-09-25`) |
 | 11 | Process-wide Space DB pull | P1 | Fixed (`review/2026-09-25`) — plus pooled connections released around every pull, without which pulled data never became visible |
 | 12 | Freshness gate in the daily cron | P1 | Fixed (`review/2026-09-25`) — `repower check-freshness`; the 60-day per-area limit rests on one observation of Tohoku's lag, retune in `freshness.py` if it cries wolf |
-| 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Partial — Pages build on Node 24 |
+| 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Fixed (`review/2026-09-25`) — 60-min daily cap (runs take 8–15 min), deploy on `workflow_run`, Node 24 |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Open |
 | F1–F5 | Frontend items | P2 | Open |
 | T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`) |

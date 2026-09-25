@@ -276,6 +276,11 @@ fixed.
 - A step `if:` that doesn't call a status function gets an **implicit `success()`** prepended.
   `if: failure()` fires only on real (unmasked) failures — and NOT on cancelled runs, so a
   concurrency eviction is invisible to the alert steps.
+- **GitHub starts cron runs late — hours late.** `daily.yml`'s 20:30 UTC slot started between
+  22:20 and 23:25 UTC throughout September 2026. Never chain workflows by clock offset:
+  `web-deploy.yml` rebuilds on `workflow_run` completion of the five dataset-writing workflows
+  (its cron is only a backstop for pushes made outside Actions). Its `workflow_run` list
+  matches workflow **names** — renaming one of them silently stops the deploy.
 - Default concurrency keeps **one pending run per group** and silently cancels the rest;
   `queue: max` (up to 100, FIFO) fixes that but is invalid combined with
   `cancel-in-progress: true`.
@@ -644,8 +649,9 @@ fixed.
   `app.py` that only exists once `sync-space.yml` assembles its deploy dir (where `space/app.py`
   lands at the root) `(open — P3)`. The Space deploy works; local compose does not. Also: no
   `USER` (runs as root) and the layer order re-installs deps on every `src/` change.
-- `web-deploy.yml` fingerprints the pulled DB to skip identical scheduled rebuilds; a missing
-  DB gets a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
+- `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
+  `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
+  a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
 - Actions are pinned to mutable tags (`@v5`), not SHAs, in secret-bearing workflows
   `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but `>=0.23` in
   `pyproject.toml` — version skew between the two install paths is unchecked `(open — P4)`.

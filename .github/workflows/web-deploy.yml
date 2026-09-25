@@ -5,10 +5,10 @@ name: Deploy Web (JEMA)
 # pulling the latest DB from the Hugging Face dataset, so the deployed site is a
 # self-contained static bundle (app + data/web/**) with no runtime server.
 #
-# The scheduled run is idempotent: it fingerprints the pulled DB and skips the
-# rebuild + deploy when it matches the last-deployed one (so an unchanged HF
-# dataset doesn't redeploy identical data). Pushes to main and manual dispatch
-# always rebuild, since those imply the app/exporter changed.
+# Automated runs (workflow_run / schedule) are idempotent: they fingerprint the
+# pulled DB and skip the rebuild + deploy when it matches the last-deployed one (so
+# an unchanged HF dataset doesn't redeploy identical data). Pushes to main and manual
+# dispatch always rebuild, since those imply the app/exporter changed.
 #
 # Prerequisites (one-time):
 #   • Repo Settings → Pages → Build and deployment → Source = "GitHub Actions".
@@ -22,11 +22,19 @@ name: Deploy Web (JEMA)
 
 on:
   workflow_dispatch:
+  # Rebuild when a workflow that writes the dataset finishes, whatever its conclusion
+  # (the freshness gate can fail a run after its push; an unchanged DB is skipped).
+  # A fixed-time cron raced the daily run, which GitHub starts hours after its slot.
+  workflow_run:
+    workflows:
+      - "Daily Scrape & Analyze"
+      - "Weekly Deep Re-validation"
+      - "Historical Backfill"
+      - "Weekly Policy Summaries"
+      - "Monthly Committee Cross-check"
+    types: [completed]
   schedule:
-    # 21:30 UTC = 06:30 JST — ~1h after the daily data cron (daily.yml, 20:30 UTC)
-    # pushes the refreshed DB (incl. the upcoming-meeting + detection snapshot) to
-    # Hugging Face, so this rebuild picks up that day's data. Keeps the static site
-    # (and the "Recent & Scheduled" strip) current without a manual redeploy.
+    # Backstop for dataset pushes made outside Actions (e.g. the local policy catch-up).
     - cron: "30 21 * * *"
   push:
     branches: [main]
@@ -69,10 +77,10 @@ jobs:
         id: pull
         run: python -m repower.cli pull-hf
         # Bootstrap runs (push/dispatch, e.g. before secrets exist) may fall back
-        # to the curated in-repo data; a *scheduled* run must not — it would
+        # to the curated in-repo data; an automated run must not — it would
         # silently replace the live site with a near-empty one (and, because the
         # no-DB fingerprint is unique per run, redeploy it every day).
-        continue-on-error: ${{ github.event_name != 'schedule' }}
+        continue-on-error: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
       - name: Warn when building without the HF DB
         if: steps.pull.outcome == 'failure'
@@ -82,7 +90,7 @@ jobs:
       # Fingerprint the pulled DB. A `actions/cache` entry keyed on that fingerprint
       # acts as a "have I already deployed this exact DB?" marker: a cache hit means
       # unchanged. Pushes / manual dispatch always rebuild (code changed); only the
-      # scheduled run skips on an unchanged DB. If the pull failed (no DB), the
+      # automated runs skip on an unchanged DB. If the pull failed (no DB), the
       # fingerprint is unique so we always fall through and deploy the curated data.
       - name: Fingerprint the DB
         id: fp
@@ -103,7 +111,8 @@ jobs:
       - name: Decide whether to rebuild
         id: decide
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
+          case "${{ github.event_name }}" in schedule|workflow_run) automated=true ;; *) automated=false ;; esac
+          if [ "$automated" = "true" ] && [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "::notice::HF DB unchanged since the last deploy — skipping rebuild."
           else
