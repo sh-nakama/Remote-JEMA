@@ -233,11 +233,15 @@ fixed.
 - The whole pipeline is **pull-HF → mutate → push-HF with last-write-wins and no locking**.
   The only guard is the shared GitHub Actions concurrency group — any new workflow that touches
   the dataset MUST declare `concurrency: {group: hf-dataset, cancel-in-progress: false, queue: max}`.
-- **A failed pull + a successful push = dataset history clobbered with a fresh DB.** That's why
-  scheduled runs use `continue-on-error: ${{ github.event_name != 'schedule' }}` on pull-hf
-  (fail hard on cron; manual dispatch keeps the bootstrap fallback). Preserve this pattern, and
-  never give push-hf an unconditional `if: always()` without also checking the pull outcome
-  (see `policy.yml`'s push condition).
+- **A failed pull + a successful push = dataset history clobbered with a fresh DB.** So only an
+  explicit bootstrap may start from an empty DB: every HF-mutating workflow has a `bootstrap`
+  boolean dispatch input (default false), its pull step uses
+  `continue-on-error: ${{ inputs.bootstrap == true }}` (scheduled runs have no inputs, so they
+  fail hard), and a push under `always()` must also require
+  `steps.pull.outcome == 'success' || inputs.bootstrap == true` (see `policy.yml`). Don't go
+  back to treating every manual dispatch as a bootstrap — that let a re-run during an HF outage
+  overwrite the dataset. (`web-deploy.yml` still falls back on push/dispatch; it only affects
+  the Pages build, never the dataset.)
 - **`pull-hf` skips a Parquet only when the repo listing lacks it; every other download failure
   raises.** A scrape into a missing Parquet rebuilds it from the current fiscal year alone, the
   earlier years' ZIPs 304 against the ETags in the (successfully pulled) DB, and push-hf then
@@ -247,9 +251,8 @@ fixed.
 ## GitHub Actions semantics (learned the hard way)
 
 - `steps.<id>.outcome` = result **before** `continue-on-error` masking; `conclusion` = after.
-  A skipped step reports `skipped` for both. `policy.yml`'s push condition relies on its pull
-  step's `continue-on-error` using the *identical* `github.event_name != 'schedule'` expression
-  — keep them in sync.
+  A skipped step reports `skipped` for both. `policy.yml`'s push condition repeats its pull
+  step's `inputs.bootstrap == true` test — keep the two in sync.
 - A step `if:` that doesn't call a status function gets an **implicit `success()`** prepended.
   `if: failure()` fires only on real (unmasked) failures — and NOT on cancelled runs, so a
   concurrency eviction is invisible to the alert steps.

@@ -11,6 +11,11 @@ on:
     # Sundays 19:30 UTC = Mondays 04:30 JST (an hour before the daily run)
     - cron: "30 19 * * 0"
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml). On Sundays
 # this job's 90-min window used to overlap the 20:30 daily run — now they queue.
@@ -40,9 +45,9 @@ jobs:
 
       - name: Pull latest DB from Hugging Face
         run: python -m repower.cli pull-hf
-        # A scheduled run must not backfill into a fresh DB and push it over the
-        # dataset's history; manual dispatch may (bootstrap).
-        continue-on-error: ${{ github.event_name != 'schedule' }}
+        # Only an explicit bootstrap may backfill into an empty DB: pushing it would
+        # replace the dataset's history. Scheduled runs have no inputs, so they fail hard.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Compute backfill window
         id: window

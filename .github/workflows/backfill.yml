@@ -11,6 +11,10 @@ on:
         description: "Area slug (or 'all')"
         required: true
         default: "all"
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -37,9 +41,11 @@ jobs:
       - name: Install dependencies
         run: pip install -e .
 
-      - name: Pull existing DB from Hugging Face (if any)
+      - name: Pull existing DB from Hugging Face
         run: python -m repower.cli pull-hf
-        continue-on-error: true
+        # Only an explicit bootstrap may backfill into an empty DB: pushing it would
+        # replace the dataset's history.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Run backfill
         run: |
