@@ -56,6 +56,8 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, urlsplit
 
+from repower.scrapers import browser_clearance
+
 logger = logging.getLogger(__name__)
 
 # CORS allowlist: the Vite dev servers (the dev proxy makes requests same-origin,
@@ -248,6 +250,9 @@ def _run_catchup_job(db_path: str | None) -> None:
                 if st.get("state") == "running":
                     st.update(state="error", detail=str(e)[:120], detail_ja="失敗しました")
             _job.update(state="error", finished_at=_now(), error=str(e))
+    finally:
+        # Browsers are per thread and only atexit (main thread) closes them otherwise.
+        browser_clearance.close()
 
 
 def _now() -> str:
@@ -497,6 +502,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": str(e)})
             except OSError:
                 pass  # client already disconnected
+        finally:
+            # Each request has its own thread; a browser it launched would outlive it.
+            browser_clearance.close()
 
     def do_GET(self) -> None:  # noqa: N802
         if self._check_access():

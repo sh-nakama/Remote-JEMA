@@ -254,7 +254,7 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 7 | Read-only Streamlit Space; host-restricted `probe_url` | P1 | Fixed (`review/2026-09-25`) — Generate buttons hidden on the Space too |
 | 8 | No raw error text in the public export | P1 | Fixed (`review/2026-09-25`) — also `lastUpdateError` in `committees.json` |
 | 9 | Dispatch inputs through `env:` | P1 | Fixed (`review/2026-09-25`) |
-| 10 | Close per-thread browsers in web-api jobs | P1 | Open |
+| 10 | Close per-thread browsers in web-api jobs | P1 | Fixed (`review/2026-09-25`) |
 | 11 | Process-wide Space DB pull | P1 | Open |
 | 12 | Freshness gate in the daily cron | P1 | Open |
 | 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Partial — Pages build on Node 24 |

@@ -14,7 +14,9 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from repower import web_api
 from repower.policy import store
+from repower.scrapers import browser_clearance
 from repower.web_api import _build_policy_argv, _Handler
 
 
@@ -159,3 +161,42 @@ def test_token_mode_requires_the_token(api, monkeypatch):
     assert post("/api/policy/track", {"key": "system_review", "enabled": False},
                 X_API_Token="s3cret") == 200
     assert _enabled(db, "system_review") is False
+
+
+# ── Headless browsers are per thread; web-api's threads must close their own ───────
+class _FakeBrowser:
+    """Stands in for the Playwright context a METI token mint leaves in thread-local state."""
+
+    def __init__(self):
+        self.closed = threading.Event()
+
+    def close(self):
+        self.closed.set()
+
+
+def test_a_browser_launched_during_a_request_is_closed_with_it(api, monkeypatch):
+    post, _ = api
+    browser = _FakeBrowser()
+
+    def mint_then_track(key, enabled, db_path=None):
+        browser_clearance._local.context = browser
+        return True
+
+    monkeypatch.setattr(store, "set_committee_enabled", mint_then_track)
+    assert post("/api/policy/track", {"key": "system_review", "enabled": True}) == 200
+    # Closed after the response is written, so wait rather than assert at once.
+    assert browser.closed.wait(5)
+
+
+def test_a_failing_catchup_job_still_closes_its_browser(tmp_path, monkeypatch):
+    browser = _FakeBrowser()
+
+    def mint_then_fail(**_):
+        browser_clearance._local.context = browser
+        raise RuntimeError("METI unreachable")
+
+    monkeypatch.setattr("repower.policy.detect.detect", mint_then_fail)
+    job = threading.Thread(target=web_api._run_catchup_job, args=(_db(tmp_path),))
+    job.start()
+    job.join(30)
+    assert browser.closed.is_set()

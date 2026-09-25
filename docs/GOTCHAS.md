@@ -191,6 +191,11 @@ fixed.
   symptom showed up. `_mint` now passes `revisit=True`; `fetch` deliberately does not, since it
   makes its own in-page request anyway. **When a clearance change seems not to work, check
   whether you are testing a fresh process or a server that has been up since before it.**
+- **Headless browsers are per thread, and `atexit` only closes the main thread's.** A long-lived
+  process that fetches on worker threads must call `browser_clearance.close()` when each thread's
+  work ends — `web_api` does it after every request and every catch-up job. Otherwise each job
+  orphans a Chromium + Playwright driver for the life of the server, and a later thread that
+  inherits the recycled thread ident finds its profile dir (`t<ident>`) still locked.
 - **METI's 403 wears METI's own "page not found" page.** The 5045-byte body titled
   「指定されたページまたはファイルは存在しません」, served from S3/CloudFront with no WAF header, is
   what a refused client gets — for URLs that exist perfectly well. Don't read that body (or a
