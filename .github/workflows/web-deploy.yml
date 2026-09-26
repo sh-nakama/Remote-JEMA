@@ -64,9 +64,9 @@ jobs:
       # Whether we actually built + should deploy (see the change-detection step).
       changed: ${{ steps.decide.outputs.changed }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
 
@@ -103,7 +103,7 @@ jobs:
 
       - name: Look up last-deployed DB fingerprint
         id: cache
-        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .dbfp
           key: web-deploy-dbfp-${{ steps.fp.outputs.fp }}
@@ -123,7 +123,7 @@ jobs:
         if: steps.decide.outputs.changed == 'true'
         run: python -m repower.cli export-web --out web/public/data/web
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: steps.decide.outputs.changed == 'true'
         with:
           node-version: "24"
@@ -142,10 +142,10 @@ jobs:
         if: steps.decide.outputs.changed == 'true'
         run: touch web/dist/.nojekyll
 
-      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
         if: steps.decide.outputs.changed == 'true'
 
-      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: steps.decide.outputs.changed == 'true'
         with:
           path: web/dist
@@ -157,7 +157,7 @@ jobs:
         if: steps.decide.outputs.changed == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: echo "${{ steps.fp.outputs.fp }}" > .dbfp
 
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.decide.outputs.changed == 'true' && steps.cache.outputs.cache-hit != 'true'
         with:
           path: .dbfp
@@ -185,4 +185,4 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
-        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
