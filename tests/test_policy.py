@@ -1,5 +1,5 @@
 """Tests for the policy observer: pure parse functions, material selection,
-detection (network mocked), running-document regeneration, and the no-Aurora gate.
+detection (network mocked) and running-document regeneration.
 
 Network-free: ``conditional_get`` and the discovery functions are monkeypatched;
 a temporary SQLite path holds the policy tables; POLICY_DIR is redirected to tmp.
@@ -1611,16 +1611,6 @@ def test_probe_url_flags_unreachable():
             "https://www.meti.go.jp/shingikai/nowhere/", fetch=fetch, validate=False,
             tracked_urls=set(), tracked_keys=set())
         assert cand is not None and cand.note == "unreachable"
-
-
-# ── No-Aurora gate ───────────────────────────────────────────────────────────
-def test_no_aurora_anywhere_in_package():
-    root = Path(__file__).resolve().parents[1] / "src" / "repower"
-    offenders = []
-    for p in root.rglob("*.py"):
-        if "aurora" in p.read_text(encoding="utf-8", errors="ignore").lower():
-            offenders.append(str(p))
-    assert not offenders, f"'aurora' found in: {offenders}"
 
 
 def test_all_committees_have_unique_keys_and_valid_source():

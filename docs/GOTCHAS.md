@@ -640,10 +640,10 @@ fixed.
 
 - **CI green ≠ safe**: `cli.py` (every cron's entrypoint) has no test coverage `(open — P2)`,
   so regressions there surface only as 05:30-JST production failures.
-- The brand-scrub gates cover only `src space` (CI grep) and `src/repower/**/*.py` (pytest) —
-  NOT `web/`, `docs/`, or workflow YAML `(open — P2)`. A docs leak already happened once
-  (2026-07-03, caught by a manual grep — see `.design-sync/NOTES.md`). Until widened, grep the
-  whole tree yourself before pushing anything ported from `Reference/`.
+- The brand gates (`tests/test_brand.py` and CI's "No brand trace" step) scan every tracked
+  path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
+  trace themselves; keep it that way in any new check. A docs leak happened once before the
+  gates covered docs (2026-07-03).
 - `tests/test_policy.py:480` hardcodes the committee count (`== 14`) — every registry change
   breaks it with a bare count mismatch `(open — P3)`.
 - There is **no conftest.py**; DB-setup boilerplate is duplicated ~30× across the policy test
@@ -667,6 +667,9 @@ fixed.
   `app.py` that only exists once `sync-space.yml` assembles its deploy dir (where `space/app.py`
   lands at the root) `(open — P3)`. The Space deploy works; local compose does not. Also: no
   `USER` (runs as root) and the layer order re-installs deps on every `src/` change.
+- `sync-space.yml` mirrors its deploy dir onto the Space (`delete_patterns=["*"]`): any file on
+  the Space that the deploy dir doesn't contain is deleted on the next sync (`.gitattributes`
+  excepted). Add Space-only files to `space/`, never through the Hub UI.
 - `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
   `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
   a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).

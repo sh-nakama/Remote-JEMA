@@ -55,6 +55,8 @@ jobs:
               repo_type="space",
               commit_message="Sync from GitHub",
               ignore_patterns=["*.pyc", "__pycache__", "*.egg-info"],
+              # Mirror the deploy dir: files removed from the repo must leave the Space too.
+              delete_patterns=["*"],
           )
           print("Space synced successfully")
           EOF
