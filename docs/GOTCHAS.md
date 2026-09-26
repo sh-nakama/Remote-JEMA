@@ -650,8 +650,10 @@ fixed.
 
 ## Tests & CI
 
-- **CI green ≠ safe**: `cli.py` (every cron's entrypoint) has no test coverage `(open — P2)`,
-  so regressions there surface only as 05:30-JST production failures.
+- **CI green ≠ safe**: `run-all` (the daily cron's entry point) has only a stubbed smoke test
+  (`tests/test_cli.py`: stage order, one failing stage doesn't stop the rest, `--dry-run`
+  reaches notify); the other `cli.py` commands have none `(open — P3)`, so regressions there
+  surface only as 05:30-JST production failures.
 - The brand gates (`tests/test_brand.py` and CI's "No brand trace" step) scan every tracked
   path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
   trace themselves; keep it that way in any new check. A docs leak happened once before the

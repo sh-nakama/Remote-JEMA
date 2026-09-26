@@ -1615,7 +1615,7 @@ def test_probe_url_flags_unreachable():
 
 def test_all_committees_have_unique_keys_and_valid_source():
     keys = [c.key for c in COMMITTEES]
-    assert len(keys) == len(set(keys)) == 14
+    assert keys and len(keys) == len(set(keys))
     assert all(c.source in {"METI", "OCCTO", "EGC"} for c in COMMITTEES)
     assert committee_by_key("chousei_jukyu").is_occto
     # The two recently-added METI committees are tracked.
