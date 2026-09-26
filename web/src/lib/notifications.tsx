@@ -166,7 +166,4 @@ export function NotificationsPopover({
 }
 
 /** "2026-07-27" / ISO timestamp → ms, or NaN. Dates are treated as UTC midnight. */
-export function tsOfDate(v: string | null | undefined): number {
-  if (!v) return NaN
-  return Date.parse(v.length === 10 ? v + 'T00:00:00Z' : v)
-}
+export { parseDay as tsOfDate } from './time'

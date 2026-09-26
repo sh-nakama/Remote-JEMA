@@ -356,9 +356,14 @@ fixed.
 - **MarketOverview and MarketData duplicate helpers that have already drifted** (`chip` vs
   `makeChip`: flat threshold 0.5% vs 0.05%; also `slotLabel`, `segBase`, Gaussian `mk()`)
   `(open — P3)`. Change both copies or extract to `lib/` first.
-- **No CI gate for `web/`** `(open — P2)`: PRs run neither `tsc -b` nor a build; the three
-  `eslint-disable` comments are inert (no linter installed); zero frontend tests. Run
-  `npm --prefix web run build` yourself before considering a web change done.
+- **CI gates `web/`** (the `web` job in `ci.yml`): `npm run lint` (only the React hook rules —
+  `exhaustive-deps` is what keeps data hooks listing `useDataNonce()`), `npm run build`, and
+  `npm test` (vitest, run under both `TZ=UTC` and `TZ=Asia/Tokyo`). Tests live next to the code
+  as `*.test.ts`. Run the same three locally before calling a web change done.
+- **Parse dates only through `lib/time.ts`**: `parseDbTs` (naive DB timestamps are UTC),
+  `parseDay` (a day is UTC midnight; an offset-less timestamp is UTC, never local) and
+  `parseWallClock` (market datetimes keep their JST digits). A bare `Date.parse` of a string
+  without an offset reads it as the viewer's local time — 9 hours out in Tokyo.
 - **Vite prefers `vite.config.js` over `vite.config.ts`.** `tsc -b` used to emit that `.js`
   (gitignored), so `npm run dev` ran whichever branch last compiled it, including a LAN binding
   with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and

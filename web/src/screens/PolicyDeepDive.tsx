@@ -4,6 +4,7 @@ import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
 import { FreshnessChip, fmtStamp, policyCounts } from '../lib/freshness'
+import { parseDay, parseDbTs } from '../lib/time'
 import { type Meeting, type Upcoming } from './PolicyDeepDive.data'
 import { usePolicyLive } from './PolicyDeepDive.live'
 import { downloadIcs } from '../lib/download'
@@ -318,20 +319,10 @@ export function PolicyDeepDiveScreen() {
   // meetings currently in the snapshot; drives the "recently updated" dot + sort.
   const RECENT_DAYS = 7
   const RECENT_MS = RECENT_DAYS * 24 * 60 * 60 * 1000
-  // Parse a DB timestamp to epoch ms. The backend stores `updated_at` as a UTC
-  // wall-clock string with no offset ("2026-07-26 13:12:39.123456"); pin it to UTC
-  // (append Z) so the 7-day window + day labels don't drift by the local timezone.
-  const tsOf = (v?: string | null): number => {
-    if (!v) return NaN
-    let s = v.replace(' ', 'T')
-    if (!/[zZ]|[+-]\d\d:?\d\d$/.test(s)) s += 'Z'
-    return Date.parse(s)
-  }
-  // Parse a feed row's `date` ("YYYY-MM-DD", occasionally a full timestamp) to
-  // epoch ms for date-ordering. Unparseable dates sort last.
+  const tsOf = parseDbTs
+  // Unparseable feed dates sort last.
   const dayTs = (v?: string | null): number => {
-    if (!v) return -Infinity
-    const t = Date.parse(v.length <= 10 ? v + 'T00:00:00Z' : v.replace(' ', 'T') + 'Z')
+    const t = parseDay(v)
     return Number.isNaN(t) ? -Infinity : t
   }
   const comRecency: Record<string, number> = {}
@@ -352,7 +343,7 @@ export function PolicyDeepDiveScreen() {
   const lastMeetingYear = (c: (typeof committees)[number]): number | null => {
     const iso = c.lastDate
     if (!iso) return null
-    const t = Date.parse(iso.length <= 10 ? iso + 'T00:00:00Z' : iso)
+    const t = parseDay(iso)
     return Number.isNaN(t) ? null : new Date(t).getUTCFullYear()
   }
   const archivedByDefault = (c: (typeof committees)[number]): boolean => {

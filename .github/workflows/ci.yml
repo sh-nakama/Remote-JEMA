@@ -37,3 +37,32 @@ jobs:
 
       - name: Pytest
         run: pytest -q
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+
+      - name: Lint (hook dependency rules)
+        run: npm run lint
+
+      - name: Type-check and build
+        run: npm run build
+
+      # The date parsers exist to be timezone-independent, so a UTC-only run would prove nothing.
+      - name: Unit tests (UTC and JST)
+        run: |
+          TZ=UTC npm test
+          TZ=Asia/Tokyo npm test

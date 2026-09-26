@@ -8,6 +8,7 @@
 import { useEffect, useState } from 'react'
 import { fmtDate } from '../lib/chartkit'
 import { getSnapshot, useDataNonce } from '../lib/data'
+import { parseWallClock as parseISO } from '../lib/time'
 import type { SupplyRecord, WholesaleSnapshot, WholesaleStats } from '../lib/types'
 
 // fmtDate used to live here; it moved to the shared chartkit module. Re-exported
@@ -395,13 +396,9 @@ export function rangeClampNote(gran: Gran, range: Range): string {
   return `${gran} widened to ${got} days · ${gran}表示は${got}日に拡大`
 }
 
-/** Parse an ISO datetime ("2026-07-11" / "2026-07-11T22:30:00") to epoch ms (UTC).
- *  Returns NaN for the fixtures' non-ISO day labels ("Jun 12"), which callers use
- *  to fall back to index spacing. */
-export function parseISO(iso: string): number {
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{2}):(\d{2}))?/.exec(iso)
-  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 0, m[5] ? +m[5] : 0) : NaN
-}
+/** Parse an ISO datetime ("2026-07-11" / "2026-07-11T22:30:00") to epoch ms, keeping its wall
+ *  clock. NaN for the fixtures' non-ISO day labels ("Jun 12"); callers fall back to index spacing. */
+export { parseISO }
 
 /** Newest datetime at which `values` actually has a number. Arrays are
  *  newest-first, so this walks forward to the first populated row. Exports pad

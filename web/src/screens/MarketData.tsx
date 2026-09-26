@@ -59,6 +59,7 @@ function dateLabel(daysAgo: number): string {
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const SHOW_HEATMAP = true
 
 /** ISO datetime → hover label: "Jul 11", or "Jul 11 22:30" for intraday slots.
  *  Non-ISO strings (fixture day labels like "Jun 12") are shown verbatim. */
@@ -108,8 +109,6 @@ export function MarketDataScreen() {
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null)
   // Notifications popover (bell).
   const [showNotif, setShowNotif] = useState(false)
-
-  const showHeatmap = true
 
   const toggleArea = (key: string) =>
     setSel((prev) => {
@@ -1066,7 +1065,7 @@ export function MarketDataScreen() {
       kDemSub: 'sum of selected-area peaks · 17:30 slot',
       kDemD: kDemC.txt,
       kDemDS: kDemC.style,
-      showHeat: showHeatmap,
+      showHeat: SHOW_HEATMAP,
       heatRows,
       sections,
       hiddenNote,

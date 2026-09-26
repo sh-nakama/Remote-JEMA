@@ -2,6 +2,9 @@ import { useEffect, useState } from 'react'
 import { getSnapshot, useDataNonce } from './data'
 import { useApp } from './app'
 import { s } from './style'
+import { parseDay, parseDbTs } from './time'
+
+export { parseDbTs }
 
 /**
  * Recent policy-pipeline activity, read straight from the exported
@@ -52,17 +55,6 @@ export interface PolicyActivity {
   count: number
 }
 
-/**
- * The backend stores `updated_at` as a UTC wall clock with no offset
- * ("2026-07-26 13:12:39.123456"); pin it to UTC so the window doesn't drift with
- * the viewer's timezone.
- */
-export function parseDbTs(v?: string | null): number {
-  if (!v) return NaN
-  let t = v.replace(' ', 'T')
-  if (!/[zZ]|[+-]\d\d:?\d\d$/.test(t)) t += 'Z'
-  return Date.parse(t)
-}
 
 const EMPTY: PolicyActivity = { ready: false, summarised: [], detected: [], committees: 0, count: 0 }
 
@@ -81,7 +73,7 @@ export function usePolicyActivity(): PolicyActivity {
         // too. (Summarised meetings need no such guard: reaching `done` is the news,
         // however old the meeting.)
         const dateIsRecent = (d: string): boolean => {
-          const t = Date.parse((d || '') + 'T00:00:00Z')
+          const t = parseDay(d)
           return Number.isFinite(t) && now - t <= RECENT_MS
         }
         const summarised: PolicyActivityItem[] = []
