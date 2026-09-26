@@ -1,12 +1,18 @@
 # RePower
 
-A bot that scrapes Japanese power-market data and serves an interactive
-[Streamlit](https://streamlit.io/) dashboard. It collects supply/demand from
+A bot that scrapes Japanese power-market data and serves it through **JEMA**, a React
+web app published on GitHub Pages. It collects supply/demand from
 all nine mainland transmission system operators (TSOs), JEPX day-ahead spot
 prices (**wholesale market**), EPRX balancing-market bid results (**balancing
-market**), fuel/FX futures, and energy news, stores everything in SQLite, and
-visualizes both markets as a 9-area × 2-column grid (supply/demand left, price
-right) with switchable aggregation, per-area period comparison, and exports.
+market**), fuel/FX futures, energy news and Japanese energy-policy committee
+meetings, stores everything in SQLite, and visualizes the markets per area with
+switchable aggregation, period comparison, and exports.
+
+**Which UI is primary:** the JEMA web app (`web/`) is the product. It is static in
+production (read-only by construction), and locally it can talk to `repower web-api`
+to manage policy tracking. The older [Streamlit](https://streamlit.io/) dashboard is
+kept as a secondary, **read-only** view on a Hugging Face Space (its admin controls
+are hidden there); new UI work goes into `web/`.
 
 ## Data sources
 
@@ -36,15 +42,18 @@ Scrapers (BaseAreaScraper framework + JEPX/EPRX/fuels/news)
         │
         ├──► synced to a private Hugging Face Dataset (push-hf / pull-hf)
         │
-        ▼
-   Streamlit dashboard ──► Hugging Face Space (Docker SDK)
+        ├──► repower export-web ──► JEMA web app (web/) ──► GitHub Pages   (primary)
+        │
+        └──► Streamlit dashboard ──► Hugging Face Space, read-only       (secondary)
 ```
 
 Per-region scrapers share a common `BaseAreaScraper` framework that auto-selects
 the column layout from the CSV shape. All sources upsert into a SQLite database
-via SQLAlchemy. The database is synced to a private Hugging Face Dataset, and the
-Streamlit dashboard is deployed to a Hugging Face Space using the Docker SDK
-(port 7860). A daily GitHub Actions cron runs the full pipeline.
+via SQLAlchemy. The database is synced to a private Hugging Face Dataset. `repower
+export-web` writes it out as static JSON snapshots that the JEMA web app reads, and
+the site is rebuilt whenever a dataset workflow finishes. The Streamlit dashboard is
+deployed to a Hugging Face Space using the Docker SDK (port 7860). A daily GitHub
+Actions cron runs the full pipeline.
 
 > Note: an LLM/narrative analysis layer is scaffolded in the schema but is
 > deferred and not yet wired up.
@@ -100,7 +109,20 @@ repower policy detect --committee all      # no auth — safe to run daily
 repower policy run --committee emissions_trading --max-per-run 5   # needs `notebooklm login`
 ```
 
-## Running the dashboard locally
+## Running the web app (JEMA) locally
+
+```bash
+repower export-web              # write the JSON snapshots the app reads (web/public/data/)
+npm --prefix web ci
+npm --prefix web run dev        # http://localhost:5173 (this machine only)
+repower web-api                 # optional: live policy data and committee management
+```
+
+`npm run lint`, `npm test` and `npm run build` in `web/` are what CI runs. The
+screens are Market Overview, Market Data, Capacity & Auctions and Policy Deep Dive;
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md) walks through them.
+
+## Running the Streamlit dashboard locally
 
 ```bash
 streamlit run dashboard/app.py
@@ -227,8 +249,14 @@ everything else.
   Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the
   operator runbook above).
 - **`sync-space.yml`** — on push to `main` (code/config paths), uploads the
-  Space deployment (`space/`, `src/`, `Dockerfile`, `pyproject.toml`) to the
-  Hugging Face Space.
+  Space deployment (`space/`, `src/`, `Dockerfile`, `pyproject.toml`,
+  `constraints.txt`) to the Hugging Face Space, then waits for the rebuild and
+  fails if the Space doesn't come up.
+- **`web-deploy.yml`** — rebuilds the JEMA site and deploys it to GitHub Pages
+  whenever a dataset workflow finishes (skipped when the DB is unchanged), on
+  pushes to `web/`, and on a daily backstop cron.
+- **`ci.yml`** — on pull requests and `main`: brand check, ruff, mypy and pytest,
+  plus the web app's lint, build and unit tests. Both jobs are required to merge.
 
 ### Incremental scraping & caching
 
