@@ -8,7 +8,8 @@ dist-ssr
 # generated web-data snapshots (produced by `repower export-web`)
 public/data/
 
-# tsc -b build outputs (emitted from vite.config.ts / tsconfig references)
+# Old tsc -b outputs: the configs no longer emit, and the npm scripts pass --config
+# vite.config.ts so a leftover vite.config.js can't shadow it.
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts

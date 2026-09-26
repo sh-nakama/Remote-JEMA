@@ -357,6 +357,11 @@ fixed.
 - **No CI gate for `web/`** `(open — P2)`: PRs run neither `tsc -b` nor a build; the three
   `eslint-disable` comments are inert (no linter installed); zero frontend tests. Run
   `npm --prefix web run build` yourself before considering a web change done.
+- **Vite prefers `vite.config.js` over `vite.config.ts`.** `tsc -b` used to emit that `.js`
+  (gitignored), so `npm run dev` ran whichever branch last compiled it, including a LAN binding
+  with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and
+  every npm script passes `--config vite.config.ts`. Launch Vite through those scripts; a bare
+  `npx vite` still picks up a leftover `.js`.
 - No keyboard/ARIA semantics anywhere (`Hoverable` renders divs; 167 onClick handlers)
   `(open — P3)`. The ⌘K palette and global Escape are the only keyboard paths — don't break
   them, and prefer real `<button>`s in new UI.
