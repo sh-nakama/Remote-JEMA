@@ -116,25 +116,33 @@ export function Hoverable({
       }}
       onKeyDown={(e: React.KeyboardEvent<HTMLElement>) => {
         onKeyDown?.(e)
-        // Enter/Space activates the click handler, but only when the key event
-        // originated on this element itself — a keydown bubbling up from a
-        // nested control (input, inner Hoverable) must not also activate the
-        // ancestor, mirroring native <button> default-action semantics.
-        if (
-          onClick &&
-          !e.defaultPrevented &&
-          e.target === e.currentTarget &&
-          (e.key === 'Enter' || e.key === ' ')
-        ) {
-          e.preventDefault() // Space would otherwise scroll the page
-          e.currentTarget.click()
-        }
+        if (onClick) activateOnKey(e)
       }}
       style={merged}
     >
       {children}
     </El>
   )
+}
+
+/** Enter/Space clicks the element itself; a keydown bubbling up from a nested control is left alone, as on a native button. */
+export function activateOnKey(e: React.KeyboardEvent<HTMLElement>): void {
+  if (!e.defaultPrevented && e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault() // Space would otherwise scroll the page
+    e.currentTarget.click()
+  }
+}
+
+/** Keyboard access for a clickable span/div that isn't a Hoverable: `<span {...press(fn)}>`.
+ *  Pass `pressed` for a toggle or one option of a pill group. */
+export function press(onClick: React.MouseEventHandler<HTMLElement>, pressed?: boolean) {
+  return {
+    role: 'button',
+    tabIndex: 0,
+    onClick,
+    onKeyDown: activateOnKey,
+    ...(pressed === undefined ? {} : { 'aria-pressed': pressed }),
+  }
 }
 
 /** Render an exact inline-SVG string. `display:contents` keeps the <svg> as the

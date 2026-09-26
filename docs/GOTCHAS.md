@@ -367,9 +367,12 @@ fixed.
   with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and
   every npm script passes `--config vite.config.ts`. Launch Vite through those scripts; a bare
   `npx vite` still picks up a leftover `.js`.
-- No keyboard/ARIA semantics anywhere (`Hoverable` renders divs; 167 onClick handlers)
-  `(open — P3)`. The ⌘K palette and global Escape are the only keyboard paths — don't break
-  them, and prefer real `<button>`s in new UI.
+- **Every clickable element is keyboard-operable.** The exports' clickable spans/divs stay spans/divs
+  (swapping in `<button>` would shift layout); `Hoverable`, or `{...press(fn, pressed?)}` from
+  `lib/style.tsx` on a plain element, adds `role="button"`, `tabIndex` and Enter/Space, and
+  `pressed` sets `aria-pressed` for toggles and pill groups. Only dropdown backdrops and
+  `stopPropagation` guards are left click-only. Give any new clickable element the same, or use a
+  real `<button>`.
 - `web_api.py` is a **localhost dev helper only**: DB-mutating + subprocess-launching
   endpoints, time-capped jobs. **CORS does not protect it** — a foreign page's no-cors POST
   still executes, it just can't read the answer. So without `REPOWER_API_TOKEN` it refuses

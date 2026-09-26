@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState } from 'react'
-import { s, Hoverable, RawSvg } from '../lib/style'
+import { s, Hoverable, RawSvg, press } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
 import { FreshnessChip, fmtStamp } from '../lib/freshness'
@@ -677,7 +677,7 @@ export function MarketOverviewScreen() {
   const renderTopBar = () => (
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Overview <span style={s('color:var(--fnt3)')}>·</span> マーケット概況</div>
-          <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
+          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
             <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
@@ -698,8 +698,8 @@ export function MarketOverviewScreen() {
             )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={segBase(L === 'ja')} onClick={() => setLang('ja')}>日本語</span>
-            <span style={segBase(L === 'en')} onClick={() => setLang('en')}>English</span>
+            <span style={segBase(L === 'ja')} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
+            <span style={segBase(L === 'en')} {...press(() => setLang('en'), L === 'en')}>English</span>
           </div>
           <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
             <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
@@ -802,8 +802,8 @@ export function MarketOverviewScreen() {
                   </div>
                   <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
                     <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                      <span style={segBase(seg === 'today')} onClick={() => { setSeg('today'); setHover(null) }}>Today</span>
-                      <span style={segBase(seg === 'avg7')} onClick={() => { setSeg('avg7'); setHover(null) }}>7-day avg</span>
+                      <span style={segBase(seg === 'today')} {...press(() => { setSeg('today'); setHover(null) }, seg === 'today')}>Today</span>
+                      <span style={segBase(seg === 'avg7')} {...press(() => { setSeg('avg7'); setHover(null) }, seg === 'avg7')}>7-day avg</span>
                     </div>
                     <Hoverable as="span" base="width:30px;height:30px;border-radius:8px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer" hover="color:var(--ac);background:var(--bg0)" onClick={fs} title="Fullscreen · 全画面" aria-label="Fullscreen chart"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M8 3H5a2 2 0 0 0-2 2v3"></path><path d="M21 8V5a2 2 0 0 0-2-2h-3"></path><path d="M3 16v3a2 2 0 0 0 2 2h3"></path><path d="M16 21h3a2 2 0 0 0 2-2v-3"></path></svg>`} /></Hoverable>
                   </div>
@@ -855,7 +855,7 @@ export function MarketOverviewScreen() {
 
                 <div style={s('display:flex;align-items:center;gap:18px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv)')}>
                   <span style={s('display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--tx2)')}><span style={s('width:20px;height:3px;border-radius:2px;background:#00A5CF')}></span>{mainLegend}</span>
-                  <span style={ghostLegS} onClick={toggleGhost}><span style={s('width:20px;height:0;border-top:2px dashed #9AA5B5')}></span>Yesterday (ghost) 前日</span>
+                  <span style={ghostLegS} {...press(toggleGhost, ghostOn)}><span style={s('width:20px;height:0;border-top:2px dashed #9AA5B5')}></span>Yesterday (ghost) 前日</span>
                   <span style={s('margin-left:auto;font-size:11px;color:var(--mut)')}>Click legend to toggle · slot click deep-links to Market Data</span>
                 </div>
               </div>
@@ -927,7 +927,7 @@ export function MarketOverviewScreen() {
                     <React.Fragment key={cm.key}>
                       <div style={cm.lineS}></div>
                       <div style={cm.dotS}></div>
-                      <div style={cm.cardS} onClick={() => openPolicy(cm.comKey, cm.num)} title={cm.tip}>
+                      <div style={cm.cardS} {...press(() => openPolicy(cm.comKey, cm.num))} title={cm.tip}>
                         <div style={s('font-size:11.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{cm.name}</div>
                         <div style={s("font-size:10px;color:var(--mut);white-space:nowrap;font-feature-settings:'tnum' 1")}>{cm.meta}</div>
                       </div>
@@ -971,9 +971,9 @@ export function MarketOverviewScreen() {
                 </div>
 
                 <div style={s('display:flex;gap:6px;margin:12px 0 4px')}>
-                  <span style={filterChipBase(filter === 'followed')} onClick={() => setFilter('followed')}>Followed フォロー中</span>
-                  <span style={filterChipBase(filter === 'all')} onClick={() => setFilter('all')}>All tracked 全追跡</span>
-                  <span style={filterChipBase(filter === 'upcoming')} onClick={() => setFilter('upcoming')}>Upcoming 開催予定</span>
+                  <span style={filterChipBase(filter === 'followed')} {...press(() => setFilter('followed'), filter === 'followed')}>Followed フォロー中</span>
+                  <span style={filterChipBase(filter === 'all')} {...press(() => setFilter('all'), filter === 'all')}>All tracked 全追跡</span>
+                  <span style={filterChipBase(filter === 'upcoming')} {...press(() => setFilter('upcoming'), filter === 'upcoming')}>Upcoming 開催予定</span>
                 </div>
 
                 <div style={s('display:flex;flex-direction:column')}>

@@ -1,5 +1,36 @@
-import { describe, expect, it } from 'vitest'
-import { s } from './style'
+import type React from 'react'
+import { describe, expect, it, vi } from 'vitest'
+import { activateOnKey, press, s } from './style'
+
+type KeyEv = React.KeyboardEvent<HTMLElement>
+
+const keyEvent = (key: string, fromChild = false) => {
+  const click = vi.fn()
+  const self = { click } as unknown as HTMLElement
+  const ev = { key, target: fromChild ? {} : self, currentTarget: self, defaultPrevented: false, preventDefault: vi.fn() }
+  return { ev: ev as unknown as KeyEv, click, prevent: ev.preventDefault }
+}
+
+describe('keyboard activation', () => {
+  it.each(['Enter', ' '])('%j clicks the element and stops the page from scrolling', (key) => {
+    const { ev, click, prevent } = keyEvent(key)
+    activateOnKey(ev)
+    expect(click).toHaveBeenCalledOnce()
+    expect(prevent).toHaveBeenCalledOnce()
+  })
+  it('ignores other keys and keys bubbling up from a nested control', () => {
+    for (const [key, fromChild] of [['a', false], ['Tab', false], ['Enter', true]] as const) {
+      const { ev, click } = keyEvent(key, fromChild)
+      activateOnKey(ev)
+      expect(click).not.toHaveBeenCalled()
+    }
+  })
+  it('press() makes a focusable button, with aria-pressed only when a state is given', () => {
+    const fn = vi.fn()
+    expect(press(fn)).toEqual({ role: 'button', tabIndex: 0, onClick: fn, onKeyDown: activateOnKey })
+    expect(press(fn, false)['aria-pressed' as keyof ReturnType<typeof press>]).toBe(false)
+  })
+})
 
 describe('s', () => {
   it('parses an inline style string, camelCasing all but custom properties', () => {

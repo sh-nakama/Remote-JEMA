@@ -1,6 +1,6 @@
 // Ported from screens/market-data.html — the Market Data screen.
 import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { s, Hoverable, RawSvg } from '../lib/style'
+import { s, Hoverable, RawSvg, press } from '../lib/style'
 import type { CSS } from '../lib/style'
 import { useApp } from '../lib/app'
 import { FreshnessChip, fmtStamp } from '../lib/freshness'
@@ -1159,7 +1159,7 @@ export function MarketDataScreen() {
   const renderTopBar = () => (
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Data <span style={s('color:var(--fnt3)')}>·</span> マーケットデータ</div>
-          <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
+          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
             <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
@@ -1176,8 +1176,8 @@ export function MarketDataScreen() {
             )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={v.langJaS} onClick={() => setLang('ja')}>日本語</span>
-            <span style={v.langEnS} onClick={() => setLang('en')}>English</span>
+            <span style={v.langJaS} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
+            <span style={v.langEnS} {...press(() => setLang('en'), L === 'en')}>English</span>
           </div>
           <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
             <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
@@ -1228,13 +1228,13 @@ export function MarketDataScreen() {
   const renderViewSwitcher = () => (
             <div style={s('display:flex;align-items:center;gap:14px;flex-wrap:wrap')}>
               <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                <span style={v.vwWS} onClick={() => setView('wholesale')}>Wholesale (Spot) 卸電力</span>
-                <span style={v.vwBS} onClick={() => setView('balancing')}>Balancing 需給調整</span>
+                <span style={v.vwWS} {...press(() => setView('wholesale'), view === 'wholesale')}>Wholesale (Spot) 卸電力</span>
+                <span style={v.vwBS} {...press(() => setView('balancing'), view === 'balancing')}>Balancing 需給調整</span>
               </div>
               <span style={s('color:var(--fnt3)')}>·</span>
               <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                <span style={v.vwIS} onClick={() => setView('interco')}>Interconnectors 連系線</span>
-                <span style={v.vwDS} onClick={() => setView('drivers')}>Drivers 燃料・為替</span>
+                <span style={v.vwIS} {...press(() => setView('interco'), view === 'interco')}>Interconnectors 連系線</span>
+                <span style={v.vwDS} {...press(() => setView('drivers'), view === 'drivers')}>Drivers 燃料・為替</span>
               </div>
             </div>
   )
@@ -1243,25 +1243,25 @@ export function MarketDataScreen() {
   const renderControlBar = () => (
               <div style={s('background:var(--bg1);border-radius:16px;padding:12px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap')}>
                 <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                  <span style={v.r7S} onClick={() => setRange('7D')}>7D</span>
-                  <span style={v.r30S} onClick={() => setRange('30D')}>30D</span>
-                  <span style={v.r60S} onClick={() => setRange('60D')}>60D</span>
-                  <span style={v.r1yS} onClick={() => setRange('1Y')}>1Y</span>
+                  <span style={v.r7S} {...press(() => setRange('7D'), range === '7D')}>7D</span>
+                  <span style={v.r30S} {...press(() => setRange('30D'), range === '30D')}>30D</span>
+                  <span style={v.r60S} {...press(() => setRange('60D'), range === '60D')}>60D</span>
+                  <span style={v.r1yS} {...press(() => setRange('1Y'), range === '1Y')}>1Y</span>
                 </div>
                 <span style={s('width:1px;height:22px;background:var(--dv)')}></span>
                 <span style={s('font-size:12px;color:var(--mut);flex-shrink:0')}>Areas エリア</span>
                 <div style={s('display:flex;gap:6px;flex-wrap:wrap;align-items:center')}>
                   {v.areaChips.map((a) => (
-                    <span key={a.key} style={a.s} onClick={() => toggleArea(a.key)}>{a.label}</span>
+                    <span key={a.key} style={a.s} {...press(() => toggleArea(a.key), !!sel[a.key])}>{a.label}</span>
                   ))}
-                  <span style={s('font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;cursor:pointer;border:1px dashed var(--fnt2);background:transparent;color:var(--fnt);white-space:nowrap')} onClick={tSystem} title="System series = PROPOSED · システム系列は提案中">System <span style={s('font-size:9px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:5px;padding:0 4px;margin-left:2px')}>P</span></span>
+                  <span style={s('font-size:11.5px;font-weight:600;padding:3px 11px;border-radius:999px;cursor:pointer;border:1px dashed var(--fnt2);background:transparent;color:var(--fnt);white-space:nowrap')} {...press(tSystem)} title="System series = PROPOSED · システム系列は提案中">System <span style={s('font-size:9px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:5px;padding:0 4px;margin-left:2px')}>P</span></span>
                 </div>
                 <span style={s('width:1px;height:22px;background:var(--dv)')}></span>
                 <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                  <span style={v.gNS} onClick={granN}>Native 30分</span>
-                  <span style={v.gDS} onClick={granD}>Daily</span>
-                  <span style={v.gWS} onClick={granW}>Weekly</span>
-                  <span style={v.gMS} onClick={granM}>Monthly</span>
+                  <span style={v.gNS} {...press(granN, gran === 'Native')}>Native 30分</span>
+                  <span style={v.gDS} {...press(granD, gran === 'Daily')}>Daily</span>
+                  <span style={v.gWS} {...press(granW, gran === 'Weekly')}>Weekly</span>
+                  <span style={v.gMS} {...press(granM, gran === 'Monthly')}>Monthly</span>
                 </div>
                 {v.rangeClampNote ? (
                   <span style={s("font-size:10.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:999px;padding:2px 10px;white-space:nowrap;font-feature-settings:'tnum' 1")}>{v.rangeClampNote}</span>
@@ -1331,7 +1331,7 @@ export function MarketDataScreen() {
                     </div>
                     <div style={s('display:flex;flex-direction:column;gap:4px;margin-top:14px')}>
                       {v.heatRows.map((hr) => (
-                        <div key={hr.key} style={s('display:flex;align-items:center;gap:10px;cursor:pointer')} onClick={() => toggleArea(hr.key)} title="Click to toggle area · クリックで選択切替">
+                        <div key={hr.key} style={s('display:flex;align-items:center;gap:10px;cursor:pointer')} {...press(() => toggleArea(hr.key), !!sel[hr.key])} title="Click to toggle area · クリックで選択切替">
                           <span style={hr.labS}>{hr.label}</span>
                           <div style={s('flex:1;display:grid;grid-template-columns:repeat(48,1fr);gap:2px')}>
                             {hr.cells.map((c, ci) => (
@@ -1893,9 +1893,9 @@ export function MarketDataScreen() {
                         <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Rebased to 100 at window start · daily closes · spot = 9-area mean · 期初＝100</div>
                       </div>
                       <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-                        <span style={v.dr30S} onClick={() => setDrRange('30D')}>30D</span>
-                        <span style={v.dr90S} onClick={() => setDrRange('90D')}>90D</span>
-                        <span style={v.dr1yS} onClick={() => setDrRange('1Y')}>1Y</span>
+                        <span style={v.dr30S} {...press(() => setDrRange('30D'), drRange === '30D')}>30D</span>
+                        <span style={v.dr90S} {...press(() => setDrRange('90D'), drRange === '90D')}>90D</span>
+                        <span style={v.dr1yS} {...press(() => setDrRange('1Y'), drRange === '1Y')}>1Y</span>
                       </div>
                     </div>
                     <div style={s('flex:1;margin-top:14px')}>
@@ -1924,9 +1924,9 @@ export function MarketDataScreen() {
                     </div>
                     <div style={s('display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap')}>
                       <span style={s('display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--tx2)')}><span style={s('width:20px;height:3px;border-radius:2px;background:#00A5CF')}></span>JEPX spot スポット</span>
-                      <span style={v.drJkmLegS} onClick={tJkm}><span style={s('width:20px;height:3px;border-radius:2px;background:#E76F51')}></span>JKM</span>
-                      <span style={v.drNclLegS} onClick={tNcl}><span style={s('width:20px;height:3px;border-radius:2px;background:#B08968')}></span>Newcastle 石炭</span>
-                      <span style={v.drFxLegS} onClick={tFx}><span style={s('width:20px;height:3px;border-radius:2px;background:#8AB17D')}></span>USD/JPY</span>
+                      <span style={v.drJkmLegS} {...press(tJkm, drOn.jkm)}><span style={s('width:20px;height:3px;border-radius:2px;background:#E76F51')}></span>JKM</span>
+                      <span style={v.drNclLegS} {...press(tNcl, drOn.ncl)}><span style={s('width:20px;height:3px;border-radius:2px;background:#B08968')}></span>Newcastle 石炭</span>
+                      <span style={v.drFxLegS} {...press(tFx, drOn.fx)}><span style={s('width:20px;height:3px;border-radius:2px;background:#8AB17D')}></span>USD/JPY</span>
                       <span style={s('margin-left:auto;font-size:11px;color:var(--mut)')}>Click legend to toggle · 凡例クリックで切替</span>
                     </div>
                   </div>
