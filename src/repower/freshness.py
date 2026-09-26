@@ -54,10 +54,12 @@ def source_ages(db_path: str | None = None, today: date | None = None) -> list[d
             "Fuels & FX": session.scalar(select(func.max(FuelDaily.date))),
             "Supply (newest area)": session.scalar(select(func.max(DemandSupply30m.date)).where(supplied)),
         }
-        per_area = dict(session.execute(
-            select(DemandSupply30m.area, func.max(DemandSupply30m.date)).where(supplied)
-            .group_by(DemandSupply30m.area)
-        ).all())
+        per_area: dict[str, date] = {
+            area: latest for area, latest in session.execute(
+                select(DemandSupply30m.area, func.max(DemandSupply30m.date)).where(supplied)
+                .group_by(DemandSupply30m.area)
+            ).tuples()
+        }
     finally:
         session.close()
     latest["EPRX balancing"] = _parquet_latest(EPRX_BALANCING_PARQUET)

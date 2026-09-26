@@ -40,14 +40,22 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.mypy]
-python_version = "3.11"
+# Type-check with 3.12 syntax: numpy's stubs use PEP 695 aliases, which 3.11 mode rejects outright
+# (the runtime floor stays 3.11 via requires-python and ruff's target-version).
+python_version = "3.12"
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-# numpy's bundled stubs use PEP 695 `type` aliases, which mypy rejects under
-# python_version 3.11 (our lowest supported). Skip analyzing them; numpy becomes Any.
-module = "numpy.*"
-follow_imports = "skip"
+files = ["src/repower"]
+# Not yet type-clean, so CI skips them; take a module off this list once `mypy` passes on it.
+exclude = [
+    "src/repower/analysis/features\\.py",
+    "src/repower/cli\\.py",
+    "src/repower/dashboard/components/pdf_export\\.py",
+    "src/repower/dashboard/export_web\\.py",
+    "src/repower/notify/webhook\\.py",
+    "src/repower/policy/(catalog|discover|energy_board|pipeline|scraper|store)\\.py",
+    "src/repower/scrapers/(area_base|news_rss)\\.py",
+    "src/repower/web_api\\.py",
+]
 
 [tool.ruff]
 target-version = "py311"

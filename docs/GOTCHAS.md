@@ -667,8 +667,10 @@ fixed.
   banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
-- `ruff` runs E, F, I, B and UP (`pyproject.toml`). mypy is configured but not in CI and far from
-  clean `(open — P2)`, so a green CI says nothing about types.
+- `ruff` runs E, F, I, B and UP (`pyproject.toml`). CI runs `mypy` over every module except the
+  `[tool.mypy] exclude` list (14 not yet type-clean, `(open — P2)`; most errors come from the
+  legacy `Column()` models and BeautifulSoup typing). Take a module off that list once it
+  passes. mypy checks 3.12 syntax because numpy's stubs need it; the runtime floor is 3.11.
 - Local dev: use `.venv` (Python 3.12) — the PATH `python` is 3.9 without deps.
 
 ## Docker & deployment
