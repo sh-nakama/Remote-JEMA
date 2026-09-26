@@ -11,10 +11,9 @@ fixed.
 - **Data is JST; CI runs in UTC.** The daily cron fires at 20:30 UTC = 05:30 JST *next day*, so
   `date.today()` is guaranteed to lag the JST calendar date during every run. Use
   `repower.timeutil.today_jst()/yesterday_jst()` for anything that decides "current"
-  month/year/fiscal-year or filters future-vs-past. Known bypass sites `(open — P3)`:
-  `scrapers/area_base.py:274`, `scrapers/eprx.py:51`, `scrapers/jepx_spot.py:183,204`,
-  `cli.py:101`, `policy/schedule.py:211`, `dashboard/export_web.py:129`, `dashboard/app_main.py`
-  ×3, `dashboard/legacy.py` ×2.
+  month/year/fiscal-year or filters future-vs-past. The only remaining `date.today()` is
+  `scrapers/fuels_futures.py`, deliberately: yfinance's `end` is exclusive, and the JST date
+  would pull in the unfinished US session.
 - **Japanese fiscal year starts in April** — EPRX files are per-JFY (`_current_jfy()`); a JFY
   boundary crossed near the UTC/JST gap delays picking up the new year's ZIP by one run.
 - `NewsItem.published_at` (DateTime column) is compared against ISO **strings** in
@@ -35,12 +34,8 @@ fixed.
 - `db.py::_migrate_add_area_column` rebuilds the table from a **hardcoded `old_cols` list** —
   adding a column to `DemandSupply30m` requires updating that list or pre-`area` DBs silently
   drop it on migration.
-- `PolicyCommittee` in `db.py` defines 7 attributes **twice** (merge damage from `b353a94`;
-  Python keeps the second block, `priority` default 100) `(open — P3)`. Edit the *second* block
-  or, better, delete the duplicate first.
-- `hf_sync.pull_db_from_hf` always downloads to `<dir>/repower.db` — a custom
-  `REPOWER_DB_PATH` with a different **filename** uploads fine but never round-trips back
-  `(open — P3)`.
+- `hf_sync` keeps stable repo filenames (`repower.db`, the Parquets); a pull moves each download
+  to its configured local path, so a custom `REPOWER_DB_PATH` filename round-trips.
 
 ## Scraping & HTTP
 
@@ -314,11 +309,10 @@ fixed.
   sample shown". Per-snapshot fallbacks elsewhere are still silent `(open — P3)`. Never add a
   fixture that can render next to live data without a label; `useSnapshot`/`useManifest` in
   `lib/data.ts` expose `error` for exactly this.
-- **The fixtures carry a frozen "today" (2026-07-02).** Live data must never be dated/counted
-  against it: `PolicyDeepDive.dUntil` takes an anchor that flips with `pol.ready`, and
-  MarketData's peak label reads the snapshot's own datetimes (`LiveArea.dDt`). Static caption
-  strings hardcoding that date still exist in `MarketData.tsx` (~lines 927, 1047, 1110, 1227,
-  1269) `(open — P3)` — don't copy them into new live-wired UI.
+- The fixtures' frozen dates (2026-07-01/02) survive only as **loading fallbacks** for MarketData's
+  caption dates (`wsToday`, `balDate`, `icMapDate`, `icTodayDate`, `drCloseDate`); each is
+  replaced by the snapshot's own date once it loads. Don't use them as a fallback in new
+  live-wired UI.
 - ***.live.ts arrays are newest-first** (index 0 = latest, via `rev()`); `windowLive`/
   `windowSupply` flip back to oldest-first for plotting. Check direction before indexing.
 - **The tail of a supply export is padded with all-null rows.** The datetime grid runs to the
@@ -487,9 +481,10 @@ fixed.
   opened on the third meeting and the rest of the backlog then failed instantly, one
   meeting per ~15 ms, marking everything blocked. Use the read-only `circuit_cooldown()`
   for checks; `_circuit_retry_after()` consumes the one probe allowed after a cooldown.
-- `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
-  timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
-  paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.
+- `pipeline.summarize_meeting` creates a fresh NotebookLM notebook per attempt, and first
+  deletes the one a previous attempt recorded for the meeting (`stale_notebook_id`), so a
+  timeout→resume cycle doesn't leak notebooks against the shared account quota. Keep that
+  delete-before-create order.
 - **A `create_notebook` timeout does not mean no notebook was created.** NotebookLM answers
   the RPC and makes one while the client gives up waiting, so a bare `raise` leaks an
   untracked notebook — the 2026-08-16 crash took the account from 13 to 14 notebooks with
@@ -546,8 +541,10 @@ fixed.
   NotebookLM, and `run` doesn't charge those against the budget — otherwise a bad METI day
   silently halves the round. A round still stops after `_MAX_BLOCKED_ATTEMPTS` blocked meetings
   so a host-wide outage can't walk the whole backlog; that bound is logged when hit.
-- OCCTO meeting discovery is a **linear probe** (one request per meeting number, 1s delay) — a
-  committee with `max_meeting` ≈ 150 means ~150 sequential requests on a cold cache.
+- OCCTO meeting discovery reads the committee's list JSON first (one request, cacheable; see the
+  OCCTO section above). Only when that fails does it fall back to the **linear number probe**
+  (one request per meeting number, 1 s apart), which on a cold cache means ~`max_meeting`
+  sequential requests.
 - NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
   a human `notebooklm login` can refresh; `policy.yml` alerts on staleness and must never
   fabricate summaries.
@@ -637,14 +634,15 @@ fixed.
 - The `_cache_buster` args are **underscore-prefixed, so Streamlit excludes them from cache
   keys** — the inline comments claiming they key the cache are wrong. Refresh works only
   because the sidebar button calls `st.cache_data.clear()`; don't remove that explicit clear.
-- `legacy.py`'s `main()` + 4 helpers (~380 lines) and `components/product_price_chart.py` are
-  **dead code**; ~⅔ of `i18n.py`'s string table is unreferenced `(open — P3)`. Don't pattern-match
-  new work off them.
+- `legacy.py` now holds only data helpers `app_main.py` still imports (`_db_session`, `_jepx_area`,
+  `_fuels`, `_analyses`); about 18% of `i18n.py`'s string table (13 of 71 keys) is unreferenced
+  `(open — P4)`.
 - Chart components load D3 + Google Fonts from CDNs inside iframes — offline/dev-container runs
   render empty charts. D3 is pinned with an SRI hash (`components/_util.D3_SCRIPT`), so bumping
-  its version without recomputing the hash blanks every chart. Nobody has audited how
-  DB-derived strings are templated into that iframe HTML `(open — P4)` — escape anything
-  user/scraper-derived you add there.
+  its version without recomputing the hash blanks every chart. Every value templated into that
+  iframe HTML goes through `html.escape` (titles) or `js_json` (payloads), and
+  `tests/test_components.py` feeds all four charts hostile input — route anything new the same
+  way.
 - `capacity_data.py` is hand-curated — new OCCTO auction results require a code edit; tests
   check shape, not freshness.
 
@@ -658,11 +656,9 @@ fixed.
   path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
   trace themselves; keep it that way in any new check. A docs leak happened once before the
   gates covered docs (2026-07-03).
-- `tests/test_policy.py:480` hardcodes the committee count (`== 14`) — every registry change
-  breaks it with a bare count mismatch `(open — P3)`.
-- There is **no conftest.py**; DB-setup boilerplate is duplicated ~30× across the policy test
-  files `(open — P3)`. Tests are hermetic by monkeypatching the lowest-level I/O boundary
-  (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- There is **no conftest.py**; the two-line `db = str(tmp_path / …)` + `store.sync_committees`
+  setup repeats ~58× across six test files. Tests are hermetic by monkeypatching the lowest-level
+  I/O boundary (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
 - **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
   wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
   I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both
@@ -671,16 +667,16 @@ fixed.
   banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
-- `ruff` runs near-default rules (E4/E7/E9 + F only) and there is no type checker `(open — P2)`
-  — a clean lint proves little.
+- `ruff` runs E, F, I, B and UP (`pyproject.toml`). mypy is configured but not in CI and far from
+  clean `(open — P2)`, so a green CI says nothing about types.
 - Local dev: use `.venv` (Python 3.12) — the PATH `python` is 3.9 without deps.
 
 ## Docker & deployment
 
-- **`docker compose build` has been broken since day one**: the root `Dockerfile` COPYs an
-  `app.py` that only exists once `sync-space.yml` assembles its deploy dir (where `space/app.py`
-  lands at the root) `(open — P3)`. The Space deploy works; local compose does not. Also: no
-  `USER` (runs as root) and the layer order re-installs deps on every `src/` change.
+- **The Dockerfile serves two build contexts.** The final `space` stage COPYs an `app.py` that
+  exists only in the deploy dir `sync-space.yml` assembles, so local builds must stop at
+  `--target base` (`docker-compose.yml` does). Dependencies install before `src/` is copied, and
+  the image runs as the non-root `repower` user; keep both.
 - `sync-space.yml` mirrors its deploy dir onto the Space (`delete_patterns=["*"]`): any file on
   the Space that the deploy dir doesn't contain is deleted on the next sync (`.gitattributes`
   excepted). Add Space-only files to `space/`, never through the Hub UI.
