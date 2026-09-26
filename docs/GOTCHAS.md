@@ -710,3 +710,11 @@ fixed.
   run — CPython 3.11 on x86-64 Linux — so regenerate it with the command in its header, never by
   hand. `pyproject.toml` keeps ranges; the lock picks versions. Floating installs are how
   SQLAlchemy 2.1 reached CI and the crons untested. Dependabot bumps the pins weekly.
+- **Dependabot bumps one pin at a time without re-resolving.** A major that another package caps
+  (streamlit's `websockets<17`, notebooklm-py's `filelock<4`) just makes the lock
+  unsatisfiable, so close it and add a Dependabot `ignore` rule naming the cap. CI installs only
+  `[dev]`, so its "Constraints resolve for every extra" step dry-runs the lock against all
+  extras; without that step, the filelock bump passed CI and would have broken the policy
+  cron's install. When pip's `ResolutionImpossible` lists requirements that don't actually clash
+  (`yfinance` needs `platformdirs>=2.0.0`, the lock pins `==4.11.15`) and the pinned release is
+  only hours old, the runner saw a stale PyPI index: re-run the job before debugging.

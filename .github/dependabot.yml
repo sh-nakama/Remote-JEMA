@@ -8,6 +8,15 @@ updates:
     groups:
       minor-and-patch:
         update-types: [minor, patch]
+    # Dependabot bumps one pin without re-resolving, so a major that a dependency caps just
+    # fails to install. Drop each rule once the cap is lifted.
+    ignore:
+      # streamlit 1.64 requires websockets<17.
+      - dependency-name: websockets
+        update-types: ["version-update:semver-major"]
+      # notebooklm-py 0.8.3 requires filelock<4.
+      - dependency-name: filelock
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: npm
     directory: /web

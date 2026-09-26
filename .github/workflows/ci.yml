@@ -32,6 +32,13 @@ jobs:
       - name: Install package + dev tools
         run: pip install -e ".[dev]" -c constraints.txt
 
+      # Only [dev] is installed above, but the policy workflows install the other extras with the
+      # same pins, so a bump that conflicts with one of them would pass CI and then break the cron.
+      - name: Constraints resolve for every extra
+        run: |
+          extras=$(python -c "import tomllib; print(','.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['optional-dependencies']))")
+          pip install --dry-run --quiet --ignore-installed -e ".[$extras]" -c constraints.txt
+
       - name: Ruff (lint)
         run: ruff check src tests
 
