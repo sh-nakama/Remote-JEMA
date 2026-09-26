@@ -106,7 +106,7 @@ def upsert_news(items: list[dict], db_path: str | None = None) -> int:
             stmt = sqlite_upsert(NewsItem).values(**item)
             stmt = stmt.on_conflict_do_nothing(index_elements=["url_hash"])
             result = session.execute(stmt)
-            if result.rowcount > 0:
+            if getattr(result, "rowcount", 0) > 0:
                 inserted += 1
         session.commit()
     finally:

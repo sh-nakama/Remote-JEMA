@@ -22,6 +22,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
@@ -252,10 +253,13 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
 
     selected = _select_materials(materials)
-    meeting_row = _meeting_id(committee.key, meeting_num, db_path)
-    if meeting_row is None:
+    found_row = _meeting_id(committee.key, meeting_num, db_path)
+    if found_row is None:
         record_meeting(committee.key, meeting_num, None, db_path=db_path)
-        meeting_row = _meeting_id(committee.key, meeting_num, db_path)
+        found_row = _meeting_id(committee.key, meeting_num, db_path)
+    if found_row is None:
+        raise RuntimeError(f"{committee.key} #{meeting_num}: meeting row missing after record_meeting")
+    meeting_row: int = found_row
     if not selected:
         _fail_meeting(
             meeting_row, db_path, flag="no_sources",
@@ -653,6 +657,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     # When no committees are named ("all"), restrict to tracked (enabled) ones so
     # untracking a committee removes it from the daily run. Explicit --committee
     # keys are an intentional override and run regardless of the enabled flag.
+    work: list[dict[str, Any]]
     if meeting_num is not None:
         if not keys or len(keys) != 1:
             raise ValueError("meeting_num needs exactly one committee key")

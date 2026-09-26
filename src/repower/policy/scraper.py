@@ -27,7 +27,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 import httpx
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 from repower.policy.committees import EGC_ACTIVITY_BASE, Committee
 from repower.scrapers.http_cache import classify, conditional_get, pace_host
@@ -57,6 +57,12 @@ def _is_web_url(url: str) -> bool:
     # urljoin passes javascript:/data: hrefs through unchanged, and these links end up in window.open.
     p = urlparse(url)
     return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def href_of(a: Tag) -> str:
+    """An anchor's ``href`` as text (bs4 types attributes as possibly multi-valued)."""
+    v = a.get("href")
+    return v if isinstance(v, str) else " ".join(v or [])
 
 
 # ── Result types ─────────────────────────────────────────────────────────────
@@ -174,7 +180,8 @@ def parse_meti_meeting_dates(content: bytes | str, index_url: str) -> dict[int, 
     soup = _soup(content)
     out: dict[int, datetime.date] = {}
     for a in soup.find_all("a", href=True):
-        full = a["href"] if a["href"].startswith("http") else urljoin(index_url, a["href"])
+        href = href_of(a)
+        full = href if href.startswith("http") else urljoin(index_url, href)
         if "/shingikai/" not in urlparse(full).path:
             continue  # skip non-committee links (e.g. footer /main/31.html)
         num = meeting_num_from_url(full)
@@ -287,7 +294,7 @@ def parse_pdf_links(content: bytes | str, base_url: str) -> list[dict]:
     out: list[dict] = []
     seen: set[str] = set()
     for a in soup.find_all("a", href=True):
-        href = a["href"]
+        href = href_of(a)
         if not href.lower().split("?")[0].endswith(".pdf"):
             continue
         full = href if href.startswith("http") else urljoin(base_url, href)
@@ -311,7 +318,7 @@ def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, s
     soup = _soup(content)
     out: dict[int, str] = {}
     for a in soup.find_all("a", href=True):
-        href = a["href"]
+        href = href_of(a)
         if not re.search(r"(^|/)\d{1,3}\.html(?:[?#].*)?$", href, re.IGNORECASE):
             continue
         full = href if href.startswith("http") else urljoin(index_url, href)
@@ -363,7 +370,7 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
                 "haifu_url": None,
             }
             for a in row.find_all("a", href=True):
-                href = a["href"]
+                href = href_of(a)
                 full = urljoin(page_url, href)
                 if not _is_web_url(full):
                     continue
@@ -485,12 +492,12 @@ def _exists(url: str) -> bool | None:
         from curl_cffi import requests as cr  # type: ignore
 
         pace_host(url)
-        r = cr.get(url, impersonate="chrome", timeout=REQUEST_TIMEOUT, headers=headers)
-        if r.status_code == 200:
+        cr_r = cr.get(url, impersonate="chrome", timeout=REQUEST_TIMEOUT, headers=headers)
+        if cr_r.status_code == 200:
             return True
-        if r.status_code == 404:
+        if cr_r.status_code == 404:
             return False
-        logger.debug("curl_cffi probe inconclusive %s: %s", url, r.status_code)
+        logger.debug("curl_cffi probe inconclusive %s: %s", url, cr_r.status_code)
     except Exception as e:  # noqa: BLE001
         logger.debug("curl_cffi probe failed %s: %s", url, e)
     try:

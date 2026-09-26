@@ -30,6 +30,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from repower.policy.schedule import is_energy_relevant
+from repower.policy.scraper import href_of
 from repower.scrapers.http_cache import conditional_get
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ def parse_occto_committees(content: bytes | str, base_url: str = OCCTO_INDEX_URL
     out: list[dict] = []
     seen: set[str] = set()
     for a in _soup(content).find_all("a", href=True):
-        full = urljoin(base_url, a["href"])
+        full = urljoin(base_url, href_of(a))
         p = urlparse(full)
         if "occto.or.jp" not in p.netloc:
             continue
@@ -82,7 +83,7 @@ def parse_egc_committees(content: bytes | str, base_url: str = EGC_INDEX_URL) ->
     out: list[dict] = []
     seen: set[str] = set()
     for a in _soup(content).find_all("a", href=True):
-        full = urljoin(base_url, a["href"])
+        full = urljoin(base_url, href_of(a))
         p = urlparse(full)
         if "egc.meti.go.jp" not in p.netloc:
             continue
@@ -111,7 +112,7 @@ def parse_meti_enecho_committees(content: bytes | str, base_url: str = METI_INDE
     out: list[dict] = []
     seen: set[str] = set()
     for a in _soup(content).find_all("a", href=True):
-        full = urljoin(base_url, a["href"])
+        full = urljoin(base_url, href_of(a))
         p = urlparse(full)
         if p.netloc and p.netloc != "www.meti.go.jp":
             continue

@@ -35,7 +35,7 @@ jobs:
       - name: Ruff (lint)
         run: ruff check src tests
 
-      - name: Mypy (type-clean modules; see [tool.mypy] exclude)
+      - name: Mypy
         run: mypy
 
       - name: Pytest

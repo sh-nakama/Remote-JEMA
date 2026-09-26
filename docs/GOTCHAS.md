@@ -671,10 +671,10 @@ fixed.
   banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
-- `ruff` runs E, F, I, B and UP (`pyproject.toml`). CI runs `mypy` over every module except the
-  `[tool.mypy] exclude` list (10 not yet type-clean, `(open — P2)`; mostly BeautifulSoup
-  typing). Take a module off that list once it passes. mypy checks 3.12 syntax because numpy's
-  stubs need it; the runtime floor is 3.11.
+- `ruff` runs E, F, I, B and UP (`pyproject.toml`), and CI runs `mypy` over every module in
+  `src/repower`; keep both clean. mypy checks 3.12 syntax because numpy's stubs need it; the
+  runtime floor is 3.11. Read a BeautifulSoup link with `scraper.href_of(a)`, not `a["href"]`,
+  which bs4 types as possibly multi-valued.
 - **Declare model columns as `Mapped[...] = mapped_column(...)`, never bare `Column()`.**
   SQLAlchemy 2.1 types a bare `Column` comparison as `bool`, which fails mypy wherever it is
   used. Mind nullability: `mapped_column` makes a non-Optional annotation `NOT NULL`, while

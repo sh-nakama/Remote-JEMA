@@ -104,6 +104,8 @@ class BaseAreaScraper:
             if status == "not_modified":  # 304 → already in DB, skip the month
                 logger.info("[%s] %s: 304 unchanged", self.AREA, url)
                 return _UNCHANGED
+            if content is None:  # conditional_get pairs "ok" with a body
+                continue
             try:
                 df = self._bytes_to_df(content)
                 if df.empty:

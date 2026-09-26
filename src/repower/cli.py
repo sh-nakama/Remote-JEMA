@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import date
+from typing import Any
 
 import typer
 
@@ -1125,7 +1126,8 @@ def policy_crosscheck(
     # Committee names are Japanese; a piped/redirected Windows console defaults to a
     # non-UTF-8 encoding and would crash on echo. Force UTF-8 (no-op on the Linux CI).
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        out: Any = sys.stdout
+        out.reconfigure(encoding="utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         pass
 

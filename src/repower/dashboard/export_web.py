@@ -31,7 +31,7 @@ logging.getLogger("streamlit").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
 
 import pandas as pd  # noqa: E402
-from sqlalchemy import func, select, text  # noqa: E402
+from sqlalchemy import RowMapping, func, select, text  # noqa: E402
 
 from repower.dashboard import read  # noqa: E402
 from repower.db import (  # noqa: E402
@@ -891,7 +891,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
 
     committees_data = build_committees_payload(committees, meetings, mat_counts)
 
-    def build_meeting(m: dict) -> dict:
+    def build_meeting(m: RowMapping) -> dict:
         c = com_by_key.get(m["committee_key"])
         org = (c["source"] if c else None) or "METI"
         name_en = (c["name_en"] if c else None) or _humanize_key(m["committee_key"])
