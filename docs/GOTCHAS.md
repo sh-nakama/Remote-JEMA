@@ -680,6 +680,10 @@ fixed.
 - `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
   `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
   a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
-- Actions are pinned to mutable tags (`@v5`), not SHAs, in secret-bearing workflows
-  `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but `>=0.23` in
-  `pyproject.toml` — version skew between the two install paths is unchecked `(open — P4)`.
+- Actions are pinned to commit SHAs (`@<sha> # vN`); Dependabot's `github-actions` updates keep
+  the SHA and comment in step, so edit pins through it or by hand in that same format. Every
+  workflow declares `permissions:` (`contents: read`, plus Pages for `web-deploy.yml`) — give a
+  new workflow the same. There is still no Python lockfile, so CI, Docker and the Space install
+  floating versions `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but
+  `>=0.23` in `pyproject.toml` — version skew between the two install paths is unchecked
+  `(open — P4)`.
