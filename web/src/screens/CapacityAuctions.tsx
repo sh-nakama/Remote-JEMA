@@ -1,6 +1,6 @@
 // Ported from screens/capacity-auctions.html — 4th JEMA screen (Capacity & Auctions).
 import { useState } from 'react'
-import { s, Hoverable, RawSvg } from '../lib/style'
+import { s, Hoverable, RawSvg, press } from '../lib/style'
 import { useApp } from '../lib/app'
 import { FreshnessChip, fmtStamp } from '../lib/freshness'
 import { useManifest } from '../lib/data'
@@ -459,7 +459,7 @@ export function CapacityAuctionsScreen() {
         {/* Top bar */}
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Capacity &amp; Auctions <span style={s('color:var(--fnt3)')}>·</span> 容量市場・オークション</div>
-          <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
+          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
             <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
@@ -480,8 +480,8 @@ export function CapacityAuctionsScreen() {
             )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={segBase(L === 'ja')} onClick={() => setLang('ja')}>日本語</span>
-            <span style={segBase(L === 'en')} onClick={() => setLang('en')}>English</span>
+            <span style={segBase(L === 'ja')} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
+            <span style={segBase(L === 'en')} {...press(() => setLang('en'), L === 'en')}>English</span>
           </div>
           <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
             <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
@@ -532,8 +532,8 @@ export function CapacityAuctionsScreen() {
             {/* Sub-view switcher */}
             <div style={s('display:flex;align-items:center;gap:14px;flex-wrap:wrap')}>
               <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px')}>
-                <span style={segBase(view === 'main')} onClick={() => setView('main')}>Main Auction メインオークション</span>
-                <span style={segBase(view === 'ltda')} onClick={() => setView('ltda')}>LTDA 長期脱炭素</span>
+                <span style={segBase(view === 'main')} {...press(() => setView('main'), view === 'main')}>Main Auction メインオークション</span>
+                <span style={segBase(view === 'ltda')} {...press(() => setView('ltda'), view === 'ltda')}>LTDA 長期脱炭素</span>
               </div>
               <span style={s('font-size:11.5px;color:var(--mut)')}>Event-driven OCCTO publications — not a daily feed · 公表ベース（日次更新ではありません）</span>
             </div>

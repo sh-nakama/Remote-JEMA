@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react'
-import { s, Hoverable, RawSvg } from './style'
+import { s, Hoverable, RawSvg, press } from './style'
 
 /**
  * Shared notifications popover (the top-bar bell).
@@ -158,7 +158,7 @@ export function NotificationsPopover({
           {ja ? 'すべて既読に' : 'Mark all read'}
         </Hoverable>
         {action && (
-          <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} onClick={action.onClick}>{action.label}</span>
+          <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} {...press(action.onClick)}>{action.label}</span>
         )}
       </div>
     </div>

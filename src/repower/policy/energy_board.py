@@ -33,7 +33,7 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from repower.policy.scraper import Material, _materials_from_links, parse_jp_date
+from repower.policy.scraper import Material, _materials_from_links, href_of, parse_jp_date
 from repower.scrapers.http_cache import conditional_get
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def parse_feed(content: bytes | str, base_url: str = BASE_URL) -> list[BoardEntr
         a = cell.select_one("div.meeting-title a[href]")
         if not a:
             continue
-        url = urljoin(base_url, a["href"])
+        url = urljoin(base_url, href_of(a))
         title = a.get_text(" ", strip=True)
         council = ""
         date = None
@@ -100,7 +100,7 @@ def parse_feed(content: bytes | str, base_url: str = BASE_URL) -> list[BoardEntr
                 date = parse_jp_date(dc.get_text(" ", strip=True))
         pdfs: list[dict] = []
         for p in cell.select("ol.doc-list a[href]"):
-            href = p["href"]
+            href = href_of(p)
             if href.lower().split("?")[0].endswith(".pdf"):
                 pdfs.append({"url": urljoin(base_url, href), "text": p.get_text(" ", strip=True)})
         out.append(

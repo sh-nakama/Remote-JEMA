@@ -347,10 +347,9 @@ def test_blocked_download_does_not_burn_the_retry_budget(monkeypatch, tmp_path):
     assert any(m["meeting_num"] == 7 for m in store.pending_meetings("doji_shijo", db_path=db))
 
 
-def test_mixed_failures_count_as_blocked(monkeypatch, tmp_path):
+def test_mixed_failures_count_as_blocked(monkeypatch, policy_db):
     """One transient kind is enough to make "these documents are gone" wrong."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key, num = "doji_shijo", 8
     store.record_meeting(
         key, num,
@@ -664,11 +663,10 @@ def test_detect_unchanged_short_circuits(monkeypatch, tmp_path):
 
 
 # ── Material backfill (self-heal meetings detected during a source outage) ────
-def test_meetings_missing_materials_lists_hidden_meetings(tmp_path):
+def test_meetings_missing_materials_lists_hidden_meetings(policy_db):
     """meetings_missing_materials returns detected meetings with no materials
     (newest first), excluding done meetings and meetings that already have docs."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"
     store.record_meeting(key, 1, None, db_path=db)  # material-less
     store.record_meeting(key, 2, None, db_path=db)  # material-less
@@ -685,11 +683,10 @@ def test_meetings_missing_materials_lists_hidden_meetings(tmp_path):
     assert store.meetings_missing_materials(key, db_path=db) == [2, 1]
 
 
-def test_backfill_materials_populates_detected_meetings(monkeypatch, tmp_path):
+def test_backfill_materials_populates_detected_meetings(monkeypatch, policy_db):
     """backfill_materials fetches materials for material-less detected meetings so
     they stop being hidden — the 'tracked committee shows no meetings' fix."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"
     store.record_meeting(key, 1, None, db_path=db)
     store.record_meeting(key, 2, None, db_path=db)
@@ -713,11 +710,10 @@ def test_backfill_materials_populates_detected_meetings(monkeypatch, tmp_path):
     assert len(store.meeting_materials(key, 2, db_path=db)) == 1
 
 
-def test_backfill_materials_respects_per_committee_limit(monkeypatch, tmp_path):
+def test_backfill_materials_respects_per_committee_limit(monkeypatch, policy_db):
     """The catch-up path caps work per committee so a full self-heal spreads across
     runs instead of hammering the source in one pass."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"
     for n in range(1, 6):
         store.record_meeting(key, n, None, db_path=db)
@@ -737,12 +733,11 @@ def test_backfill_materials_respects_per_committee_limit(monkeypatch, tmp_path):
     assert store.meetings_missing_materials(key, db_path=db) == [3, 2, 1]
 
 
-def test_backfill_materials_meti_fetches_index_once(monkeypatch, tmp_path):
+def test_backfill_materials_meti_fetches_index_once(monkeypatch, policy_db):
     """A METI committee's index is fetched exactly once per run and each meeting's
     subpage URL is passed through, instead of re-fetching the (WAF-challenged)
     index once per meeting."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"  # METI
     for n in (1, 2, 3):
         store.record_meeting(key, n, None, db_path=db)
@@ -770,12 +765,11 @@ def test_backfill_materials_meti_fetches_index_once(monkeypatch, tmp_path):
     assert next(r for r in results if r["key"] == key)["materialised"] == 3
 
 
-def test_backfill_materials_stops_when_the_host_budget_is_spent(monkeypatch, tmp_path):
+def test_backfill_materials_stops_when_the_host_budget_is_spent(monkeypatch, policy_db):
     """meti.go.jp serves ~5 requests then blocks this IP outright for minutes, so a
     sweep stops short of the cliff and leaves the rest for the next run rather than
     collecting blocked meetings and teaching the edge to escalate sooner."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"  # METI
     for n in range(1, 6):
         store.record_meeting(key, n, None, db_path=db)
@@ -801,11 +795,10 @@ def test_backfill_materials_stops_when_the_host_budget_is_spent(monkeypatch, tmp
     assert store.meetings_missing_materials(key, db_path=db) == [3, 2, 1]
 
 
-def test_detect_defers_committees_once_the_host_budget_is_spent(monkeypatch, tmp_path):
+def test_detect_defers_committees_once_the_host_budget_is_spent(monkeypatch, policy_db):
     """A deferred committee is never fetched, and is not recorded as a failure —
     it simply wasn't looked at this pass."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     discovered: list[str] = []
 
     def fake_discover(c, **kw):
@@ -824,11 +817,10 @@ def test_detect_defers_committees_once_the_host_budget_is_spent(monkeypatch, tmp
     assert all(r["error_kind"] is None for r in deferred)
 
 
-def test_backfill_materials_defers_when_index_unreachable(monkeypatch, tmp_path):
+def test_backfill_materials_defers_when_index_unreachable(monkeypatch, policy_db):
     """If a METI committee's index can't be fetched (e.g. a persistent WAF 202),
     backfill defers the whole committee rather than hammering it per meeting."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"  # METI
     store.record_meeting(key, 1, None, db_path=db)
     store.record_meeting(key, 2, None, db_path=db)
@@ -853,13 +845,12 @@ def test_backfill_materials_defers_when_index_unreachable(monkeypatch, tmp_path)
 
 
 # ── Meeting dates recorded during detection ──────────────────────────────────
-def test_detect_records_meeting_dates_from_the_index(monkeypatch, tmp_path):
+def test_detect_records_meeting_dates_from_the_index(monkeypatch, policy_db):
     """METI/EGC indexes print the meeting date next to the meeting link, so
     detection must persist it from the body it already parsed — otherwise the date
     depends on a second full crawl that routinely doesn't finish, and the Deep
     Dive falls back to showing the detection date instead of the date held."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"  # METI
     store.record_meeting(key, 1, None, db_path=db)  # known, and dateless
 
@@ -878,9 +869,8 @@ def test_detect_records_meeting_dates_from_the_index(monkeypatch, tmp_path):
     assert store.meetings_missing_date(key, db_path=db) == []
 
 
-def test_detect_dry_run_does_not_write_dates(monkeypatch, tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_detect_dry_run_does_not_write_dates(monkeypatch, policy_db):
+    db = policy_db
     key = "doji_shijo"
     store.record_meeting(key, 1, None, db_path=db)
 
@@ -1045,9 +1035,8 @@ def _keys_in_fetch_order(db):
     return [c.key for c in _select_committees(None, db)]
 
 
-def test_sweep_puts_the_least_recently_succeeded_first(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_sweep_puts_the_least_recently_succeeded_first(policy_db):
+    db = policy_db
     order = _keys_in_fetch_order(db)
     first, second, third = order[0], order[1], order[2]
 
@@ -1065,7 +1054,7 @@ def test_sweep_puts_the_least_recently_succeeded_first(tmp_path):
     assert sorted(rotated) == sorted(order)
 
 
-def test_rotation_actually_rotates_when_nothing_succeeds(tmp_path):
+def test_rotation_actually_rotates_when_nothing_succeeds(policy_db):
     """The property that makes this a rotation rather than a reshuffle.
 
     A committee that can never succeed keeps `last_ok_at` NULL forever. If only
@@ -1073,8 +1062,7 @@ def test_rotation_actually_rotates_when_nothing_succeeds(tmp_path):
     starvation onto a different victim, so the pass would still only ever touch the
     same committees. Being *attempted* has to cost it its place.
     """
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     order = _keys_in_fetch_order(db)
     budget = order[:3]
 
@@ -1090,7 +1078,7 @@ def test_rotation_actually_rotates_when_nothing_succeeds(tmp_path):
     assert nxt[:3] == order[3:6], "the next-starved committees should be up"
 
 
-def test_rotation_covers_every_committee_over_successive_passes(tmp_path):
+def test_rotation_covers_every_committee_over_successive_passes(policy_db):
     """End-to-end fairness under production semantics.
 
     Mirrors a real sweep: the first few committees per pass get through, then the
@@ -1099,8 +1087,7 @@ def test_rotation_covers_every_committee_over_successive_passes(tmp_path):
     "was attempted" cannot be inferred from having a timestamp, so the rotation has
     to survive every row moving on every pass.
     """
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     order = _keys_in_fetch_order(db)
     total = len(order)
     budget = 3
@@ -1123,11 +1110,10 @@ def test_rotation_covers_every_committee_over_successive_passes(tmp_path):
     )
 
 
-def test_registry_order_is_unchanged_for_non_sweep_callers(tmp_path):
+def test_registry_order_is_unchanged_for_non_sweep_callers(policy_db):
     """Rotation is opt-in: listings and the UI must stay in stable registry order,
     or committees would appear to jump around between page loads."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     before = [c.key for c in store.tracked_committees(db_path=db, sync=False,
                                                       include_disabled=True)]
     store.set_committee_fetch_result(before[0], "ok", db_path=db)
@@ -1137,10 +1123,9 @@ def test_registry_order_is_unchanged_for_non_sweep_callers(tmp_path):
     assert after == before
 
 
-def test_explicit_keys_keep_the_callers_order(tmp_path):
+def test_explicit_keys_keep_the_callers_order(policy_db):
     """`--committee a --committee b` is user intent, not a sweep to be reordered."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     keys = _keys_in_fetch_order(db)[:3]
     store.set_committee_fetch_result(keys[0], "ok", db_path=db)
 
@@ -1237,9 +1222,8 @@ def test_regenerate_running_doc_for_discovered_committee(monkeypatch, tmp_path):
     assert "第3回" in text
 
 
-def test_pending_retries_errors_under_cap(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_pending_retries_errors_under_cap(policy_db):
+    db = policy_db
     store.record_meeting("santeii", 5, None, db_path=db)
     mid = store.pending_meetings("santeii", db_path=db)[0]["id"]
 
@@ -1623,10 +1607,9 @@ def test_all_committees_have_unique_keys_and_valid_source():
     assert committee_by_key("saiene_shuryoku").is_meti
 
 
-def test_pending_meetings_ordered_by_priority_then_newest(tmp_path):
+def test_pending_meetings_ordered_by_priority_then_newest(policy_db):
     """A quota-bounded run should drain high-priority committees first, newest-first."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     # santeii is a default-priority committee; system_review is priority 1.
     store.record_meeting("santeii", 5, None, db_path=db)
     store.record_meeting("system_review", 108, None, db_path=db)
@@ -1637,9 +1620,8 @@ def test_pending_meetings_ordered_by_priority_then_newest(tmp_path):
 
 
 # ── DB-backed registry: enable/disable, add, resolve, request queue ──────────
-def test_sync_seeds_priority_and_enabled(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_sync_seeds_priority_and_enabled(policy_db):
+    db = policy_db
     rows = {c["committee_key"]: c for c in store.list_committees(db_path=db)}
     # Code priority is seeded into the DB and everything starts enabled.
     assert rows["system_review"]["priority"] == 1
@@ -1648,10 +1630,9 @@ def test_sync_seeds_priority_and_enabled(tmp_path):
     assert not any(c["user_added"] for c in rows.values())
 
 
-def test_sync_preserves_ui_edits(tmp_path):
+def test_sync_preserves_ui_edits(policy_db):
     """A committee disabled / re-prioritised in the UI stays that way across syncs."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     store.set_committee_enabled("santeii", False, db_path=db)
     store.set_committee_priority("santeii", 7, db_path=db)
 
@@ -1661,12 +1642,11 @@ def test_sync_preserves_ui_edits(tmp_path):
     assert row["priority"] == 7
 
 
-def test_disabled_committee_detected_but_not_summarised(monkeypatch, tmp_path):
+def test_disabled_committee_detected_but_not_summarised(monkeypatch, policy_db):
     """Detection is decoupled from tracking: detect() scans *every* committee — so
     discovered/untracked ones get their meetings recorded as pending — while the
     ``enabled`` flag only gates summarisation (the daily worklist)."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     store.set_committee_enabled("santeii", False, db_path=db)
 
     tracked_keys = {c.key for c in store.tracked_committees(db_path=db)}
@@ -1694,9 +1674,8 @@ def test_disabled_committee_detected_but_not_summarised(monkeypatch, tmp_path):
     assert "santeii" in q_all
 
 
-def test_add_user_committee_tracked_and_resolved(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_add_user_committee_tracked_and_resolved(policy_db):
+    db = policy_db
     created = store.add_committee(
         key="new_ccus", name_ja="CCS事業実施小委員会", name_en="CCS Business Subcommittee",
         url="https://www.meti.go.jp/shingikai/enecho/shigen_nenryo/ccs_jigyo/",
@@ -1713,9 +1692,8 @@ def test_add_user_committee_tracked_and_resolved(tmp_path):
     assert store.delete_committee("santeii", db_path=db) is False  # code committee → refused
 
 
-def test_resolve_committee_roundtrips_occto_and_egc_params(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_resolve_committee_roundtrips_occto_and_egc_params(policy_db):
+    db = policy_db
     # OCCTO params (max_meeting/prefix) survive the DB round-trip.
     occto = store.resolve_committee("chousei_jukyu", db_path=db)
     assert occto.is_occto and occto.max_meeting == 150 and occto.prefix == "chousei_jukyu"
@@ -1725,9 +1703,8 @@ def test_resolve_committee_roundtrips_occto_and_egc_params(tmp_path):
     assert egc.log_pages and egc.log_pages[0] == "index_systemlog9.html"
 
 
-def test_generation_request_orders_first(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_generation_request_orders_first(policy_db):
+    db = policy_db
     # santeii is default priority; system_review is priority 1.
     store.record_meeting("santeii", 5, None, db_path=db)
     store.record_meeting("system_review", 114, None, db_path=db)
@@ -1832,13 +1809,12 @@ def test_archived_committees_are_not_reported_as_failing(monkeypatch, capsys):
     assert "1/1 committee(s) need attention" in out
 
 
-def test_partial_download_is_refused_rather_than_summarised(monkeypatch, tmp_path):
+def test_partial_download_is_refused_rather_than_summarised(monkeypatch, policy_db):
     """A briefing written from a subset of a meeting's papers reads exactly like a
     complete one, so a shortfall must abort the meeting. The real failure: 11 of 12
     documents blocked, the one that landed was the *list* of documents, and
     NotebookLM summarised a table of contents."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key, num = "doji_shijo", 9
     # Minutes sort first, so the order the batch is walked in is deterministic.
     store.record_meeting(
@@ -1875,11 +1851,10 @@ def test_partial_download_is_refused_rather_than_summarised(monkeypatch, tmp_pat
     assert all(m["nblm_source_id"] is None for m in mats.values())
 
 
-def test_missing_document_burns_a_retry_even_when_others_download(monkeypatch, tmp_path):
+def test_missing_document_burns_a_retry_even_when_others_download(monkeypatch, policy_db):
     """A permanently-gone document is the meeting's own problem, so the strict rule
     must still let it leave the worklist rather than retry forever."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key, num = "doji_shijo", 10
     store.record_meeting(
         key, num,
@@ -1898,11 +1873,10 @@ def test_missing_document_burns_a_retry_even_when_others_download(monkeypatch, t
     assert not any(m["meeting_num"] == num for m in store.pending_meetings(key, db_path=db))
 
 
-def test_run_skips_committees_whose_host_is_cooling_down(monkeypatch, tmp_path):
+def test_run_skips_committees_whose_host_is_cooling_down(monkeypatch, policy_db):
     """One hostile host must not consume the round: its committees are skipped
     without a request, and committees elsewhere still get their turn."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     for key, num in (("doji_shijo", 11), ("chousei_jukyu", 12)):
         store.record_meeting(
             key, num,
@@ -1929,11 +1903,10 @@ def test_run_skips_committees_whose_host_is_cooling_down(monkeypatch, tmp_path):
     assert any("meti.go.jp" in h for h in summary["skipped_hosts"])
 
 
-def test_meeting_num_targets_one_meeting_and_re_runs_a_done_one(monkeypatch, tmp_path):
+def test_meeting_num_targets_one_meeting_and_re_runs_a_done_one(monkeypatch, policy_db):
     """"Run now" on an already-summarised meeting must re-summarise exactly it, and
     let the corrected briefing back into the committee synthesis."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = "doji_shijo"
     for num in (5, 6):
         store.record_meeting(

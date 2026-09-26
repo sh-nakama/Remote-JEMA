@@ -9,7 +9,7 @@ dependencies = [
     "sqlalchemy>=2.0",
     "feedparser>=6.0",
     "yfinance>=1",
-    "typer[all]>=0.12",
+    "typer>=0.12",
     "streamlit>=1.36",
     "plotly>=6",
     "python-dotenv>=1.0",
@@ -45,14 +45,6 @@ where = ["src"]
 python_version = "3.12"
 ignore_missing_imports = true
 files = ["src/repower"]
-# Not yet type-clean, so CI skips them; take a module off this list once `mypy` passes on it.
-exclude = [
-    "src/repower/cli\\.py",
-    "src/repower/dashboard/export_web\\.py",
-    "src/repower/policy/(catalog|discover|energy_board|pipeline|scraper)\\.py",
-    "src/repower/scrapers/(area_base|news_rss)\\.py",
-    "src/repower/web_api\\.py",
-]
 
 [tool.ruff]
 target-version = "py311"

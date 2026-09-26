@@ -1,6 +1,6 @@
 // Ported from screens/policy-deep-dive.html
 import { useEffect, useState, type ReactNode } from 'react'
-import { s, Hoverable, RawSvg, type CSS } from '../lib/style'
+import { s, Hoverable, RawSvg, type CSS, activateOnKey, press } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
 import { FreshnessChip, fmtStamp, policyCounts } from '../lib/freshness'
@@ -722,7 +722,7 @@ export function PolicyDeepDiveScreen() {
   // One committee row in the Explorer — shared by the org/recent groups and the
   // Archived section (which renders the same rows with their archive box ticked).
   const renderComRow = (c: ReturnType<typeof mapCom>) => (
-    <div key={c.key} style={c.s} onClick={c.click}>
+    <div key={c.key} style={c.s} {...press(c.click)}>
       <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
         {c.isRecent && (
           <span title={L === 'ja' ? '最近更新（過去7日以内に要約・更新）' : 'Recently updated (summarised/updated in the last 7 days)'} style={s('width:7px;height:7px;border-radius:999px;background:var(--ac);flex-shrink:0;box-shadow:0 0 0 3px var(--acTint)')}></span>
@@ -732,7 +732,7 @@ export function PolicyDeepDiveScreen() {
       <div style={s('font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{c.n2} · {c.tier}</div>
       <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:3px')}>
         <span style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
-          <span style={c.folS} onClick={(e) => { e.stopPropagation(); c.folClick() }} title={c.following
+          <span style={c.folS} {...press((e) => { e.stopPropagation(); c.folClick() }, c.following)} title={c.following
   ? (L === 'ja' ? 'クリックでフォロー解除（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to unfollow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')
   : (L === 'ja' ? 'クリックでフォロー（フォローはこのブラウザの表示フィルタ。取得・要約の追跡は「管理」で設定）' : 'Click to follow — Follow is a personal view filter in this browser; scraping/summarisation tracking is set in Manage')}>{c.folTxt}</span>
           {!c.tracked && (
@@ -747,6 +747,8 @@ export function PolicyDeepDiveScreen() {
           <span
             role="checkbox"
             aria-checked={c.archived}
+            tabIndex={0}
+            onKeyDown={activateOnKey}
             onClick={(e) => { e.stopPropagation(); c.archClick() }}
             title={c.archived
               ? (L === 'ja' ? 'アーカイブ解除 — 一覧に戻す' : 'Restore — bring back into the committees list')
@@ -803,7 +805,7 @@ export function PolicyDeepDiveScreen() {
         {/* Top bar */}
         <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
           <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Policy Deep Dive <span style={s('color:var(--fnt3)')}>·</span> 政策ディープダイブ</div>
-          <div onClick={() => openOverlay('search')} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
+          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
             <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
             <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
             <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
@@ -827,8 +829,8 @@ export function PolicyDeepDiveScreen() {
             )}
           </Hoverable>
           <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={langJaS} onClick={() => setLang('ja')}>日本語</span>
-            <span style={langEnS} onClick={() => setLang('en')}>English</span>
+            <span style={langJaS} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
+            <span style={langEnS} {...press(() => setLang('en'), L === 'en')}>English</span>
           </div>
           <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
             <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
@@ -886,7 +888,7 @@ export function PolicyDeepDiveScreen() {
               )}
               <div style={s('display:flex;justify-content:space-between;border-top:1px solid var(--dv);margin-top:12px;padding-top:10px')}>
                 <Hoverable as="span" base="font-size:12px;color:var(--tx2);cursor:pointer" hover="color:var(--acT)" onClick={() => setShowNotif(false)}>{L === 'ja' ? '閉じる' : 'Dismiss'}</Hoverable>
-                <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} onClick={() => { selAll(); setShowNotif(false) }}>{L === 'ja' ? 'すべて表示 →' : 'View all →'}</span>
+                <span style={s('font-size:12px;font-weight:600;color:var(--acT);cursor:pointer')} {...press(() => { selAll(); setShowNotif(false) })}>{L === 'ja' ? 'すべて表示 →' : 'View all →'}</span>
               </div>
             </div>
           )}
@@ -933,14 +935,14 @@ export function PolicyDeepDiveScreen() {
                 <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
                 <input placeholder="Search all METI meetings, briefings &amp; digests… 全会合・要約・ダイジェストを検索…" value={q} onChange={(e) => setQ(e.target.value)} style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0')} />
                 {!!qNorm && (
-                  <span style={s('font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;flex-shrink:0')} onClick={clearQ}>✕ clear</span>
+                  <span style={s('font-size:11px;font-weight:600;color:var(--mut);cursor:pointer;flex-shrink:0')} {...press(clearQ)}>✕ clear</span>
                 )}
                 <span style={s('font-size:9.5px;font-weight:600;background:var(--warnBg);color:var(--warnTx);border-radius:6px;padding:1px 7px;flex-shrink:0')} title="Search covers titles, committees & digests — incl. untracked meetings. Full text of source PDFs (FTS5) is proposed. · 検索は未追跡会合も対象。PDF全文検索は提案中">PDF full-text = PROPOSED</span>
               </div>
               <span style={s('width:1px;height:22px;background:var(--dv)')}></span>
               {/* Committee filter dropdown */}
               <span style={s('position:relative')}>
-                <span style={chipCommittee} onClick={() => { setComOpen((o) => !o); setDateOpen(false) }}>
+                <span style={chipCommittee} {...press(() => { setComOpen((o) => !o); setDateOpen(false) }, comOpen)}>
                   {selCom === 'all'
                     ? (L === 'ja' ? '委員会 ▾' : 'Committee ▾')
                     : ((L === 'ja' ? selCommittee?.ja : selCommittee?.en) || selCom) + ' ▾'}
@@ -968,7 +970,7 @@ export function PolicyDeepDiveScreen() {
               </span>
               {/* Date-range filter dropdown */}
               <span style={s('position:relative')}>
-                <span style={chipDate} onClick={() => { setDateOpen((o) => !o); setComOpen(false) }}>{DATE_LABELS[dateFilter]} ▾</span>
+                <span style={chipDate} {...press(() => { setDateOpen((o) => !o); setComOpen(false) }, dateOpen)}>{DATE_LABELS[dateFilter]} ▾</span>
                 {dateOpen && (
                   <>
                     <div onClick={() => setDateOpen(false)} style={s('position:fixed;inset:0;z-index:40')}></div>
@@ -986,7 +988,7 @@ export function PolicyDeepDiveScreen() {
                   </>
                 )}
               </span>
-              <span style={chipFollowed} onClick={toggleFollowed}>Followed only フォロー中のみ</span>
+              <span style={chipFollowed} {...press(toggleFollowed, fOnly)}>Followed only フォロー中のみ</span>
             </div>
 
             {/* Newly summarised banner */}
@@ -1032,8 +1034,8 @@ export function PolicyDeepDiveScreen() {
                 </div>
                 {/* sort: priority (default) vs most recently updated */}
                 <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;margin-top:9px;width:fit-content')}>
-                  <span style={comSortS(comSort === 'priority')} onClick={() => setComSort('priority')} title={L === 'ja' ? '既定の優先順' : 'Default priority order'}>{L === 'ja' ? '優先順' : 'Priority'}</span>
-                  <span style={comSortS(comSort === 'recent')} onClick={() => setComSort('recent')} title={L === 'ja' ? '最近更新された委員会を上に' : 'Most recently updated first'}>{L === 'ja' ? '更新順' : 'Recently updated'}</span>
+                  <span style={comSortS(comSort === 'priority')} {...press(() => setComSort('priority'), comSort === 'priority')} title={L === 'ja' ? '既定の優先順' : 'Default priority order'}>{L === 'ja' ? '優先順' : 'Priority'}</span>
+                  <span style={comSortS(comSort === 'recent')} {...press(() => setComSort('recent'), comSort === 'recent')} title={L === 'ja' ? '最近更新された委員会を上に' : 'Most recently updated first'}>{L === 'ja' ? '更新順' : 'Recently updated'}</span>
                 </div>
                 {/* committee search */}
                 <div style={s('display:flex;align-items:center;gap:7px;background:var(--bg0);border:1px solid var(--bd);border-radius:10px;padding:6px 10px;margin-top:9px')}>
@@ -1072,7 +1074,7 @@ export function PolicyDeepDiveScreen() {
                     </div>
                   </div>
                 )}
-                <div style={allRowS} onClick={selAll}>All committees · すべて</div>
+                <div style={allRowS} {...press(selAll, selCom === 'all')}>All committees · すべて</div>
                 {explorerGroups.map((g, gi) => (
                   <div key={gi}>
                     <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--mut);margin:12px 2px 5px;display:flex;align-items:center;gap:6px')}><span style={g.dot}></span>{g.name}</div>
@@ -1110,8 +1112,8 @@ export function PolicyDeepDiveScreen() {
                 <div style={s('display:flex;align-items:baseline;justify-content:space-between')}>
                   <span style={s('font-size:14px;font-weight:600')}>Meetings <span style={s('font-size:11.5px;font-weight:400;color:var(--mut)')}>会合フィード</span></span>
                   <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:2px;flex-shrink:0')}>
-                    <span style={covTS} onClick={covTracked}>Tracked 追跡中</span>
-                    <span style={covAS} onClick={covAll}>All すべて</span>
+                    <span style={covTS} {...press(covTracked, coverage === 'tracked')}>Tracked 追跡中</span>
+                    <span style={covAS} {...press(covAll, coverage === 'all')}>All すべて</span>
                   </div>
                 </div>
                 {/* sort: most recently held (default) vs by meeting number */}
@@ -1125,7 +1127,7 @@ export function PolicyDeepDiveScreen() {
                     <div style={s('display:flex;align-items:center;gap:6px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--up);margin:2px 2px 4px')}><span style={s('width:7px;height:7px;border-radius:999px;background:var(--okDot)')}></span>UPCOMING · 開催予定</div>
                   )}
                   {feedUp.map((u) => (
-                    <div key={u.key} style={u.s} onClick={u.click}>
+                    <div key={u.key} style={u.s} {...press(u.click)}>
                       <div style={s('display:flex;justify-content:space-between;align-items:center;gap:8px')}>
                         <span style={s('display:inline-flex;align-items:center;gap:7px;min-width:0')}>
                           <span style={u.dot}></span>
@@ -1148,7 +1150,7 @@ export function PolicyDeepDiveScreen() {
                       list scrolls inside the column instead of stretching the page. */}
                   <div style={feedList.length > 8 ? s('max-height:560px;overflow-y:auto;margin:0 -4px;padding:0 4px') : undefined}>
                     {feedShown.map((f) => (
-                      <div key={f.key} style={f.s} onClick={f.click}>
+                      <div key={f.key} style={f.s} {...press(f.click)}>
                         <div style={s('display:flex;justify-content:space-between;align-items:center;gap:8px')}>
                           <span style={s('display:inline-flex;align-items:center;gap:7px;min-width:0')}>
                             <span style={f.dot}></span>

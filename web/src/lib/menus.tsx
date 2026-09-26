@@ -4,7 +4,7 @@ import type { JobRun, JobStage, Screen, WatchEntry } from './app'
 import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import { parseDbTs } from './policyActivity'
 import type { AreaKey, Level, PolicyJob } from './types'
-import { Hoverable, RawSvg, s } from './style'
+import { Hoverable, RawSvg, s, press } from './style'
 
 /**
  * Phase 4 — the working global menus (client-side, localStorage-backed):
@@ -312,8 +312,8 @@ function SettingsPanel() {
               <div style={s(SUB)}>{pick('Light or dark appearance', '外観の明暗')}</div>
             </div>
             <div style={s(SEG_WRAP)}>
-              <span style={seg(app.theme === 'light')} onClick={() => app.setTheme('light')}>{pick('Light', 'ライト')}</span>
-              <span style={seg(app.theme === 'dark')} onClick={() => app.setTheme('dark')}>{pick('Dark', 'ダーク')}</span>
+              <span style={seg(app.theme === 'light')} {...press(() => app.setTheme('light'), app.theme === 'light')}>{pick('Light', 'ライト')}</span>
+              <span style={seg(app.theme === 'dark')} {...press(() => app.setTheme('dark'), app.theme === 'dark')}>{pick('Dark', 'ダーク')}</span>
             </div>
           </div>
           <div style={s(ROW)}>
@@ -322,8 +322,8 @@ function SettingsPanel() {
               <div style={s(SUB)}>{pick('Interface language', '表示言語')}</div>
             </div>
             <div style={s(SEG_WRAP)}>
-              <span style={seg(app.lang === 'en')} onClick={() => app.setLang('en')}>English</span>
-              <span style={seg(app.lang === 'ja')} onClick={() => app.setLang('ja')}>日本語</span>
+              <span style={seg(app.lang === 'en')} {...press(() => app.setLang('en'), app.lang === 'en')}>English</span>
+              <span style={seg(app.lang === 'ja')} {...press(() => app.setLang('ja'), app.lang === 'ja')}>日本語</span>
             </div>
           </div>
           <div style={s(ROW)}>

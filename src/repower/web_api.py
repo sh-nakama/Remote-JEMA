@@ -281,12 +281,12 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     Committee keys are checked against the catalog and numeric args are clamped, so
     the request can't inject arbitrary arguments.
     """
-    def _committee(*, required: bool = False, allow_all: bool = True) -> str | None:
+    def _committee(*, required: bool = False) -> str:
         c = (params.get("committee") or "").strip()
         if not c or c == "all":
             if required:
                 raise ValueError("committee is required")
-            return "all" if allow_all else None
+            return "all"
         from repower.policy.store import list_committees
         if c not in {r["key"] for r in list_committees(db_path=db_path)}:
             raise ValueError(f"unknown committee: {c}")
@@ -312,7 +312,7 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
         # committee, and the CLI forces max-per-run to 1 for it.
         if params.get("meeting") not in (None, ""):
             return ["policy", "run",
-                    "--committee", _committee(required=True, allow_all=False),
+                    "--committee", _committee(required=True),
                     "--meeting", str(_int("meeting", None, 1, 100000, required=True))]
         argv = ["policy", "run", "--committee", _committee(),
                 "--max-per-run", str(_int("max_per_run", 5, 1, 20))]
@@ -321,7 +321,7 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
         return argv
     if cmd == "backfill":
         return ["policy", "backfill",
-                "--committee", _committee(required=True, allow_all=False),
+                "--committee", _committee(required=True),
                 "--since-meeting", str(_int("since_meeting", None, 1, 100000, required=True)),
                 "--max-per-run", str(_int("max_per_run", 10, 1, 30))]
     if cmd == "digest":  # --dry-run: never post to the webhook from a UI click
@@ -600,7 +600,7 @@ class _Handler(BaseHTTPRequestHandler):
             from repower.policy.store import clear_generation_request, request_generation
             key = (body.get("key") or "").strip()
             try:
-                num = int(body.get("meeting_num"))
+                num = int(body.get("meeting_num") or "")
             except (TypeError, ValueError):
                 return self._send(400, {"error": "meeting_num must be an integer"})
             queued = bool(body.get("queued", True))
@@ -614,7 +614,7 @@ class _Handler(BaseHTTPRequestHandler):
             from repower.policy.store import set_committee_priority
             key = body.get("key")
             try:
-                pr = int(body.get("priority"))
+                pr = int(body.get("priority") or "")
             except (TypeError, ValueError):
                 return self._send(400, {"error": "priority must be an integer"})
             if not key:

@@ -8,7 +8,9 @@ on:
       - "space/**"
       - "src/repower/**"
       - "pyproject.toml"
+      - "constraints.txt"
       - "Dockerfile"
+      - ".github/scripts/sync_space.py"
       - ".github/workflows/sync-space.yml"
   workflow_dispatch:
 
@@ -19,6 +21,8 @@ permissions:
 jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
+    # The script waits up to 30 minutes for the Space to rebuild.
+    timeout-minutes: 40
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -28,42 +32,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install huggingface-hub
-        run: pip install --quiet huggingface-hub==1.8.0
+        run: pip install --quiet huggingface-hub -c constraints.txt
 
-      - name: Push code to HF Space
+      - name: Push code to HF Space and wait for the rebuild
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          python - <<'EOF'
-          import os, shutil
-          from pathlib import Path
-          from huggingface_hub import HfApi
-
-          api = HfApi(token=os.environ["HF_TOKEN"])
-
-          # Space already exists as Docker SDK — just upload files.
-          # Build deployment directory:
-          #   space/* (app.py, requirements.txt, README.md, packages.txt)
-          #   src/    (package source)
-          #   Dockerfile  (used by HF Docker SDK)
-          deploy = Path("/tmp/space-deploy")
-          shutil.rmtree(deploy, ignore_errors=True)
-          shutil.copytree("space", deploy)
-          shutil.copytree("src", deploy / "src")
-          shutil.copy("Dockerfile", deploy / "Dockerfile")
-          shutil.copy("pyproject.toml", deploy / "pyproject.toml")
-
-          api.upload_folder(
-              folder_path=str(deploy),
-              repo_id="nakama-s/repower",
-              repo_type="space",
-              commit_message="Sync from GitHub",
-              ignore_patterns=["*.pyc", "__pycache__", "*.egg-info"],
-              # Mirror the deploy dir: files removed from the repo must leave the Space too.
-              delete_patterns=["*"],
-          )
-          print("Space synced successfully")
-          EOF
+        run: python .github/scripts/sync_space.py
 
       - name: Alert on failure
         if: failure()

@@ -367,9 +367,12 @@ fixed.
   with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and
   every npm script passes `--config vite.config.ts`. Launch Vite through those scripts; a bare
   `npx vite` still picks up a leftover `.js`.
-- No keyboard/ARIA semantics anywhere (`Hoverable` renders divs; 167 onClick handlers)
-  `(open — P3)`. The ⌘K palette and global Escape are the only keyboard paths — don't break
-  them, and prefer real `<button>`s in new UI.
+- **Every clickable element is keyboard-operable.** The exports' clickable spans/divs stay spans/divs
+  (swapping in `<button>` would shift layout); `Hoverable`, or `{...press(fn, pressed?)}` from
+  `lib/style.tsx` on a plain element, adds `role="button"`, `tabIndex` and Enter/Space, and
+  `pressed` sets `aria-pressed` for toggles and pill groups. Only dropdown backdrops and
+  `stopPropagation` guards are left click-only. Give any new clickable element the same, or use a
+  real `<button>`.
 - `web_api.py` is a **localhost dev helper only**: DB-mutating + subprocess-launching
   endpoints, time-capped jobs. **CORS does not protect it** — a foreign page's no-cors POST
   still executes, it just can't read the answer. So without `REPOWER_API_TOKEN` it refuses
@@ -660,9 +663,10 @@ fixed.
   path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
   trace themselves; keep it that way in any new check. A docs leak happened once before the
   gates covered docs (2026-07-03).
-- There is **no conftest.py**; the two-line `db = str(tmp_path / …)` + `store.sync_committees`
-  setup repeats ~58× across six test files. Tests are hermetic by monkeypatching the lowest-level
-  I/O boundary (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- `tests/conftest.py`'s `policy_db` fixture is a fresh DB with the committee catalog synced; start
+  new policy tests from it. Tests that must patch something before the sync still build their own.
+  Tests are hermetic by monkeypatching the lowest-level I/O boundary (`http_cache._do_get`,
+  `subprocess.run`) — keep new tests network-free the same way.
 - **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
   wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
   I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both
@@ -671,10 +675,10 @@ fixed.
   banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
-- `ruff` runs E, F, I, B and UP (`pyproject.toml`). CI runs `mypy` over every module except the
-  `[tool.mypy] exclude` list (10 not yet type-clean, `(open — P2)`; mostly BeautifulSoup
-  typing). Take a module off that list once it passes. mypy checks 3.12 syntax because numpy's
-  stubs need it; the runtime floor is 3.11.
+- `ruff` runs E, F, I, B and UP (`pyproject.toml`), and CI runs `mypy` over every module in
+  `src/repower`; keep both clean. mypy checks 3.12 syntax because numpy's stubs need it; the
+  runtime floor is 3.11. Read a BeautifulSoup link with `scraper.href_of(a)`, not `a["href"]`,
+  which bs4 types as possibly multi-valued.
 - **Declare model columns as `Mapped[...] = mapped_column(...)`, never bare `Column()`.**
   SQLAlchemy 2.1 types a bare `Column` comparison as `bool`, which fails mypy wherever it is
   used. Mind nullability: `mapped_column` makes a non-Optional annotation `NOT NULL`, while
@@ -691,14 +695,18 @@ fixed.
   the image runs as the non-root `repower` user; keep both.
 - `sync-space.yml` mirrors its deploy dir onto the Space (`delete_patterns=["*"]`): any file on
   the Space that the deploy dir doesn't contain is deleted on the next sync (`.gitattributes`
-  excepted). Add Space-only files to `space/`, never through the Hub UI.
+  excepted). Add Space-only files to `space/`, never through the Hub UI. The sync
+  (`.github/scripts/sync_space.py`) then waits for Hugging Face to rebuild and start the app, and
+  fails the run on a build or runtime error — the upload alone succeeds before the build begins.
 - `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
   `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
   a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
 - Actions are pinned to commit SHAs (`@<sha> # vN`); Dependabot's `github-actions` updates keep
   the SHA and comment in step, so edit pins through it or by hand in that same format. Every
   workflow declares `permissions:` (`contents: read`, plus Pages for `web-deploy.yml`) — give a
-  new workflow the same. There is still no Python lockfile, so CI, Docker and the Space install
-  floating versions `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but
-  `>=0.23` in `pyproject.toml` — version skew between the two install paths is unchecked
-  `(open — P4)`.
+  new workflow the same.
+- **Every install is pinned by `constraints.txt`** (`pip install ... -c constraints.txt` in each
+  workflow and the Dockerfile; the Space sync ships it). It is resolved for what CI and the image
+  run — CPython 3.11 on x86-64 Linux — so regenerate it with the command in its header, never by
+  hand. `pyproject.toml` keeps ranges; the lock picks versions. Floating installs are how
+  SQLAlchemy 2.1 reached CI and the crons untested. Dependabot bumps the pins weekly.

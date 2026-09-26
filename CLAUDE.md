@@ -10,13 +10,14 @@ Guidance for working in this repository (RePower — Japanese power-market scrap
 ## Orientation
 
 - `src/repower/` — package: `db.py` (SQLAlchemy models + engine), `scrapers/` (per-TSO area scrapers via `BaseAreaScraper`, plus JEPX spot, fuels), `cli.py` (console entry `repower`), `dashboard.py` (Streamlit app), `hf_sync.py` (Hugging Face dataset push/pull), `config.py` (`DB_PATH`).
-- `dashboard/app.py` — local dev Streamlit entry. `space/app.py` — Hugging Face Space entry (Docker SDK, port 7860).
+- `web/` — **the primary UI**: the React + TypeScript + Vite app ("JEMA"), static on GitHub Pages from `repower export-web` snapshots; locally it can use `repower web-api`. New UI work goes here.
+- `dashboard/app.py` — local dev Streamlit entry. `space/app.py` — Hugging Face Space entry (Docker SDK, port 7860). The Streamlit dashboard is secondary and read-only on the Space.
 - Data: SQLite, synced to a private HF Dataset; refreshed by a daily GitHub Actions cron.
 - Markets covered: **wholesale** (JEPX day-ahead spot, per area) and **balancing** (EPRX 需給調整市場). Supply/demand (per-TSO 30-min generation mix) underlies the wholesale view.
 - **`docs/GOTCHAS.md` — running list of sharp edges** (JST-vs-UTC, HF-sync clobber semantics, fixture/live duality, CI blind spots, Actions semantics). Read it before touching pipelines, workflows, or the web frontend — and add new gotchas as you find them.
 
 ## Conventions
 
-- Python ≥ 3.11. Install dev deps with `pip install -e ".[dev]"`.
+- Python ≥ 3.11. Install dev deps with `pip install -e ".[dev]" -c constraints.txt` (the pinned versions CI and production run).
 - Run the dashboard: `streamlit run dashboard/app.py`.
 - Tests live in `tests/`; CI runs lint + tests (see `.github/workflows/ci.yml`).

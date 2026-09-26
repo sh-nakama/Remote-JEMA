@@ -28,7 +28,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from repower.policy.committees import Committee
-from repower.policy.scraper import _fetch, discover_meetings
+from repower.policy.scraper import _fetch, discover_meetings, href_of
 from repower.policy.store import _norm_url
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,7 @@ def parse_committee_links(content: bytes | str, index_url: str) -> list[Candidat
             continue
         if not any(mark in text for mark in _COMMITTEE_MARKERS):
             continue
-        full = urljoin(index_url, a["href"])
+        full = urljoin(index_url, href_of(a))
         if urlparse(full).netloc != host:  # stay on-site; skip cross-links
             continue
         if full.lower().split("?")[0].endswith(".pdf"):

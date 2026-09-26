@@ -140,9 +140,8 @@ def test_dedupe_future_drops_past_and_prefers_matched():
 
 
 # ── Store: meeting_date + upcoming snapshot ───────────────────────────────────
-def test_set_meeting_dates_and_missing(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_set_meeting_dates_and_missing(policy_db):
+    db = policy_db
     store.record_meeting("santeii", 114, None, db_path=db)
     store.record_meeting("santeii", 113, None, db_path=db)
     assert set(store.meetings_missing_date("santeii", db_path=db)) == {114, 113}
@@ -201,9 +200,8 @@ def test_refresh_upcoming_overload_does_not_wipe(tmp_path, monkeypatch):
 
 
 # ── backfill_dates orchestration (fetchers mocked) ────────────────────────────
-def test_backfill_dates_meti_only_missing(tmp_path, monkeypatch):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_backfill_dates_meti_only_missing(monkeypatch, policy_db):
+    db = policy_db
     store.record_meeting("santeii", 114, None, db_path=db)
     store.record_meeting("santeii", 113, None, db_path=db)
     store.set_meeting_dates("santeii", {113: datetime.date(2026, 1, 20)}, db_path=db)
@@ -218,12 +216,11 @@ def test_backfill_dates_meti_only_missing(tmp_path, monkeypatch):
     assert store.meetings_missing_date("santeii", db_path=db) == []
 
 
-def test_backfill_dates_skips_committees_with_nothing_missing(tmp_path, monkeypatch):
+def test_backfill_dates_skips_committees_with_nothing_missing(monkeypatch, policy_db):
     """meti.go.jp sits behind a WAF whose challenge backoff costs minutes per page,
     so a committee whose meetings are all dated must not cost a fetch — that is what
     starved the committees that actually needed a date."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     store.record_meeting("santeii", 114, None, db_path=db)
     store.set_meeting_dates("santeii", {114: datetime.date(2026, 2, 2)}, db_path=db)
 
@@ -245,9 +242,8 @@ def test_backfill_dates_skips_committees_with_nothing_missing(tmp_path, monkeypa
     assert calls["n"] == 1
 
 
-def test_backfill_dates_occto_skips_when_nothing_missing(tmp_path, monkeypatch):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_backfill_dates_occto_skips_when_nothing_missing(monkeypatch, policy_db):
+    db = policy_db
     store.record_meeting("youryou_kentoukai", 75, None, db_path=db)  # OCCTO
     store.set_meeting_dates("youryou_kentoukai", {75: datetime.date(2026, 2, 2)}, db_path=db)
 
