@@ -63,9 +63,8 @@ def test_recent_meeting_nums_and_materials(monkeypatch):
     assert eb.recent_meeting_nums(occto) == []
 
 
-def test_cross_check_flags_untracked(monkeypatch, tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)  # doji_shijo is a tracked config committee
+def test_cross_check_flags_untracked(monkeypatch, policy_db):
+    db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
     res = eb.cross_check(db_path=db)
     assert res["theirs"] == 2
@@ -74,12 +73,11 @@ def test_cross_check_flags_untracked(monkeypatch, tmp_path):
     assert dirs == ["sankoshin/hoan_shohi/hydrogen"]  # the one we don't track
 
 
-def test_cross_check_persists_missing_as_discovered(monkeypatch, tmp_path):
+def test_cross_check_persists_missing_as_discovered(monkeypatch, policy_db):
     """A committee energy-board surfaces that we don't track is accumulated into the
     catalog as a discovered / untracked METI row, so it reaches the Manage modal and
     committees.json — the fix for crosscheck findings vanishing instead of sticking."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)  # doji_shijo tracked; hydrogen not known
+    db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
 
     res = eb.cross_check(db_path=db)
@@ -97,10 +95,9 @@ def test_cross_check_persists_missing_as_discovered(monkeypatch, tmp_path):
     assert res2["matched"] == 2 and res2["missing"] == []
 
 
-def test_cross_check_persist_false_is_pure(monkeypatch, tmp_path):
+def test_cross_check_persist_false_is_pure(monkeypatch, policy_db):
     """persist=False keeps cross_check a read-only diff (no rows written)."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
     before = len(store.list_committees(db_path=db))
     res = eb.cross_check(db_path=db, persist=False)

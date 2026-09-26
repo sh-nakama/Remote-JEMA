@@ -663,9 +663,10 @@ fixed.
   path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
   trace themselves; keep it that way in any new check. A docs leak happened once before the
   gates covered docs (2026-07-03).
-- There is **no conftest.py**; the two-line `db = str(tmp_path / …)` + `store.sync_committees`
-  setup repeats ~58× across six test files. Tests are hermetic by monkeypatching the lowest-level
-  I/O boundary (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- `tests/conftest.py`'s `policy_db` fixture is a fresh DB with the committee catalog synced; start
+  new policy tests from it. Tests that must patch something before the sync still build their own.
+  Tests are hermetic by monkeypatching the lowest-level I/O boundary (`http_cache._do_get`,
+  `subprocess.run`) — keep new tests network-free the same way.
 - **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
   wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
   I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both

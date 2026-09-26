@@ -68,9 +68,8 @@ def test_parse_meti_enecho_committees_filters_and_normalises():
 
 
 # ── Tracked-set store helpers ─────────────────────────────────────────────────
-def test_sync_seeds_enabled_and_config_roundtrip(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_sync_seeds_enabled_and_config_roundtrip(policy_db):
+    db = policy_db
     keys = store.enabled_committee_keys(db_path=db)
     assert set(keys) == set(committee_keys())  # all config committees tracked by default
     # EGC scraper config round-trips through the DB (log_pages JSON, min_meeting)
@@ -78,9 +77,8 @@ def test_sync_seeds_enabled_and_config_roundtrip(tmp_path):
     assert c.source == "EGC" and c.min_meeting == 30 and len(c.log_pages) == 6
 
 
-def test_set_enabled_and_sync_preserves_user_toggle(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_set_enabled_and_sync_preserves_user_toggle(policy_db):
+    db = policy_db
     assert store.set_committee_enabled("system_review", False, db_path=db) is True
     assert "system_review" not in store.enabled_committee_keys(db_path=db)
     # re-syncing config must NOT re-enable a committee the user untracked
@@ -90,9 +88,8 @@ def test_set_enabled_and_sync_preserves_user_toggle(tmp_path):
     assert store.set_committee_enabled("does_not_exist", True, db_path=db) is False
 
 
-def test_set_priority_persists_across_sync(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_set_priority_persists_across_sync(policy_db):
+    db = policy_db
     # a discovered committee starts at priority 100; bump it ahead of chousei_jukyu (3)
     store.upsert_discovered_committees(
         [{"key": "newcom", "name_ja": "新", "source": "OCCTO", "url": "https://www.occto.or.jp/iinkai/newcom/index.html"}],
@@ -107,16 +104,14 @@ def test_set_priority_persists_across_sync(tmp_path):
     assert store.set_committee_priority("nope", 1, db_path=db) is False
 
 
-def test_committee_or_config_db_first_then_config_then_none(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_committee_or_config_db_first_then_config_then_none(policy_db):
+    db = policy_db
     assert store.committee_or_config("system_review", db_path=db).key == "system_review"
     assert store.committee_or_config("totally_unknown", db_path=db) is None
 
 
-def test_upsert_discovered_dedup_by_url_and_key_collision(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_upsert_discovered_dedup_by_url_and_key_collision(policy_db):
+    db = policy_db
     config_url = store.committee_or_config("saisei_kano", db_path=db).url
     inserted = store.upsert_discovered_committees(
         [
@@ -172,9 +167,8 @@ def test_parse_meti_page_title_h1_then_title_boilerplate_stripped():
     assert catalog.parse_meti_page_title("<html><body><p>x</p></body></html>") is None
 
 
-def test_add_user_committee_tracked_and_dedup(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_add_user_committee_tracked_and_dedup(policy_db):
+    db = policy_db
     res = store.add_user_committee(
         {"key": "some_wg", "name_ja": "某WG", "source": "METI",
          "url": "https://www.meti.go.jp/shingikai/enecho/foo/some_wg/"},
@@ -199,9 +193,8 @@ def test_add_user_committee_tracked_and_dedup(tmp_path):
     assert res3 == {"key": "saisei_kano", "existing": True}
 
 
-def test_add_committee_by_url_end_to_end(tmp_path, monkeypatch):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_add_committee_by_url_end_to_end(monkeypatch, policy_db):
+    db = policy_db
     monkeypatch.setattr(
         catalog, "_fetch",
         lambda url, db_path=None: b"<html><head><title>\xe9\x9b\xbb\xe5\x8a\x9b\xe5\xae\x89\xe5\xae\x9a\xe4\xbe\x9b\xe7\xb5\xa6\xef\xbc\xb7\xef\xbc\xa7\xef\xbc\x88METI/\xe7\xb5\x8c\xe6\xb8\x88\xe7\x94\xa3\xe6\xa5\xad\xe7\x9c\x81\xef\xbc\x89</title></head></html>",
@@ -276,12 +269,11 @@ def test_archived_committee_is_skipped_by_the_fetch_passes(tmp_path):
     assert set(after) == set(before) - {key}
 
 
-def test_archiving_does_not_untrack(tmp_path):
+def test_archiving_does_not_untrack(policy_db):
     """`archived` and `enabled` are independent axes. A committee can be tracked
     (so its already-detected meetings still summarise) yet archived (so nothing new
     is fetched) -- which is exactly the state a concluded committee should reach."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = store.enabled_committee_keys(db_path=db)[0]
 
     store.set_committee_archived(key, True, db_path=db)
@@ -322,15 +314,13 @@ def test_archive_round_trips_and_survives_sync(tmp_path):
     assert key in [c.key for c in _select_committees(None, db)]
 
 
-def test_set_committee_archived_reports_unknown_key(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_set_committee_archived_reports_unknown_key(policy_db):
+    db = policy_db
     assert store.set_committee_archived("no_such_committee", True, db_path=db) is False
 
 
-def test_tracked_committees_include_archived_opt_in(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_tracked_committees_include_archived_opt_in(policy_db):
+    db = policy_db
     key = store.enabled_committee_keys(db_path=db)[0]
     store.set_committee_archived(key, True, db_path=db)
 
@@ -340,10 +330,9 @@ def test_tracked_committees_include_archived_opt_in(tmp_path):
     assert key in shown
 
 
-def test_catalog_payload_exposes_archived(tmp_path):
+def test_catalog_payload_exposes_archived(policy_db):
     """The Manage modal needs `archived` to render (and toggle) the state."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = store.enabled_committee_keys(db_path=db)[0]
     store.set_committee_archived(key, True, db_path=db)
 
@@ -397,9 +386,8 @@ def test_migration_adds_archived_to_an_existing_db(tmp_path):
 # blocked; without these fields it renders identically to one that is merely quiet.
 
 
-def test_catalog_payload_carries_fetch_health(tmp_path):
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+def test_catalog_payload_carries_fetch_health(policy_db):
+    db = policy_db
     key = store.enabled_committee_keys(db_path=db)[0]
     store.set_committee_fetch_result(
         key, "error", kind="blocked_403", detail="blocked with status 403",
@@ -416,11 +404,10 @@ def test_catalog_payload_carries_fetch_health(tmp_path):
     assert isinstance(row["fetchAt"], str)
 
 
-def test_snapshot_payload_carries_fetch_health(tmp_path):
+def test_snapshot_payload_carries_fetch_health(policy_db):
     """`build_policy_snapshot` feeds the live API and has its own SELECT, so it
     can silently omit columns the static export includes."""
-    db = str(tmp_path / "t.db")
-    store.sync_committees(db_path=db)
+    db = policy_db
     key = store.enabled_committee_keys(db_path=db)[0]
     store.set_committee_fetch_result(key, "error", kind="circuit_open", db_path=db)
 
