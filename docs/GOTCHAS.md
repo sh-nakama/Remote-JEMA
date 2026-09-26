@@ -358,6 +358,10 @@ fixed.
   `parseDay` (a day is UTC midnight; an offset-less timestamp is UTC, never local) and
   `parseWallClock` (market datetimes keep their JST digits). A bare `Date.parse` of a string
   without an offset reads it as the viewer's local time — 9 hours out in Tokyo.
+- **`s()` returns cached, frozen style objects** (one per CSS string). Derive a variant by
+  spreading (`{ ...s(x), color }`); assigning to a property of an `s()` result throws. Build its
+  argument from a small set of values (states, theme variables) — never from data or mouse
+  positions, or the cache grows without bound.
 - **Vite prefers `vite.config.js` over `vite.config.ts`.** `tsc -b` used to emit that `.js`
   (gitignored), so `npm run dev` ran whichever branch last compiled it, including a LAN binding
   with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and

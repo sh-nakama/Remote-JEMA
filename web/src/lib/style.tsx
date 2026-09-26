@@ -14,10 +14,17 @@ import React, { useState } from 'react'
 export type CSS = React.CSSProperties
 
 /** Parse an inline CSS string ("display:flex;gap:8px") into a React style object.
- *  Custom properties (--x) are preserved; other props are camelCased. */
+ *  Custom properties (--x) are preserved; other props are camelCased. Results are
+ *  cached per string and frozen, since every render re-parses the same literals:
+ *  spread one (`{ ...s(x), color }`) to derive a variant, never mutate it. */
+const parsed = new Map<string, CSS>()
+const EMPTY_CSS: CSS = Object.freeze({})
+
 export function s(css?: string): CSS {
+  if (!css) return EMPTY_CSS
+  const hit = parsed.get(css)
+  if (hit) return hit
   const out: Record<string, string> = {}
-  if (!css) return out as CSS
   for (const decl of css.split(';')) {
     const i = decl.indexOf(':')
     if (i < 0) continue
@@ -29,7 +36,9 @@ export function s(css?: string): CSS {
       : rawProp.replace(/-([a-z])/g, (_m, c: string) => c.toUpperCase())
     out[prop] = val
   }
-  return out as CSS
+  const style = Object.freeze(out) as CSS
+  parsed.set(css, style)
+  return style
 }
 
 /**
