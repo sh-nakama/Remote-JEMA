@@ -645,7 +645,10 @@ export function PolicyDeepDiveScreen() {
   const dRefs = hasDigest && dM.refs ? dM.refs : []
   const dDocs = d.docs
   const dComUrl = committees.find((c) => c.key === d.com)?.url || ''
-  const openUrl = (url: string) => window.open(url, '_blank', 'noopener,noreferrer')
+  // Links come from scraped pages; never hand a javascript:/data: href to window.open.
+  const openUrl = (url: string) => {
+    if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
+  }
   const showAudio = showAudioCard && !hasAgenda
 
   // ---- committee overview (detail pane when a committee, not a session, is selected) ----

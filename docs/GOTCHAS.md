@@ -298,6 +298,11 @@ fixed.
   — pandas NaN leaked into the wholesale exports once and silently broke live mode for the
   affected area. `export_web._write_json` sanitizes NaN/Inf→null (`allow_nan=False` backstop);
   route any new export through it, never through a bare `json.dumps`.
+- **Scraped links must be http(s) at every layer.** `urljoin` returns a `javascript:` or `data:`
+  href unchanged, and material URLs end up in `window.open`. The scraper keeps only absolute
+  http(s) links (`_is_web_url`), the exporter blanks anything else already in a synced DB
+  (`_web_url`), and the Deep Dive's `openUrl` refuses it. Apply the same rule to any new
+  scraped link that gets rendered.
 - **Every screen falls back to fixtures, and a failed live fetch looks identical to "still
   loading"** (only PolicyDeepDive surfaces a `stale` banner) `(open — P3)`. If a screen shows
   suspiciously smooth data, suspect a broken snapshot before suspecting the market. The unused

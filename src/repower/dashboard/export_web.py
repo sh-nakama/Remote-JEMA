@@ -562,6 +562,11 @@ def _doc_name(title: str) -> str:
     return re.sub(r"（PDF形式[:：][^）]*）", "", title or "").strip() or "資料"
 
 
+def _web_url(url: str | None) -> str:
+    # Rows scraped before links were checked at ingest may still hold javascript:/data: hrefs.
+    return url if url and re.match(r"https?://[^/]", url, re.IGNORECASE) else ""
+
+
 # Acronyms/initialisms that should stay upper-case when a committee key is
 # humanised into a display name (discovered committees have no curated name_en).
 _KEY_ACRONYMS = {"wg", "egc", "occto", "meti", "jepx", "eprx", "dr", "vpp", "lng"}
@@ -898,7 +903,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         mdate = str(m["meeting_date"])[:10] if m["meeting_date"] else None
         upd = mdate or _jst_day(m["detected_at"] or m["updated_at"])
         mats = mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])
-        docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": x["url"] or ""} for x in mats]
+        docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": _web_url(x["url"])} for x in mats]
         has_digest = m["state"] == "done" and bool(m["digest_en_json"])
         is_error = m["state"] == "error"
         out_m: dict = {

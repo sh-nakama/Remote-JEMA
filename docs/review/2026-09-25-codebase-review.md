@@ -259,6 +259,6 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 12 | Freshness gate in the daily cron | P1 | Fixed (`review/2026-09-25`) — `repower check-freshness`; the 60-day per-area limit rests on one observation of Tohoku's lag, retune in `freshness.py` if it cries wolf |
 | 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Fixed (`review/2026-09-25`) — 60-min daily cap (runs take 8–15 min), deploy on `workflow_run`, Node 24 |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Fixed — D1's exporter half on `review/2026-09-25` (JST detection day, not `updated_at`); the undated-last sort, D2 and D3 on `feat/most-recent-view`, on top of the feed change committed as-is. D1 needs both branches merged |
-| F1–F5 | Frontend items | P2 | Open |
+| F1–F5 | Frontend items | P2 | Partial — F5 fixed (`review/2026-09-25`): http(s)-only links at ingest, export and `openUrl` |
 | T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`) |
 | S1 | Primary UI decision | — | Open |

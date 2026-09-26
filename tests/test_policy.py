@@ -113,6 +113,18 @@ def test_parse_pdf_links_resolves_and_dedups():
     assert all(u.lower().endswith(".pdf") for u in urls)
 
 
+@pytest.mark.parametrize("href", [
+    "javascript:alert(1)//x.pdf", " JavaScript:alert(1)//x.pdf", "data:text/html,x.pdf", "http:x.pdf",
+])
+def test_pdf_links_are_http_only(href):
+    """Material links reach window.open, and urljoin leaves a javascript: href as is."""
+    page = f'<a href="{href}">資料</a><a href="ok.pdf">資料</a>'
+    base = "https://www.egc.meti.go.jp/activity/index_x.html"
+    assert [x["url"] for x in parse_pdf_links(page, base)] == ["https://www.egc.meti.go.jp/activity/ok.pdf"]
+    row = f'<table><tr><td>令和8年6月8日</td><td>第608回</td><td><a href="{href}">議事要旨</a></td></tr></table>'
+    assert parse_egc_index(row, base)[0]["direct_pdfs"] == []
+
+
 def test_parse_egc_index_skips_nav_rows():
     meetings = parse_egc_index(EGC_INDEX, "https://www.egc.meti.go.jp/activity/index_system.html")
     assert len(meetings) == 1

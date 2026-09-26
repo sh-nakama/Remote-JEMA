@@ -205,6 +205,29 @@ def test_undated_meeting_shows_its_jst_detection_day_not_its_last_update(tmp_pat
     assert m["sub"].endswith("検出 2026-07-02")
 
 
+def test_export_blanks_material_links_that_are_not_http(tmp_path: Path):
+    """A DB scraped before links were checked at ingest must not publish a javascript: href."""
+    from sqlalchemy import text
+
+    from repower.dashboard.export_web import build_policy_snapshot
+    from repower.db import get_engine
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    store.record_meeting("emissions_trading", 7, [
+        Material(7, "007_a", "https://www.meti.go.jp/7a.pdf", "資料A", "handout"),
+        Material(7, "007_b", "https://www.meti.go.jp/7b.pdf", "資料B", "handout")], db_path=db)
+    with get_engine(db).begin() as con:
+        con.execute(text("UPDATE policy_material SET url = 'javascript:alert(1)//x.pdf' "
+                         "WHERE url LIKE '%7b.pdf'"))
+
+    m = next(x for x in build_policy_snapshot(db)["meetings"] if x["com"] == "emissions_trading" and x["num"] == 7)
+
+    assert sorted(d["url"] for d in m["docs"]) == ["", "https://www.meti.go.jp/7a.pdf"]
+
+
 def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Path):
     """The status payload keeps every errored/mid-flight meeting whatever the cap,
     trims only the quiet `detected` backlog (reporting how much it dropped), and
