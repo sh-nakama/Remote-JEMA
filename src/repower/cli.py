@@ -24,6 +24,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO, which would print the webhook URL (its secret) on each post.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @app.command()

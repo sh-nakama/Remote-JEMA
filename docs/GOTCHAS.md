@@ -287,6 +287,11 @@ fixed.
 - Failure alerting convention: last step, `if: failure()`, `::error::` + curl POST
   `{"content": …}` to `$WEBHOOK_URL` guarded by `[ -n "$WEBHOOK_URL" ]`. Every cron has one —
   new workflows should too.
+- **The webhook URL is a secret: its path is the token.** Never log it. That rules out
+  `str(e)` from httpx (status errors quote the full URL) and httpx's own INFO request line,
+  which `cli.py` turns off. Log the status code or the exception class instead, as
+  `notify/webhook.py` and `policy/digest.py` do. Actions masks the secret in CI, but local
+  runs don't.
 - **Never splice `workflow_dispatch` inputs into a `run:` script** — `${{ inputs.x }}` is pasted
   in before the shell parses it, so a crafted value runs as shell, and `policy.yml`'s job holds
   the NotebookLM session. Pass them through `env:` and quote the variables, as `backfill.yml`
@@ -624,16 +629,17 @@ fixed.
   **dead code**; ~⅔ of `i18n.py`'s string table is unreferenced `(open — P3)`. Don't pattern-match
   new work off them.
 - Chart components load D3 + Google Fonts from CDNs inside iframes — offline/dev-container runs
-  render empty charts. Nobody has audited how DB-derived strings are templated into that iframe
-  HTML `(open — P4)` — escape anything user/scraper-derived you add there.
+  render empty charts. D3 is pinned with an SRI hash (`components/_util.D3_SCRIPT`), so bumping
+  its version without recomputing the hash blanks every chart. Nobody has audited how
+  DB-derived strings are templated into that iframe HTML `(open — P4)` — escape anything
+  user/scraper-derived you add there.
 - `capacity_data.py` is hand-curated — new OCCTO auction results require a code edit; tests
   check shape, not freshness.
 
 ## Tests & CI
 
-- **CI green ≠ safe**: `cli.py` (every cron's entrypoint), `hf_sync.py`, `web_api.py`'s HTTP
-  layer, and `notify/webhook.py` have zero test coverage `(open — P2)` — regressions there
-  surface only as 05:30-JST production failures.
+- **CI green ≠ safe**: `cli.py` (every cron's entrypoint) has no test coverage `(open — P2)`,
+  so regressions there surface only as 05:30-JST production failures.
 - The brand-scrub gates cover only `src space` (CI grep) and `src/repower/**/*.py` (pytest) —
   NOT `web/`, `docs/`, or workflow YAML `(open — P2)`. A docs leak already happened once
   (2026-07-03, caught by a manual grep — see `.design-sync/NOTES.md`). Until widened, grep the

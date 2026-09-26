@@ -62,6 +62,10 @@ def post_digest(markdown: str) -> bool:
         r = httpx.post(WEBHOOK_URL, json={"content": content}, timeout=30.0)
         r.raise_for_status()
         return True
+    except httpx.HTTPStatusError as e:
+        # The URL path is the webhook's secret, and str(e) quotes the full URL.
+        logger.warning("digest webhook post failed: HTTP %d", e.response.status_code)
+        return False
     except Exception as e:  # noqa: BLE001
-        logger.warning("digest webhook post failed: %s", e)
+        logger.warning("digest webhook post failed: %s", type(e).__name__)
         return False

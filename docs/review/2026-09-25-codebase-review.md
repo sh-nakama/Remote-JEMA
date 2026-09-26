@@ -260,5 +260,5 @@ Status: **Open** · **Fixed** (with the branch it landed on) · **Partial**.
 | 13 | Daily timeout, `workflow_run` deploy, Node LTS | P1 | Fixed (`review/2026-09-25`) — 60-min daily cap (runs take 8–15 min), deploy on `workflow_run`, Node 24 |
 | D1–D3 | Deep Dive feed-sort fixes (on `feat/most-recent-view`) | P1 | Fixed — D1's exporter half on `review/2026-09-25` (JST detection day, not `updated_at`); the undated-last sort, D2 and D3 on `feat/most-recent-view`, on top of the feed change committed as-is. D1 needs both branches merged |
 | F1–F5 | Frontend items | P2 | Partial — F5 fixed (`review/2026-09-25`): http(s)-only links at ingest, export and `openUrl` |
-| T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`) |
+| T1–T8 | Tooling, tests, docs items | P2 | Partial — T4's `hf_sync` tests added (`tests/test_hf_sync.py`); T8 fixed (`review/2026-09-25`): webhook URL kept out of logs (also httpx's request log), d3 pinned with SRI. No busy-timeout change: Python's `sqlite3` already waits 5 s and no lock errors are recorded |
 | S1 | Primary UI decision | — | Open |
