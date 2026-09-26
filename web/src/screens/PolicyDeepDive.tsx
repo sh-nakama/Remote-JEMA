@@ -131,14 +131,16 @@ export function PolicyDeepDiveScreen() {
   const pol = usePolicyLive(interactive)
   const manifest = useManifest()
   // Pipeline-status line: live from the manifest's datasets.policy counts + its
-  // generated_at; the frozen fixture string remains the loading/fallback state.
+  // generated_at; a neutral placeholder until (or unless) the manifest loads.
   const polC = policyCounts(manifest.data)
   const pipelineLine =
     polC && manifest.data
       ? lang === 'ja'
         ? `最終書き出し ${fmtStamp(manifest.data.generated_at)} — 追跡委員会 ${polC.committees} · 会合 ${polC.meetings} · 要約済 ${polC.summarised}`
         : `Last export ${fmtStamp(manifest.data.generated_at)} — Committees ${polC.committees} · Meetings ${polC.meetings} · Summarised ${polC.summarised}`
-      : 'Last run 2026-07-02 06:10 JST — Processed 8 · Summarised 3 · Errored 0 · Synthesised 2 · Rate-limited: no'
+      : lang === 'ja'
+        ? manifest.error ? '書き出し状況を取得できません' : '書き出し状況を読み込み中…'
+        : manifest.error ? 'Export status unavailable' : 'Loading export status…'
   // The catalog (committees.json) carries the full energy catalog. The explorer
   // shows every committee — tracked *and* discovered (the latter marked "untracked")
   // — because detect now scans the whole catalog; `tracked` only gates whether a

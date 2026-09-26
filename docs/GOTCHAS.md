@@ -308,10 +308,12 @@ fixed.
   http(s) links (`_is_web_url`), the exporter blanks anything else already in a synced DB
   (`_web_url`), and the Deep Dive's `openUrl` refuses it. Apply the same rule to any new
   scraped link that gets rendered.
-- **Every screen falls back to fixtures, and a failed live fetch looks identical to "still
-  loading"** (only PolicyDeepDive surfaces a `stale` banner) `(open — P3)`. If a screen shows
-  suspiciously smooth data, suspect a broken snapshot before suspecting the market. The unused
-  `useSnapshot`/`useManifest` hooks in `lib/data.ts` are the intended error-aware replacement.
+- **Every screen falls back to built-in sample data (fixtures), which looks real.** When the
+  export manifest can't load, `App.tsx`'s `DataUnavailable` notice says the figures are sample
+  data. MarketData's KPIs use whichever selected areas loaded and tag a failed area "no data —
+  sample shown". Per-snapshot fallbacks elsewhere are still silent `(open — P3)`. Never add a
+  fixture that can render next to live data without a label; `useSnapshot`/`useManifest` in
+  `lib/data.ts` expose `error` for exactly this.
 - **The fixtures carry a frozen "today" (2026-07-02).** Live data must never be dated/counted
   against it: `PolicyDeepDive.dUntil` takes an anchor that flips with `pol.ready`, and
   MarketData's peak label reads the snapshot's own datetimes (`LiveArea.dDt`). Static caption
