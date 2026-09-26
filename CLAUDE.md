@@ -17,6 +17,6 @@ Guidance for working in this repository (RePower — Japanese power-market scrap
 
 ## Conventions
 
-- Python ≥ 3.11. Install dev deps with `pip install -e ".[dev]"`.
+- Python ≥ 3.11. Install dev deps with `pip install -e ".[dev]" -c constraints.txt` (the pinned versions CI and production run).
 - Run the dashboard: `streamlit run dashboard/app.py`.
 - Tests live in `tests/`; CI runs lint + tests (see `.github/workflows/ci.yml`).

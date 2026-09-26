@@ -43,7 +43,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e .
+        run: pip install -e . -c constraints.txt
 
       - name: Pull existing DB from Hugging Face
         run: python -m repower.cli pull-hf

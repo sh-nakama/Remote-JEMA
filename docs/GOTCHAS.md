@@ -691,14 +691,18 @@ fixed.
   the image runs as the non-root `repower` user; keep both.
 - `sync-space.yml` mirrors its deploy dir onto the Space (`delete_patterns=["*"]`): any file on
   the Space that the deploy dir doesn't contain is deleted on the next sync (`.gitattributes`
-  excepted). Add Space-only files to `space/`, never through the Hub UI.
+  excepted). Add Space-only files to `space/`, never through the Hub UI. The sync
+  (`.github/scripts/sync_space.py`) then waits for Hugging Face to rebuild and start the app, and
+  fails the run on a build or runtime error — the upload alone succeeds before the build begins.
 - `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
   `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
   a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
 - Actions are pinned to commit SHAs (`@<sha> # vN`); Dependabot's `github-actions` updates keep
   the SHA and comment in step, so edit pins through it or by hand in that same format. Every
   workflow declares `permissions:` (`contents: read`, plus Pages for `web-deploy.yml`) — give a
-  new workflow the same. There is still no Python lockfile, so CI, Docker and the Space install
-  floating versions `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but
-  `>=0.23` in `pyproject.toml` — version skew between the two install paths is unchecked
-  `(open — P4)`.
+  new workflow the same.
+- **Every install is pinned by `constraints.txt`** (`pip install ... -c constraints.txt` in each
+  workflow and the Dockerfile; the Space sync ships it). It is resolved for what CI and the image
+  run — CPython 3.11 on x86-64 Linux — so regenerate it with the command in its header, never by
+  hand. `pyproject.toml` keeps ranges; the lock picks versions. Floating installs are how
+  SQLAlchemy 2.1 reached CI and the crons untested. Dependabot bumps the pins weekly.

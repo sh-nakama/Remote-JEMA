@@ -18,9 +18,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --create-home --uid 1000 repower
 
 # Third-party deps first, so src/ edits don't re-download every dependency
-COPY pyproject.toml .
+COPY pyproject.toml constraints.txt ./
 RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml','rb'))['project']['dependencies']))" > requirements.txt \
-    && pip install --no-cache-dir -r requirements.txt \
+    && pip install --no-cache-dir -r requirements.txt -c constraints.txt \
     && rm requirements.txt
 
 # Editable install needs src/ present (src layout); deps already satisfied above

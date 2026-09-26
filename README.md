@@ -54,7 +54,7 @@ Streamlit dashboard is deployed to a Hugging Face Space using the Docker SDK
 Requires Python >= 3.11.
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]" -c constraints.txt   # the versions CI and production run
 # Optional, but needed for the policy scrapers: meti.go.jp answers every tokenless
 # client with an AWS WAF challenge, and only a real browser can mint the token that
 # clears it. Without this, METI detection degrades to a wall of 202s.

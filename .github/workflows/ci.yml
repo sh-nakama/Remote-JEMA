@@ -30,7 +30,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install package + dev tools
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev]" -c constraints.txt
 
       - name: Ruff (lint)
         run: ruff check src tests
