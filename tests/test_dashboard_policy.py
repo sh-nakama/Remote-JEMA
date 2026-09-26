@@ -14,7 +14,11 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _RUNNER = r'''
+import os
+
 from streamlit.testing.v1 import AppTest
 
 
@@ -40,17 +44,26 @@ at.run(timeout=60)
 # without raising. A stray exception in any of those paths fails here.
 assert not at.exception, at.exception
 assert at.header, "policy header not rendered"
-# The committee manager adds buttons (Apply changes / Search / etc.).
-assert at.button, "committee manager controls not rendered"
+keys = [b.key or "" for b in at.button]
+if os.environ.get("SPACE_ID"):
+    # The hosted copy is read-only: no committee manager, no Generate buttons.
+    assert not [k for k in keys if k.startswith("policy_")], keys
+    assert any("閲覧専用" in c.value or "read-only" in c.value for c in at.caption), "read-only note missing"
+else:
+    assert "policy_apply_committee_edits" in keys, keys
 print("APPTEST_OK")
 '''
 
 
-def test_policy_view_renders(tmp_path):
+@pytest.mark.parametrize("hosted", [False, True], ids=["local", "hf-space"])
+def test_policy_view_renders(tmp_path, hosted):
     runner = tmp_path / "runner.py"
     runner.write_text(_RUNNER, encoding="utf-8")
 
     env = dict(os.environ)
+    env.pop("SPACE_ID", None)
+    if hosted:
+        env["SPACE_ID"] = "someone/space"
     env["REPOWER_DB_PATH"] = str(tmp_path / "t.db")
     src = str(Path(__file__).resolve().parents[1] / "src")
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")

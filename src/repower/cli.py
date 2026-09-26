@@ -24,6 +24,8 @@ for _stream in (sys.stdout, sys.stderr):
 
 app = typer.Typer(name="repower", help="Tokyo power market analysis bot")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+# httpx logs every request URL at INFO, which would print the webhook URL (its secret) on each post.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @app.command()
@@ -261,6 +263,22 @@ def pull_hf():
     from repower.hf_sync import pull_db_from_hf
     pull_db_from_hf()
     typer.echo("Database pulled from Hugging Face")
+
+
+@app.command("check-freshness")
+def check_freshness():
+    """Exit 1 if any market-data source lags past its limit (the daily cron's outage alarm)."""
+    from repower.freshness import source_ages
+
+    rows = source_ages()
+    for r in rows:
+        age = "missing" if r["age"] is None else f"{r['age']}d"
+        typer.echo(f"   {'STALE' if r['stale'] else 'ok':5} {r['source']:<24} "
+                   f"{str(r['latest'] or '-'):<10} {age:>7}  (limit {r['limit']}d)")
+    stale = [r["source"] for r in rows if r["stale"]]
+    if stale:
+        typer.echo(f"Stale market data: {', '.join(stale)}", err=True)
+        raise typer.Exit(code=1)
 
 
 @app.command()

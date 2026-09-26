@@ -13,6 +13,15 @@ on:
     # 22:00 UTC on the 1st = 07:00 JST on the 2nd, monthly.
     - cron: "0 22 1 * *"
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
+
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+permissions:
+  contents: read
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -30,9 +39,9 @@ jobs:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
@@ -47,9 +56,9 @@ jobs:
 
       - name: Pull latest DB from Hugging Face (for the current catalog)
         run: python -m repower.cli pull-hf
-        # A scheduled run must not cross-check against a fresh DB and push it
-        # over the dataset's history; manual dispatch may (bootstrap).
-        continue-on-error: ${{ github.event_name != 'schedule' }}
+        # Only an explicit bootstrap may cross-check against an empty DB: pushing it
+        # would replace the dataset's history. Scheduled runs have no inputs, so they fail hard.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Cross-check energy-board vs our catalog (accumulates discovered rows)
         run: python -m repower.cli policy crosscheck --notify

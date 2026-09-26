@@ -159,21 +159,21 @@ The work is split by whether it needs NotebookLM authentication:
   unsummarised meetings stays current with no cookies required.
 - **Summarisation needs a live NotebookLM session.** Google rotates NotebookLM
   cookies and only an interactive browser login can mint a fresh session — no CI or
-  HF compute can do it. So summarisation runs **weekly** (`policy.yml`), gated on a
+  HF compute can do it. So summarisation runs **daily** (`policy.yml`), gated on a
   network-validated auth check; if auth is stale the job alerts and exits cleanly
   **without fabricating summaries**.
 
 ### Operator runbook — keeping summarisation alive
 
 Summaries are produced only while the `NOTEBOOKLM_AUTH_JSON` secret holds a valid
-session. Refresh it whenever the weekly job reports stale auth (roughly weekly):
+session. Refresh it whenever the daily job reports stale auth (roughly weekly):
 
 ```bash
 # 1. Re-authenticate locally (opens a browser for Google OAuth).
 notebooklm login
 notebooklm auth check --test          # confirm status: ok AND token_fetch: true
 
-# 2. Push the fresh session to the repo secret the weekly workflow reads.
+# 2. Push the fresh session to the repo secret the policy workflow reads.
 #    bash / Git Bash:
 gh secret set NOTEBOOKLM_AUTH_JSON < ~/.notebooklm/profiles/default/storage_state.json
 #    PowerShell:
@@ -202,8 +202,8 @@ repower policy backfill --committee emissions_trading --since-meeting 30 --max-p
 ```
 
 Re-run until `policy status` shows the desired `LATEST`. The same effect happens
-gradually through the weekly `policy run` (it drains the worklist newest-first at
-`--max-per-run` per week). Each pass needs valid auth.
+gradually through the daily `policy run` (it drains the worklist newest-first at
+`--max-per-run` per day). Each pass needs valid auth.
 
 When a `policy run` spans multiple committees (e.g. `--committee all`), the worklist
 is ordered by each committee's **priority** (set in `committees.py`) before newest-first,
@@ -221,7 +221,7 @@ everything else.
   to pick up late upstream revisions the daily window misses.
 - **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
   `since` and `area` inputs.
-- **`policy.yml`** — weekly (Mondays 06:30 JST) + `workflow_dispatch` authenticated
+- **`policy.yml`** — daily (06:30 JST) + `workflow_dispatch` authenticated
   NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
   pending meetings (`--committee`, `--max-per-run` inputs), post a digest, push DB.
   Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the

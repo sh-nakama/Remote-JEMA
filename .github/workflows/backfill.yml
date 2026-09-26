@@ -11,6 +11,14 @@ on:
         description: "Area slug (or 'all')"
         required: true
         default: "all"
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
+
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+permissions:
+  contents: read
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -28,24 +36,27 @@ jobs:
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: pip install -e .
 
-      - name: Pull existing DB from Hugging Face (if any)
+      - name: Pull existing DB from Hugging Face
         run: python -m repower.cli pull-hf
-        continue-on-error: true
+        # Only an explicit bootstrap may backfill into an empty DB: pushing it would
+        # replace the dataset's history.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Run backfill
-        run: |
-          python -m repower.cli backfill \
-            --since "${{ inputs.since }}" \
-            --area "${{ inputs.area }}"
+        # Inputs go through env: spliced into the script, a crafted value would run as shell.
+        env:
+          SINCE: ${{ inputs.since }}
+          AREA: ${{ inputs.area }}
+        run: python -m repower.cli backfill --since "$SINCE" --area "$AREA"
 
       - name: Push refreshed DB to Hugging Face
         run: python -m repower.cli push-hf

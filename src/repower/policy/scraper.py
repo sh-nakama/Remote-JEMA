@@ -53,6 +53,12 @@ _UA = (
 )
 
 
+def _is_web_url(url: str) -> bool:
+    # urljoin passes javascript:/data: hrefs through unchanged, and these links end up in window.open.
+    p = urlparse(url)
+    return p.scheme in ("http", "https") and bool(p.netloc)
+
+
 # ── Result types ─────────────────────────────────────────────────────────────
 @dataclass
 class Material:
@@ -276,7 +282,7 @@ def classify_material(link_text: str, url: str) -> str:
 
 
 def parse_pdf_links(content: bytes | str, base_url: str) -> list[dict]:
-    """Every ``<a href=*.pdf>`` on a page → ``{'url', 'text'}`` (absolute URLs)."""
+    """Every ``<a href=*.pdf>`` on a page → ``{'url', 'text'}`` (absolute http(s) URLs)."""
     soup = _soup(content)
     out: list[dict] = []
     seen: set[str] = set()
@@ -285,7 +291,7 @@ def parse_pdf_links(content: bytes | str, base_url: str) -> list[dict]:
         if not href.lower().split("?")[0].endswith(".pdf"):
             continue
         full = href if href.startswith("http") else urljoin(base_url, href)
-        if full in seen:
+        if not _is_web_url(full) or full in seen:
             continue
         seen.add(full)
         out.append({"url": full, "text": a.get_text(strip=True)})
@@ -359,6 +365,8 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
             for a in row.find_all("a", href=True):
                 href = a["href"]
                 full = urljoin(page_url, href)
+                if not _is_web_url(full):
+                    continue
                 if href.lower().split("?")[0].endswith(".pdf"):
                     info["direct_pdfs"].append({"url": full, "text": a.get_text(strip=True)})
                 elif "haifu" in href.lower() and href.lower().endswith(".html"):

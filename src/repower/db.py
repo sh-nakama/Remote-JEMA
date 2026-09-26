@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import threading
 from datetime import UTC, datetime
 
 from sqlalchemy import (
     Boolean,
-    Column,
     Date,
     DateTime,
     Float,
@@ -18,7 +18,7 @@ from sqlalchemy import (
     create_engine,
 )
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 from repower.config import DB_PATH
 
@@ -30,40 +30,40 @@ class Base(DeclarativeBase):
 # ── TEPCO area supply/demand (30-min) ──────────────────────────────────────
 class DemandSupply30m(Base):
     __tablename__ = "demand_supply_30m"
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # tepco, hokkaido, tohoku, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
-    area = Column(String(16), nullable=False, default="tepco")
-    date = Column(Date, nullable=False)
-    time = Column(String(5), nullable=False)  # "HH:MM"
-    area_demand_mw = Column(Float)
-    nuclear = Column(Float)
-    lng = Column(Float)
-    coal = Column(Float)
-    oil = Column(Float)
-    thermal_other = Column(Float)
-    hydro = Column(Float)
-    geothermal = Column(Float)
-    biomass = Column(Float)
-    solar_actual = Column(Float)
-    solar_curtail = Column(Float)
-    wind_actual = Column(Float)
-    wind_curtail = Column(Float)
-    pumped = Column(Float)
-    battery = Column(Float)
-    interconnect = Column(Float)
-    other = Column(Float)
-    total_supply = Column(Float)
+    area: Mapped[str] = mapped_column(String(16), nullable=False, default="tepco")
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    time: Mapped[str] = mapped_column(String(5), nullable=False)  # "HH:MM"
+    area_demand_mw: Mapped[float | None] = mapped_column(Float)
+    nuclear: Mapped[float | None] = mapped_column(Float)
+    lng: Mapped[float | None] = mapped_column(Float)
+    coal: Mapped[float | None] = mapped_column(Float)
+    oil: Mapped[float | None] = mapped_column(Float)
+    thermal_other: Mapped[float | None] = mapped_column(Float)
+    hydro: Mapped[float | None] = mapped_column(Float)
+    geothermal: Mapped[float | None] = mapped_column(Float)
+    biomass: Mapped[float | None] = mapped_column(Float)
+    solar_actual: Mapped[float | None] = mapped_column(Float)
+    solar_curtail: Mapped[float | None] = mapped_column(Float)
+    wind_actual: Mapped[float | None] = mapped_column(Float)
+    wind_curtail: Mapped[float | None] = mapped_column(Float)
+    pumped: Mapped[float | None] = mapped_column(Float)
+    battery: Mapped[float | None] = mapped_column(Float)
+    interconnect: Mapped[float | None] = mapped_column(Float)
+    other: Mapped[float | None] = mapped_column(Float)
+    total_supply: Mapped[float | None] = mapped_column(Float)
     __table_args__ = (UniqueConstraint("area", "date", "time", name="uq_ds_area_date_time"),)
 
 
 # ── JEPX day-ahead spot prices (30-min) ───────────────────────────────────
 class JepxSpot30m(Base):
     __tablename__ = "jepx_spot_30m"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(Date, nullable=False)
-    time = Column(String(5), nullable=False)
-    system_price = Column(Float)
-    tokyo_area_price = Column(Float)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    time: Mapped[str] = mapped_column(String(5), nullable=False)
+    system_price: Mapped[float | None] = mapped_column(Float)
+    tokyo_area_price: Mapped[float | None] = mapped_column(Float)
     __table_args__ = (UniqueConstraint("date", "time", name="uq_jepx_date_time"),)
 
 
@@ -71,23 +71,23 @@ class JepxSpot30m(Base):
 class JepxAreaPrice30m(Base):
     """Per-region JEPX area price, keyed (area, date, time) like DemandSupply30m."""
     __tablename__ = "jepx_area_price_30m"
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     # hokkaido, tohoku, tepco, chubu, hokuriku, kansai, chugoku, shikoku, kyushu
-    area = Column(String(16), nullable=False)
-    date = Column(Date, nullable=False)
-    time = Column(String(5), nullable=False)
-    price = Column(Float)
+    area: Mapped[str] = mapped_column(String(16), nullable=False)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    time: Mapped[str] = mapped_column(String(5), nullable=False)
+    price: Mapped[float | None] = mapped_column(Float)
     __table_args__ = (UniqueConstraint("area", "date", "time", name="uq_jepx_area_date_time"),)
 
 
 # ── Fuel / commodity prices (daily) ───────────────────────────────────────
 class FuelDaily(Base):
     __tablename__ = "fuels_daily"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(Date, nullable=False)
-    ticker = Column(String(20), nullable=False)
-    close = Column(Float)
-    currency = Column(String(5))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    ticker: Mapped[str] = mapped_column(String(20), nullable=False)
+    close: Mapped[float | None] = mapped_column(Float)
+    currency: Mapped[str | None] = mapped_column(String(5))
     __table_args__ = (UniqueConstraint("date", "ticker", name="uq_fuel_date_ticker"),)
 
 
@@ -102,11 +102,11 @@ class FuelDaily(Base):
 # ephemeral daily CI runs) skip downloading + re-parsing unchanged files.
 class HttpCache(Base):
     __tablename__ = "http_cache"
-    url = Column(String(512), primary_key=True)
-    etag = Column(String(256))
-    last_modified = Column(String(64))
-    last_status = Column(Integer)
-    last_checked = Column(DateTime)
+    url: Mapped[str] = mapped_column(String(512), primary_key=True)
+    etag: Mapped[str | None] = mapped_column(String(256))
+    last_modified: Mapped[str | None] = mapped_column(String(64))
+    last_status: Mapped[int | None] = mapped_column(Integer)
+    last_checked: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # Failure observability. `last_status`/`last_checked` only ever describe a
     # *cacheable* response (200/304) — every other outcome (403, a WAF 202 that
     # never cleared, an open circuit, an exhausted budget) raises before the row
@@ -118,35 +118,35 @@ class HttpCache(Base):
     # file that had not changed) and must never bump `last_checked` (prune_cache
     # keys on it, so failure writes would keep dead URLs alive forever in a table
     # that is synced to Hugging Face).
-    last_error_kind = Column(String(32))  # repower.scrapers.http_cache.FETCH_KINDS
-    last_error_at = Column(DateTime)
-    last_error_detail = Column(Text)
+    last_error_kind: Mapped[str | None] = mapped_column(String(32))  # repower.scrapers.http_cache.FETCH_KINDS
+    last_error_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    last_error_detail: Mapped[str | None] = mapped_column(Text)
 
 
 # ── News items ─────────────────────────────────────────────────────────────
 class NewsItem(Base):
     __tablename__ = "news_items"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    url_hash = Column(String(64), unique=True, nullable=False)
-    source = Column(String(50))
-    title = Column(Text)
-    summary = Column(Text)
-    published_at = Column(DateTime)
-    fetched_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    url_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    source: Mapped[str | None] = mapped_column(String(50))
+    title: Mapped[str | None] = mapped_column(Text)
+    summary: Mapped[str | None] = mapped_column(Text)
+    published_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    fetched_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 # ── Analysis outputs ──────────────────────────────────────────────────────
 class AnalysisRecord(Base):
     __tablename__ = "analyses"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    date = Column(Date, unique=True, nullable=False)
-    features_json = Column(Text)
-    narrative_md = Column(Text)
-    model = Column(String(50))
-    tokens_in = Column(Integer)
-    tokens_out = Column(Integer)
-    cost_usd = Column(Float)
-    created_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    date: Mapped[dt.date] = mapped_column(Date, unique=True, nullable=False)
+    features_json: Mapped[str | None] = mapped_column(Text)
+    narrative_md: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(String(50))
+    tokens_in: Mapped[int | None] = mapped_column(Integer)
+    tokens_out: Mapped[int | None] = mapped_column(Integer)
+    cost_usd: Mapped[float | None] = mapped_column(Float)
+    created_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
 
 
 # ── Policy observer ─────────────────────────────────────────────────────────
@@ -158,20 +158,21 @@ class PolicyCommittee(Base):
     """One tracked committee + its rolled-up running document and synthesis state."""
 
     __tablename__ = "policy_committee"
-    committee_key = Column(String(64), primary_key=True)
-    name_ja = Column(Text)
-    name_en = Column(Text)
-    url = Column(Text)
-    source = Column(String(8))  # METI | OCCTO | EGC
-    latest_meeting = Column(Integer)  # highest meeting reaching state='done'
-    synthesis_notebook_id = Column(String(64))  # persistent per-committee notebook
-    last_synth_meeting = Column(Integer)  # highest meeting folded into the synthesis
-    archive_watermark_meeting = Column(Integer)  # meetings ≤ this live in a superseded notebook
-    source_count = Column(Integer)  # live sources in the synthesis notebook
-    running_summary_md = Column(Text)  # Japanese running document (regenerated from DB)
-    running_digest_en_md = Column(Text)  # compact English running digest
-    last_checked = Column(DateTime)  # last detection run
-    last_refreshed_at = Column(DateTime)  # last summarisation run
+    committee_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    name_ja: Mapped[str | None] = mapped_column(Text)
+    name_en: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str | None] = mapped_column(String(8))  # METI | OCCTO | EGC
+    latest_meeting: Mapped[int | None] = mapped_column(Integer)  # highest meeting reaching state='done'
+    synthesis_notebook_id: Mapped[str | None] = mapped_column(String(64))  # persistent per-committee notebook
+    last_synth_meeting: Mapped[int | None] = mapped_column(Integer)  # highest meeting folded into the synthesis
+    # meetings ≤ this live in a superseded notebook
+    archive_watermark_meeting: Mapped[int | None] = mapped_column(Integer)
+    source_count: Mapped[int | None] = mapped_column(Integer)  # live sources in the synthesis notebook
+    running_summary_md: Mapped[str | None] = mapped_column(Text)  # Japanese running document (regenerated from DB)
+    running_digest_en_md: Mapped[str | None] = mapped_column(Text)  # compact English running digest
+    last_checked: Mapped[dt.datetime | None] = mapped_column(DateTime)  # last detection run
+    last_refreshed_at: Mapped[dt.datetime | None] = mapped_column(DateTime)  # last summarisation run
     # Tracked-set state (see repower.policy.store):
     #   enabled     — the daily detect/summarise pipeline processes this committee.
     #   user_added  — added at runtime (discovery / UI) vs seeded from committees.py.
@@ -180,17 +181,17 @@ class PolicyCommittee(Base):
     #                 and both backfills). Independent of ``enabled``, which only
     #                 gates summarisation: a dormant committee can be tracked but
     #                 archived, or untracked but still actively detected.
-    enabled = Column(Boolean, default=True, nullable=False)
-    user_added = Column(Boolean, default=False, nullable=False)
-    priority = Column(Integer, default=100)
-    archived = Column(Boolean, default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    user_added: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    priority: Mapped[int | None] = mapped_column(Integer, default=100)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # Per-source scraper config (mirrors committees.Committee) so a committee added
     # at runtime is scrapeable without a code change. OCCTO: max_meeting/prefix;
     # EGC: log_pages (JSON array of log-page filenames) / min_meeting.
-    max_meeting = Column(Integer)
-    prefix = Column(String(64))
-    log_pages = Column(Text)
-    min_meeting = Column(Integer)
+    max_meeting: Mapped[int | None] = mapped_column(Integer)
+    prefix: Mapped[str | None] = mapped_column(String(64))
+    log_pages: Mapped[str | None] = mapped_column(Text)
+    min_meeting: Mapped[int | None] = mapped_column(Integer)
     # Fetch observability (see repower.policy.detect). `last_checked` marks that a
     # detection pass *ran*; it says nothing about whether the committee's pages
     # were actually reachable, and historically was not written at all on the
@@ -202,13 +203,13 @@ class PolicyCommittee(Base):
     #   last_fetch_at      — written on *every* pass, success or failure
     #   last_ok_at         — last genuinely successful fetch (200/304)
     #   consecutive_failures — reset to 0 on success; separates flaky from dead
-    last_fetch_status = Column(String(16))
-    last_fetch_kind = Column(String(32))
-    last_fetch_detail = Column(Text)
-    last_fetch_url = Column(Text)
-    last_fetch_at = Column(DateTime)
-    last_ok_at = Column(DateTime)
-    consecutive_failures = Column(Integer, default=0, nullable=False)
+    last_fetch_status: Mapped[str | None] = mapped_column(String(16))
+    last_fetch_kind: Mapped[str | None] = mapped_column(String(32))
+    last_fetch_detail: Mapped[str | None] = mapped_column(Text)
+    last_fetch_url: Mapped[str | None] = mapped_column(Text)
+    last_fetch_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    last_ok_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class PolicyFetchEvent(Base):
@@ -223,51 +224,51 @@ class PolicyFetchEvent(Base):
     """
 
     __tablename__ = "policy_fetch_event"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    committee_key = Column(String(64), nullable=False, index=True)
-    at = Column(DateTime, nullable=False)
-    status = Column(String(16), nullable=False)  # ok | unchanged | error
-    kind = Column(String(32))  # http_cache.FETCH_KINDS slug; NULL when successful
-    detail = Column(Text)
-    url = Column(Text)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    committee_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    at: Mapped[dt.datetime] = mapped_column(DateTime, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)  # ok | unchanged | error
+    kind: Mapped[str | None] = mapped_column(String(32))  # http_cache.FETCH_KINDS slug; NULL when successful
+    detail: Mapped[str | None] = mapped_column(Text)
+    url: Mapped[str | None] = mapped_column(Text)
 
 
 class PolicyMeeting(Base):
     """One committee meeting and its per-meeting summary lifecycle."""
 
     __tablename__ = "policy_meeting"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    committee_key = Column(String(64), nullable=False)
-    meeting_num = Column(Integer, nullable=False)
-    meeting_date = Column(Date)
-    title = Column(Text)
-    notebook_id = Column(String(64))  # ephemeral notebook (deleted after done)
-    report_task_id = Column(String(64))
-    briefing_md = Column(Text)  # detailed Japanese per-meeting briefing
-    digest_en_json = Column(Text)  # English ask --json (answer + references[])
-    has_minutes = Column(Boolean, default=False)  # 議事録 present
-    has_torimatome = Column(Boolean, default=False)  # とりまとめ present → milestone
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    committee_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    meeting_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    meeting_date: Mapped[dt.date | None] = mapped_column(Date)
+    title: Mapped[str | None] = mapped_column(Text)
+    notebook_id: Mapped[str | None] = mapped_column(String(64))  # ephemeral notebook (deleted after done)
+    report_task_id: Mapped[str | None] = mapped_column(String(64))
+    briefing_md: Mapped[str | None] = mapped_column(Text)  # detailed Japanese per-meeting briefing
+    digest_en_json: Mapped[str | None] = mapped_column(Text)  # English ask --json (answer + references[])
+    has_minutes: Mapped[bool | None] = mapped_column(Boolean, default=False)  # 議事録 present
+    has_torimatome: Mapped[bool | None] = mapped_column(Boolean, default=False)  # とりまとめ present → milestone
     # detected → downloading → ingesting → generating → done | error
-    state = Column(String(16), default="detected", nullable=False)
-    quality_flag = Column(String(32))  # e.g. ocr_suspect, short_output
+    state: Mapped[str] = mapped_column(String(16), default="detected", nullable=False)
+    quality_flag: Mapped[str | None] = mapped_column(String(32))  # e.g. ocr_suspect, short_output
     # Why the last attempt failed, in words. `quality_flag` is a coarse slug and is
     # NULL for the generic NotebookLM failure path, which left "state = error" as
     # the only trace — enough to know a meeting broke, never enough to know why.
     # Written by every error path in repower.policy.pipeline and cleared on success,
     # so it always describes the *current* state rather than an old attempt.
-    last_error = Column(Text)
-    last_error_at = Column(DateTime)
-    gen_seconds = Column(Float)
-    retry_count = Column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text)
+    last_error_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    gen_seconds: Mapped[float | None] = mapped_column(Float)
+    retry_count: Mapped[int | None] = mapped_column(Integer, default=0)
     # True once this meeting's briefing has been folded into the committee synthesis
     # notebook. Tracked per-meeting (not via a single high-water mark) so backfilled
     # / out-of-order meetings are included rather than skipped.
-    synth_done = Column(Boolean, default=False)
+    synth_done: Mapped[bool | None] = mapped_column(Boolean, default=False)
     # Set when a user asks the dashboard to summarise this meeting but auth was stale
     # (or they queued it): the next `policy run` drains requested meetings first.
-    gen_requested = Column(Boolean, default=False)
-    detected_at = Column(DateTime, default=lambda: datetime.now(UTC))
-    updated_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    gen_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
     )
@@ -287,16 +288,16 @@ class PolicyUpcoming(Base):
     """
 
     __tablename__ = "policy_upcoming"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    meeting_date = Column(Date, nullable=False)
-    name_ja = Column(Text, nullable=False)
-    source_key = Column(String(160), nullable=False)  # normalised name for dedup
-    org = Column(String(16))  # METI | OCCTO | EGC | other
-    committee_key = Column(String(64))  # matched tracked committee, else NULL
-    meeting_num = Column(Integer)  # from 第N回, if present
-    source = Column(String(16))  # meti (the METI committee calendar)
-    source_url = Column(Text)
-    detected_at = Column(DateTime, default=lambda: datetime.now(UTC))
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    meeting_date: Mapped[dt.date] = mapped_column(Date, nullable=False)
+    name_ja: Mapped[str] = mapped_column(Text, nullable=False)
+    source_key: Mapped[str] = mapped_column(String(160), nullable=False)  # normalised name for dedup
+    org: Mapped[str | None] = mapped_column(String(16))  # METI | OCCTO | EGC | other
+    committee_key: Mapped[str | None] = mapped_column(String(64))  # matched tracked committee, else NULL
+    meeting_num: Mapped[int | None] = mapped_column(Integer)  # from 第N回, if present
+    source: Mapped[str | None] = mapped_column(String(16))  # meti (the METI committee calendar)
+    source_url: Mapped[str | None] = mapped_column(Text)
+    detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     __table_args__ = (
         UniqueConstraint("meeting_date", "source_key", name="uq_policy_upcoming"),
     )
@@ -306,16 +307,18 @@ class PolicyMaterial(Base):
     """One source document (PDF) belonging to a meeting."""
 
     __tablename__ = "policy_material"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    committee_key = Column(String(64), nullable=False)
-    meeting_num = Column(Integer, nullable=False)
-    pdf_id = Column(String(128), nullable=False)  # stable per-committee dedup key
-    kind = Column(String(16))  # minutes | brief | compilation | appendix | handout | agenda | other
-    url = Column(Text)
-    title = Column(Text)  # link text
-    nblm_source_id = Column(String(64))  # NotebookLM source id once ingested
-    sha256 = Column(String(64))
-    status = Column(String(16), default="detected")  # detected | downloaded | ingested | error
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    committee_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    meeting_num: Mapped[int] = mapped_column(Integer, nullable=False)
+    pdf_id: Mapped[str] = mapped_column(String(128), nullable=False)  # stable per-committee dedup key
+    # minutes | brief | compilation | appendix | handout | agenda | other
+    kind: Mapped[str | None] = mapped_column(String(16))
+    url: Mapped[str | None] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(Text)  # link text
+    nblm_source_id: Mapped[str | None] = mapped_column(String(64))  # NotebookLM source id once ingested
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    # detected | downloaded | ingested | error
+    status: Mapped[str | None] = mapped_column(String(16), default="detected")
     __table_args__ = (
         UniqueConstraint("committee_key", "pdf_id", name="uq_policy_material"),
     )
@@ -342,6 +345,13 @@ def get_engine(db_path: str | None = None) -> Engine:
             engine = create_engine(f"sqlite:///{path}", echo=False)
             _ENGINES[path] = engine
         return engine
+
+
+def dispose_engines() -> None:
+    """Close pooled connections, e.g. once a pull has replaced the DB file under them."""
+    with _LOCK:
+        for engine in _ENGINES.values():
+            engine.dispose()
 
 
 def init_db(db_path: str | None = None) -> Engine:

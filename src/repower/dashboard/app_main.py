@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -269,7 +270,6 @@ def _render_sidebar(show_refresh: bool) -> dict:
             st.cache_resource.clear()
             st.cache_data.clear()
             st.session_state["cache_buster"] = st.session_state.get("cache_buster", 0) + 1
-            st.session_state.pop("db_ready", None)
             if not hf_ready:
                 st.sidebar.info("Hugging Face not configured — reloaded local data only.")
             st.rerun()
@@ -1071,6 +1071,11 @@ def _render_committee_manager(cfg: dict) -> None:
         _render_committee_discovery(lang, db)
 
 
+def _hosted() -> bool:
+    """On the HF Space the DB is a throwaway copy that is never pushed back, so offer no writes."""
+    return bool(os.environ.get("SPACE_ID"))
+
+
 def render_policy(cfg: dict) -> None:
     """Policy observer view: per-committee running document + per-meeting briefings."""
     lang = cfg.get("lang", DEFAULT_LANG)
@@ -1078,7 +1083,10 @@ def render_policy(cfg: dict) -> None:
 
     # Committee management (search / enable-disable / add) — available even before
     # anything has been summarised.
-    _render_committee_manager(cfg)
+    if _hosted():
+        st.caption(T("policy_hosted_read_only", lang))
+    else:
+        _render_committee_manager(cfg)
 
     committees = _policy_committees(cfg["cache_buster"])
     if not committees:
@@ -1107,12 +1115,13 @@ def render_policy(cfg: dict) -> None:
 
     # Generate the latest meeting's summary on command (direct if auth is fresh,
     # otherwise queued — see _run_generation).
-    gc1, gc2 = st.columns([1, 3])
-    with gc1:
-        if st.button(T("policy_generate_latest", lang), key=f"policy_gen_latest_{key}"):
-            _run_generation(key, lang)
-    with gc2:
-        st.caption(T("policy_gen_local_note", lang))
+    if not _hosted():
+        gc1, gc2 = st.columns([1, 3])
+        with gc1:
+            if st.button(T("policy_generate_latest", lang), key=f"policy_gen_latest_{key}"):
+                _run_generation(key, lang)
+        with gc2:
+            st.caption(T("policy_gen_local_note", lang))
 
     # Download the full running document (regenerated from the DB).
     try:
@@ -1160,7 +1169,7 @@ def render_policy(cfg: dict) -> None:
             elif not en:
                 st.caption(f"({m['state']}; not yet summarised)")
             # Summarise (or re-summarise) this specific meeting on command.
-            if m["state"] != "done":
+            if m["state"] != "done" and not _hosted():
                 if st.button(T("policy_generate_meeting", lang),
                              key=f"policy_gen_meeting_{key}_{m['meeting_num']}"):
                     _run_generation(key, lang, meeting_num=m["meeting_num"])

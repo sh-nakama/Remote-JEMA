@@ -7,8 +7,10 @@ temporary Parquet path via pytest's ``tmp_path``. No network access.
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from repower.scrapers.eprx import upsert_eprx, upsert_eprx_tieline
 
@@ -75,3 +77,19 @@ def test_upsert_eprx_tieline_idempotent_and_updates(tmp_path):
 def test_upsert_eprx_empty_returns_zero(tmp_path):
     assert upsert_eprx([], path=str(tmp_path / "b.parquet")) == 0
     assert upsert_eprx_tieline([], path=str(tmp_path / "t.parquet")) == 0
+
+
+def test_upsert_eprx_crash_mid_write_keeps_the_existing_file(tmp_path, monkeypatch):
+    path = tmp_path / "bal.parquet"
+    upsert_eprx(_bal_rows(10.0), path=str(path))
+
+    def torn_write(self, target, *args, **kwargs):
+        Path(target).write_bytes(b"PAR1 torn")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", torn_write)
+    with pytest.raises(OSError, match="disk full"):
+        upsert_eprx(_bal_rows(42.0), path=str(path))
+
+    assert _tepco_demand(str(path)) == 10.0
+    assert [p.name for p in tmp_path.iterdir()] == ["bal.parquet"]

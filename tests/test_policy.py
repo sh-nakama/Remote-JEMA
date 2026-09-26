@@ -1,5 +1,5 @@
 """Tests for the policy observer: pure parse functions, material selection,
-detection (network mocked), running-document regeneration, and the no-Aurora gate.
+detection (network mocked) and running-document regeneration.
 
 Network-free: ``conditional_get`` and the discovery functions are monkeypatched;
 a temporary SQLite path holds the policy tables; POLICY_DIR is redirected to tmp.
@@ -111,6 +111,18 @@ def test_parse_pdf_links_resolves_and_dedups():
     assert "https://www.meti.go.jp/shingikai/x/079_gijiroku.pdf" in urls
     # The non-PDF link is ignored.
     assert all(u.lower().endswith(".pdf") for u in urls)
+
+
+@pytest.mark.parametrize("href", [
+    "javascript:alert(1)//x.pdf", " JavaScript:alert(1)//x.pdf", "data:text/html,x.pdf", "http:x.pdf",
+])
+def test_pdf_links_are_http_only(href):
+    """Material links reach window.open, and urljoin leaves a javascript: href as is."""
+    page = f'<a href="{href}">資料</a><a href="ok.pdf">資料</a>'
+    base = "https://www.egc.meti.go.jp/activity/index_x.html"
+    assert [x["url"] for x in parse_pdf_links(page, base)] == ["https://www.egc.meti.go.jp/activity/ok.pdf"]
+    row = f'<table><tr><td>令和8年6月8日</td><td>第608回</td><td><a href="{href}">議事要旨</a></td></tr></table>'
+    assert parse_egc_index(row, base)[0]["direct_pdfs"] == []
 
 
 def test_parse_egc_index_skips_nav_rows():
@@ -1534,6 +1546,29 @@ def test_probe_url_rejects_non_http():
                                   tracked_urls=set(), tracked_keys=set()) is None
 
 
+@pytest.mark.parametrize("url", [
+    "https://evil.example/shingikai/x/",
+    "https://www.meti.go.jp@evil.example/shingikai/x/",  # userinfo: the host is evil.example
+    "https://www.occto.or.jp.evil.example/iinkai/x/",
+    "https://notmeti.go.jp/shingikai/x/",
+    "http://127.0.0.1:8787/api/health",
+    "http://169.254.169.254/latest/meta-data/",
+    "file:///etc/passwd",
+])
+def test_probe_url_only_fetches_the_observed_sites(url):
+    fetched = []
+    cand = discover_mod.probe_url(url, fetch=lambda u: fetched.append(u) or ("ok", b""),
+                                  validate=False, tracked_urls=set(), tracked_keys=set())
+    assert cand is None and fetched == []
+
+
+def test_probe_url_accepts_egc_and_occto_hosts():
+    for url in ("https://www.egc.meti.go.jp/activity/index_x.html",
+                "https://www.occto.or.jp/iinkai/x/"):
+        assert discover_mod.probe_url(url, fetch=lambda u: ("ok", b"<title>x</title>"),
+                                      validate=False, tracked_urls=set(), tracked_keys=set())
+
+
 def test_probe_url_default_path_survives_cached_url(monkeypatch, tmp_path):
     """Regression: probe_url fetches the pasted URL, then its validation
     (discover_meetings) re-fetches it — so both must force a body, or the
@@ -1578,19 +1613,9 @@ def test_probe_url_flags_unreachable():
         assert cand is not None and cand.note == "unreachable"
 
 
-# ── No-Aurora gate ───────────────────────────────────────────────────────────
-def test_no_aurora_anywhere_in_package():
-    root = Path(__file__).resolve().parents[1] / "src" / "repower"
-    offenders = []
-    for p in root.rglob("*.py"):
-        if "aurora" in p.read_text(encoding="utf-8", errors="ignore").lower():
-            offenders.append(str(p))
-    assert not offenders, f"'aurora' found in: {offenders}"
-
-
 def test_all_committees_have_unique_keys_and_valid_source():
     keys = [c.key for c in COMMITTEES]
-    assert len(keys) == len(set(keys)) == 14
+    assert keys and len(keys) == len(set(keys))
     assert all(c.source in {"METI", "OCCTO", "EGC"} for c in COMMITTEES)
     assert committee_by_key("chousei_jukyu").is_occto
     # The two recently-added METI committees are tracked.

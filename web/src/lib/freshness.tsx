@@ -1,6 +1,7 @@
 import type { CSSProperties } from 'react'
 import { useApp } from './app'
 import { useManifest } from './data'
+import { parseDay } from './time'
 import type { Manifest } from './types'
 
 /**
@@ -48,7 +49,7 @@ export function FreshnessChip({ inverse, style }: { inverse?: boolean; style?: C
   // price date — NOT `generated_at`, which only says when the export ran. (An
   // export can run today yet still only reach prices published a few days ago.)
   const dataDate = sources.area_price || sources.system_price || data.generated_at.slice(0, 10)
-  const t = Date.parse(dataDate.length === 10 ? dataDate + 'T00:00:00Z' : dataDate)
+  const t = parseDay(dataDate)
   if (!Number.isFinite(t)) return null
   const stale = Date.now() - t > STALE_MS
   const label = lang === 'ja' ? 'データ最終' : 'Data through'

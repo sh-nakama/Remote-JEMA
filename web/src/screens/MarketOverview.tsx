@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
@@ -89,7 +89,7 @@ export function MarketOverviewScreen() {
     d.setHours(0, 0, 0, 0)
     return d
   }, [])
-  const daysFrom = (m: Meeting) => Math.round((+meetingDate(m) - +todayMid) / 864e5)
+  const daysFrom = useCallback((m: Meeting) => Math.round((+meetingDate(m) - +todayMid) / 864e5), [todayMid])
 
   // ---- handlers ----
   const tMarket = () => setScreen('market')
@@ -444,7 +444,7 @@ export function MarketOverviewScreen() {
       .map((m) => ({ m, d: daysFrom(m) }))
       .filter((x) => x.d >= 0)
     return [...recent, ...sched].sort((a, b) => a.d - b.d)
-  }, [meetings, upcoming, todayMid])
+  }, [meetings, upcoming, daysFrom])
 
   // Window includes today (0) with padding at both extremes.
   const tlDs = timelineItems.map((x) => x.d)

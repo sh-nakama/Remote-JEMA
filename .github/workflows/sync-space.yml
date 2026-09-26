@@ -12,14 +12,18 @@ on:
       - ".github/workflows/sync-space.yml"
   workflow_dispatch:
 
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+permissions:
+  contents: read
+
 jobs:
   sync-to-hub:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
@@ -55,6 +59,8 @@ jobs:
               repo_type="space",
               commit_message="Sync from GitHub",
               ignore_patterns=["*.pyc", "__pycache__", "*.egg-info"],
+              # Mirror the deploy dir: files removed from the repo must leave the Space too.
+              delete_patterns=["*"],
           )
           print("Space synced successfully")
           EOF

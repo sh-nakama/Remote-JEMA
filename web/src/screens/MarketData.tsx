@@ -59,6 +59,7 @@ function dateLabel(daysAgo: number): string {
 }
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+const SHOW_HEATMAP = true
 
 /** ISO datetime → hover label: "Jul 11", or "Jul 11 22:30" for intraday slots.
  *  Non-ISO strings (fixture day labels like "Jun 12") are shown verbatim. */
@@ -108,8 +109,6 @@ export function MarketDataScreen() {
   const [expandedProduct, setExpandedProduct] = useState<string | null>(null)
   // Notifications popover (bell).
   const [showNotif, setShowNotif] = useState(false)
-
-  const showHeatmap = true
 
   const toggleArea = (key: string) =>
     setSel((prev) => {
@@ -335,12 +334,12 @@ export function MarketDataScreen() {
     const finite = (arr: number[]) => arr.filter((x) => Number.isFinite(x))
     const meanF = (arr: number[]) => (arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : 0)
 
-    // Live data is used only once every selected area's snapshot has loaded;
-    // otherwise the fixtures render (loading fallback).
-    const useLive = live.ready && selAreas.length > 0 && selAreas.every((a) => !!live.areas[a.key])
+    // KPIs come from whichever selected areas loaded; fixtures only while none has.
+    const liveSel = live.ready ? selAreas.filter((a) => !!live.areas[a.key]) : []
+    const useLive = liveSel.length > 0
 
     // ---- KPIs (live daily series when loaded, else fixtures) ----
-    const act = selAreas.length ? selAreas : areas
+    const act = useLive ? liveSel : selAreas.length ? selAreas : areas
     let kAvgV: number
     let kAvgP: number
     let pkPrev: number
@@ -378,7 +377,8 @@ export function MarketDataScreen() {
     const kAvgC = makeChip(kAvgV - kAvgP, kAvgP ? ((kAvgV - kAvgP) / kAvgP) * 100 : 0)
     const kPeakC = makeChip(pk.v - pkPrev, pkPrev ? ((pk.v - pkPrev) / pkPrev) * 100 : 0)
     const kDemC = makeChip((demV * 0.018) / 1000, 1.8)
-    kDemC.txt = '▲ +1.8% vs prior period'
+    // The stats export has one peak figure and no prior period, so there is no real change to show.
+    kDemC.txt = useLive ? '—' : '▲ +1.8% vs prior period'
 
     // ---- heatmap ----
     const heatCol = (val: number) =>
@@ -470,8 +470,7 @@ export function MarketDataScreen() {
 
     const sections = selAreas.map((a) => {
       // Per-area live/fixture: each chart uses its own snapshot when loaded, so a
-      // single missing/corrupt area falls back alone instead of dragging every
-      // area to fixtures (the KPI block above still gates on the stricter useLive).
+      // single missing/corrupt area falls back alone (and says so in its header).
       const la = live.ready ? (live.areas[a.key] ?? null) : null
       const useTime = !!la && haveDomain
       // Drag-selected zoom is per area, so one area can be inspected closely while
@@ -691,7 +690,7 @@ export function MarketDataScreen() {
       return {
         key: a.key,
         title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
-        sub: '',
+        sub: live.ready && !la ? (L === 'ja' ? '· データなし（サンプル表示）' : '· no data — sample shown') : '',
         meta:
           'latest ¥' +
           (la && la.latest != null ? la.latest.toFixed(2) : a.intraday[29].toFixed(2)) +
@@ -978,7 +977,7 @@ export function MarketDataScreen() {
     let wsToday = '2026-07-02'
     if (useLive) {
       let latest = ''
-      for (const a of selAreas) {
+      for (const a of liveSel) {
         const d = (live.areas[a.key].dDt[0] ?? '').slice(0, 10)
         if (d > latest) latest = d
       }
@@ -1056,7 +1055,7 @@ export function MarketDataScreen() {
       gMS: segBase(gran === 'Monthly'),
       areaChips,
       kAvg: kAvgV.toFixed(2),
-      kAvgSub: (selAreas.length || 9) + ' areas · ' + range + ' · vs prior ' + range,
+      kAvgSub: (useLive ? liveSel.length : selAreas.length || 9) + ' areas · ' + range + ' · vs prior ' + range,
       kAvgD: kAvgC.txt,
       kPeak: pk.v.toFixed(2),
       kPeakSub: (pk.area ? (L === 'ja' ? pk.area.ja : pk.area.en) : '') + ' · ' + (pk.dt ? fmtDate(pk.dt) : dateLabel(pk.d)) + ' · vs prior period',
@@ -1066,7 +1065,7 @@ export function MarketDataScreen() {
       kDemSub: 'sum of selected-area peaks · 17:30 slot',
       kDemD: kDemC.txt,
       kDemDS: kDemC.style,
-      showHeat: showHeatmap,
+      showHeat: SHOW_HEATMAP,
       heatRows,
       sections,
       hiddenNote,

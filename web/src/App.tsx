@@ -1,4 +1,5 @@
 import { AppProvider, useApp } from './lib/app'
+import { useManifest } from './lib/data'
 import { Overlays, ProgressPanel, SidebarExpander } from './lib/menus'
 import { s } from './lib/style'
 import { MarketOverviewScreen } from './screens/MarketOverview'
@@ -36,6 +37,23 @@ function Toast() {
   return <div style={s(TOAST)}>{toastMsg}</div>
 }
 
+const UNAVAILABLE =
+  'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:260;background-color:var(--bg1);background-image:linear-gradient(var(--warnBg),var(--warnBg));border:1px solid var(--warnTx);border-radius:12px;padding:9px 16px;font-size:12.5px;font-weight:600;color:var(--warnTx);box-shadow:var(--sh2a);max-width:640px'
+
+// Every screen falls back to built-in sample data, which looks real; say so when there is no export.
+function DataUnavailable() {
+  const { lang } = useApp()
+  const { error } = useManifest()
+  if (!error) return null
+  return (
+    <div role="alert" style={s(UNAVAILABLE)}>
+      {lang === 'ja'
+        ? 'データを読み込めませんでした — 表示中の数値はサンプルです。実際の市場データではありません。'
+        : 'Market data could not be loaded — the figures shown are sample data, not real market data.'}
+    </div>
+  )
+}
+
 function Root() {
   const { theme } = useApp()
   return (
@@ -46,6 +64,7 @@ function Root() {
     >
       <CurrentScreen />
       <SidebarExpander />
+      <DataUnavailable />
       <Overlays />
       <ProgressPanel />
       <Toast />

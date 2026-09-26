@@ -10,7 +10,7 @@ from html import escape
 
 import streamlit.components.v1 as components
 
-from repower.dashboard.components._util import js_json
+from repower.dashboard.components._util import D3_SCRIPT, js_json
 
 # Neutral chart accent colour (chart title, tooltip bg, expand button, price band).
 _ACCENT = "#1B2A4A"
@@ -64,7 +64,7 @@ def build_price_chart_html(
     <html>
     <head>
         <meta charset="utf-8">
-        <script src="https://d3js.org/d3.v7.min.js"></script>
+        {D3_SCRIPT}
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
             * {{ margin: 0; padding: 0; box-sizing: border-box; }}

@@ -1,8 +1,32 @@
-import { defineConfig } from 'vite'
+import { type Connect, defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // Config runs in Node; declare `process` locally so tsc doesn't need @types/node.
 declare const process: { env: Record<string, string | undefined> }
+
+// Without @types/node, Vite's request type carries no `socket`.
+type Peer = { socket?: { remoteAddress?: string } }
+
+const isLoopback = (addr = ''): boolean => addr === '::1' || /^(::ffff:)?127\./.test(addr)
+
+// `/api` drives DB writes and jobs, so it only answers this machine — even when the
+// app itself is shared on the LAN with `npm run dev -- --host`.
+function apiLoopbackOnly(): Plugin {
+  const guard: Connect.NextHandleFunction = (req, res, next) => {
+    if (isLoopback((req as unknown as Peer).socket?.remoteAddress)) return next()
+    res.statusCode = 403
+    res.end('The local API only answers this machine.')
+  }
+  return {
+    name: 'api-loopback-only',
+    configureServer(server) {
+      server.middlewares.use('/api', guard)
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use('/api', guard)
+    },
+  }
+}
 
 // JEMA web frontend — faithful port of the Claude Design hi-fi exports.
 //
@@ -17,15 +41,16 @@ declare const process: { env: Record<string, string | undefined> }
 // Pages has no `/api`, so the deployed site stays read-only.
 export default defineConfig({
   base: process.env.VITE_BASE || '/',
-  plugins: [react()],
+  plugins: [react(), apiLoopbackOnly()],
   server: {
     port: 5173,
-    host: true,
     strictPort: false,
     proxy: {
       '/api': {
         target: process.env.VITE_API || 'http://127.0.0.1:8787',
         changeOrigin: true,
+        // web-api in token mode: the proxy adds the token so the browser never holds it.
+        headers: process.env.REPOWER_API_TOKEN ? { 'X-API-Token': process.env.REPOWER_API_TOKEN } : undefined,
       },
     },
   },

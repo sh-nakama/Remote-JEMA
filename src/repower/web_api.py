@@ -35,14 +35,16 @@ pending backlog. NotebookLM summarisation stays in the ``policy-catchup`` skill 
 ``repower policy run`` (it needs interactive auth and a daily quota).
 
 This is a localhost dev helper — do not expose it publicly. Still, it is hardened
-a little: CORS is pinned to the Vite dev origins (override with a comma-separated
-``REPOWER_WEB_ORIGINS``), and setting ``REPOWER_API_TOKEN`` makes every request
-require a matching ``X-API-Token`` header (unset — the default — means no auth).
+a little: without ``REPOWER_API_TOKEN`` only this machine's own pages may call it
+(loopback peer and ``Host``, and no cross-site ``Origin`` / ``Sec-Fetch-Site``); with
+it set, every request must carry a matching ``X-API-Token`` header instead. CORS is
+pinned to loopback origins plus a comma-separated ``REPOWER_WEB_ORIGINS``.
 """
 
 from __future__ import annotations
 
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -52,7 +54,9 @@ import threading
 from collections import deque
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
+
+from repower.scrapers import browser_clearance
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +69,17 @@ _ALLOWED_ORIGINS = frozenset(
     ).split(",")
     if o.strip()
 )
+_LOOPBACK_NAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+# Largest body a refused request gets drained of; beyond it the connection is dropped.
+_REFUSED_BODY_MAX = 1 << 20
+
+
+def _origin_allowed(origin: str) -> bool:
+    # Any loopback port: Vite moves off 5173 when it is taken (strictPort: false).
+    if origin in _ALLOWED_ORIGINS:
+        return True
+    u = urlparse(origin)
+    return u.scheme in ("http", "https") and (u.hostname or "") in _LOOPBACK_NAMES
 
 # ── Background job (single-flight) ───────────────────────────────────────────
 # One job runs at a time (they share the SQLite DB and, for `run`/`backfill`, the
@@ -237,6 +252,9 @@ def _run_catchup_job(db_path: str | None) -> None:
                 if st.get("state") == "running":
                     st.update(state="error", detail=str(e)[:120], detail_ja="失敗しました")
             _job.update(state="error", finished_at=_now(), error=str(e))
+    finally:
+        # Browsers are per thread and only atexit (main thread) closes them otherwise.
+        browser_clearance.close()
 
 
 def _now() -> str:
@@ -412,7 +430,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         origin = self.headers.get("Origin")
-        if origin in _ALLOWED_ORIGINS:
+        if origin and _origin_allowed(origin):
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -434,16 +452,52 @@ class _Handler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:  # noqa: N802 — CORS preflight (no auth: preflights can't carry custom headers)
         self._send(200, {})
 
-    def _check_auth(self) -> bool:
-        """Optional shared secret: with REPOWER_API_TOKEN set, every GET/POST must
-        carry a matching X-API-Token header. Unset (the default) means no auth."""
+    def _refuse(self, code: int, error: str) -> None:
+        # Closing with the body unread makes the OS reset the connection, which can
+        # destroy the refusal before the client reads it (seen ~10% of the time on Windows).
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = 0
+        if 0 < n <= _REFUSED_BODY_MAX:
+            self.rfile.read(n)
+        elif n:
+            self.close_connection = True
+        self._send(code, {"error": error})
+
+    def _check_access(self) -> bool:
+        """With REPOWER_API_TOKEN set, the token is the gate; without it, only this
+        machine's own pages get in (see :meth:`_local_refusal`)."""
         token = os.environ.get("REPOWER_API_TOKEN")
-        if not token:
-            return True
-        if hmac.compare_digest(self.headers.get("X-API-Token") or "", token):
-            return True
-        self._send(401, {"error": "missing or invalid X-API-Token"})
-        return False
+        if token:
+            if hmac.compare_digest(self.headers.get("X-API-Token") or "", token):
+                return True
+            self._refuse(401, "missing or invalid X-API-Token")
+            return False
+        reason = self._local_refusal()
+        if reason:
+            self._refuse(403, f"forbidden: {reason}")
+            return False
+        return True
+
+    def _local_refusal(self) -> str | None:
+        """Why a tokenless request must be refused, or None.
+
+        CORS only stops a foreign page *reading* the answer: a no-cors POST (or a
+        GET, and ``/api/policy/crosscheck`` writes) still executes. Browsers send
+        ``Origin`` on every cross-origin POST and ``Sec-Fetch-Site`` on every
+        request, and a DNS-rebound page arrives with its own name in ``Host``.
+        """
+        if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+            return "remote client (set REPOWER_API_TOKEN to allow)"
+        if urlsplit("//" + (self.headers.get("Host") or "")).hostname not in _LOOPBACK_NAMES:
+            return "unexpected Host header"
+        origin = self.headers.get("Origin")
+        if origin is not None:
+            return None if _origin_allowed(origin) else "cross-origin request"
+        if self.headers.get("Sec-Fetch-Site", "none") not in ("same-origin", "none"):
+            return "cross-site request"
+        return None
 
     def _guard(self, route) -> None:
         """Run one routed handler; anything that escapes still gets a JSON answer.
@@ -463,13 +517,16 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send(500, {"error": str(e)})
             except OSError:
                 pass  # client already disconnected
+        finally:
+            # Each request has its own thread; a browser it launched would outlive it.
+            browser_clearance.close()
 
     def do_GET(self) -> None:  # noqa: N802
-        if self._check_auth():
+        if self._check_access():
             self._guard(self._route_get)
 
     def do_POST(self) -> None:  # noqa: N802
-        if self._check_auth():
+        if self._check_access():
             self._guard(self._route_post)
 
     def _route_get(self) -> None:

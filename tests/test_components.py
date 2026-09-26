@@ -122,6 +122,15 @@ def test_hostile_title_and_labels_cannot_break_script_context(name, builder, key
     assert html.count("</script>") == 2
 
 
+@pytest.mark.parametrize("name,builder,keys,_guard", CHARTS, ids=[c[0] for c in CHARTS])
+def test_charts_load_d3_pinned_with_integrity(name, builder, keys, _guard):
+    from repower.dashboard.components._util import D3_SCRIPT
+
+    html = builder([_row("2026-07-01T00:00:00", keys, 1.0)])
+    assert D3_SCRIPT in html and 'integrity="sha384-' in D3_SCRIPT
+    assert html.count("<script src=") == 1
+
+
 # ── (c) Excel formula-injection guard ───────────────────────────────────────
 
 def test_excel_formula_strings_round_trip_as_text():

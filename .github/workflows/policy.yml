@@ -18,6 +18,14 @@ on:
       max_per_run:
         description: "Max meetings to summarise this run"
         default: "8"
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
+
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+permissions:
+  contents: read
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -38,9 +46,9 @@ jobs:
       NOTEBOOKLM_TIER: ${{ vars.NOTEBOOKLM_TIER || 'standard' }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
@@ -59,9 +67,9 @@ jobs:
       - name: Pull latest DB from Hugging Face
         id: pull
         run: python -m repower.cli pull-hf
-        # A scheduled run must not detect/summarise into a fresh DB and push it
-        # over the dataset's history; manual dispatch may (bootstrap).
-        continue-on-error: ${{ github.event_name != 'schedule' }}
+        # Only an explicit bootstrap may detect/summarise into an empty DB: pushing it
+        # would replace the dataset's history. Scheduled runs have no inputs, so they fail hard.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Detect new meetings (no auth required)
         run: python -m repower.cli policy detect
@@ -76,9 +84,14 @@ jobs:
 
       - name: Summarise pending meetings + emit digest
         if: steps.auth.outputs.ok == 'true'
+        # Inputs go through env: spliced into the script, a crafted value would run as shell
+        # in a job that holds the NotebookLM session.
+        env:
+          COMMITTEE: ${{ github.event.inputs.committee || 'all' }}
+          MAX_PER_RUN: ${{ github.event.inputs.max_per_run || '8' }}
         run: |
           python -m repower.cli policy resume
-          python -m repower.cli policy run --committee "${{ github.event.inputs.committee || 'all' }}" --max-per-run "${{ github.event.inputs.max_per_run || '8' }}"
+          python -m repower.cli policy run --committee "$COMMITTEE" --max-per-run "$MAX_PER_RUN"
           python -m repower.cli policy digest --since-days 7
 
       - name: Alert when auth is stale (manual re-login needed)
@@ -93,10 +106,9 @@ jobs:
       - name: Push updated DB to Hugging Face
         # Preserve DB state from the cheap detection step even when summarisation
         # fails — but never push a fresh DB created because the pull itself failed
-        # (only manual bootstrap runs may do that). NB: `outcome` only matters in
-        # the schedule branch, where the pull step's continue-on-error uses the
-        # identical `github.event_name != 'schedule'` expression — keep them in sync.
-        if: always() && (steps.pull.outcome == 'success' || github.event_name != 'schedule')
+        # (only an explicit bootstrap run may do that). Keep the bootstrap test in
+        # sync with the pull step's continue-on-error.
+        if: always() && (steps.pull.outcome == 'success' || inputs.bootstrap == true)
         run: python -m repower.cli push-hf
 
       - name: Alert on failure

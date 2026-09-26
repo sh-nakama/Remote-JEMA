@@ -5,6 +5,15 @@ on:
     # 20:30 UTC = 05:30 JST
     - cron: "30 20 * * *"
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
+        type: boolean
+        default: false
+
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+permissions:
+  contents: read
 
 # All workflows that pull/push the shared HF dataset queue behind one group so
 # two runs can never race on the DB (last push-hf wins silently otherwise).
@@ -18,15 +27,18 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # Runs take 8-15 min; without a cap a hung scrape holds the shared hf-dataset
+    # queue for GitHub's 6-hour default.
+    timeout-minutes: 60
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.11"
 
@@ -35,10 +47,9 @@ jobs:
 
       - name: Pull latest DB from Hugging Face
         run: python -m repower.cli pull-hf
-        # Bootstrap runs (manual dispatch before the dataset exists) may proceed
-        # from an empty DB; a *scheduled* run must not — scraping into a fresh DB
-        # and pushing it would clobber the dataset's history.
-        continue-on-error: ${{ github.event_name != 'schedule' }}
+        # Only an explicit bootstrap may scrape into an empty DB: pushing it would
+        # replace the dataset's history. Scheduled runs have no inputs, so they fail hard.
+        continue-on-error: ${{ inputs.bootstrap == true }}
 
       - name: Run full pipeline
         # months-back 1 = current + previous month only. Conditional-GET caching
@@ -56,6 +67,11 @@ jobs:
 
       - name: Push updated DB to Hugging Face
         run: python -m repower.cli push-hf
+
+      - name: Check data freshness
+        # After the push, so fresh sources still land. Scrapers fail soft, so without this
+        # an upstream break is a green run with 0 rows; stale data now fails the run.
+        run: python -m repower.cli check-freshness
 
       - name: Alert on failure
         if: failure()

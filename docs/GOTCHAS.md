@@ -11,10 +11,9 @@ fixed.
 - **Data is JST; CI runs in UTC.** The daily cron fires at 20:30 UTC = 05:30 JST *next day*, so
   `date.today()` is guaranteed to lag the JST calendar date during every run. Use
   `repower.timeutil.today_jst()/yesterday_jst()` for anything that decides "current"
-  month/year/fiscal-year or filters future-vs-past. Known bypass sites `(open — P3)`:
-  `scrapers/area_base.py:274`, `scrapers/eprx.py:51`, `scrapers/jepx_spot.py:183,204`,
-  `cli.py:101`, `policy/schedule.py:211`, `dashboard/export_web.py:129`, `dashboard/app_main.py`
-  ×3, `dashboard/legacy.py` ×2.
+  month/year/fiscal-year or filters future-vs-past. The only remaining `date.today()` is
+  `scrapers/fuels_futures.py`, deliberately: yfinance's `end` is exclusive, and the JST date
+  would pull in the unfinished US session.
 - **Japanese fiscal year starts in April** — EPRX files are per-JFY (`_current_jfy()`); a JFY
   boundary crossed near the UTC/JST gap delays picking up the new year's ZIP by one run.
 - `NewsItem.published_at` (DateTime column) is compared against ISO **strings** in
@@ -29,16 +28,14 @@ fixed.
   weeks. `dashboard/read.py` shows the correct pattern.
 - **EPRX data lives in Parquet, not SQLite** (`eprx_balancing.parquet` / `eprx_tieline.parquet`,
   merge-dedup last-write-wins). It syncs to HF alongside the DB — a workflow that pushes the DB
-  but not the parquets desyncs them.
+  but not the parquets desyncs them. `_merge_parquet` writes a temp file and `os.replace`s it in;
+  keep it that way — an in-place write that dies midway truncates the only copy, and push-hf
+  uploads the wreck.
 - `db.py::_migrate_add_area_column` rebuilds the table from a **hardcoded `old_cols` list** —
   adding a column to `DemandSupply30m` requires updating that list or pre-`area` DBs silently
   drop it on migration.
-- `PolicyCommittee` in `db.py` defines 7 attributes **twice** (merge damage from `b353a94`;
-  Python keeps the second block, `priority` default 100) `(open — P3)`. Edit the *second* block
-  or, better, delete the duplicate first.
-- `hf_sync.pull_db_from_hf` always downloads to `<dir>/repower.db` — a custom
-  `REPOWER_DB_PATH` with a different **filename** uploads fine but never round-trips back
-  `(open — P3)`.
+- `hf_sync` keeps stable repo filenames (`repower.db`, the Parquets); a pull moves each download
+  to its configured local path, so a custom `REPOWER_DB_PATH` filename round-trips.
 
 ## Scraping & HTTP
 
@@ -73,8 +70,10 @@ fixed.
     restructuring its site. Don't delete it — a missing JSON must cost speed, not correctness.
 - Scrapers **fail soft by design**: per-URL/per-region errors are caught broadly and produce
   0 rows, not exceptions. A systematic outage looks like "0 rows upserted", not a red run —
-  check row counts, not just exit codes. Kyushu/Chugoku URL patterns are reverse-engineered
-  with hardcoded version suffixes and may silently go stale.
+  which is why `daily.yml` ends with `repower check-freshness` (per-source lag limits in
+  `freshness.py`; exits 1 so the failure webhook fires). Kyushu/Chugoku URL patterns are
+  reverse-engineered with hardcoded version suffixes and may silently go stale — the per-area
+  60-day limit is what catches that. A new data source needs a row in `freshness.py` too.
 - Upserts are idempotent everywhere (`on_conflict_do_update/nothing` on the real unique
   constraints; Parquet merge-dedup for EPRX). Keep new writers idempotent — the crons re-run.
 - **`allow_curl_fallback` now defaults to `True`.** It is a no-op unless the plain request
@@ -189,6 +188,11 @@ fixed.
   symptom showed up. `_mint` now passes `revisit=True`; `fetch` deliberately does not, since it
   makes its own in-page request anyway. **When a clearance change seems not to work, check
   whether you are testing a fresh process or a server that has been up since before it.**
+- **Headless browsers are per thread, and `atexit` only closes the main thread's.** A long-lived
+  process that fetches on worker threads must call `browser_clearance.close()` when each thread's
+  work ends — `web_api` does it after every request and every catch-up job. Otherwise each job
+  orphans a Chromium + Playwright driver for the life of the server, and a later thread that
+  inherits the recycled thread ident finds its profile dir (`t<ident>`) still locked.
 - **METI's 403 wears METI's own "page not found" page.** The 5045-byte body titled
   「指定されたページまたはファイルは存在しません」, served from S3/CloudFront with no WAF header, is
   what a refused client gets — for URLs that exist perfectly well. Don't read that body (or a
@@ -231,29 +235,62 @@ fixed.
 - The whole pipeline is **pull-HF → mutate → push-HF with last-write-wins and no locking**.
   The only guard is the shared GitHub Actions concurrency group — any new workflow that touches
   the dataset MUST declare `concurrency: {group: hf-dataset, cancel-in-progress: false, queue: max}`.
-- **A failed pull + a successful push = dataset history clobbered with a fresh DB.** That's why
-  scheduled runs use `continue-on-error: ${{ github.event_name != 'schedule' }}` on pull-hf
-  (fail hard on cron; manual dispatch keeps the bootstrap fallback). Preserve this pattern, and
-  never give push-hf an unconditional `if: always()` without also checking the pull outcome
-  (see `policy.yml`'s push condition).
+- **A failed pull + a successful push = dataset history clobbered with a fresh DB.** So only an
+  explicit bootstrap may start from an empty DB: every HF-mutating workflow has a `bootstrap`
+  boolean dispatch input (default false), its pull step uses
+  `continue-on-error: ${{ inputs.bootstrap == true }}` (scheduled runs have no inputs, so they
+  fail hard), and a push under `always()` must also require
+  `steps.pull.outcome == 'success' || inputs.bootstrap == true` (see `policy.yml`). Don't go
+  back to treating every manual dispatch as a bootstrap — that let a re-run during an HF outage
+  overwrite the dataset. (`web-deploy.yml` still falls back on push/dispatch; it only affects
+  the Pages build, never the dataset.)
+- **`pull-hf` skips a Parquet only when the repo listing lacks it; every other download failure
+  raises.** A scrape into a missing Parquet rebuilds it from the current fiscal year alone, the
+  earlier years' ZIPs 304 against the ETags in the (successfully pulled) DB, and push-hf then
+  uploads that fragment over the full history — permanently. Don't widen the skip back into a
+  blanket `except`.
+- **`push-hf` uploads a checked snapshot, never the live file, and everything in one commit.**
+  SQLite's backup API copies committed pages only (safe beside a writer; opening the source also
+  rolls back a hot journal left by a killed run), `PRAGMA quick_check` refuses a damaged DB before
+  anything reaches the Hub, and one `create_commit` keeps the DB — which holds the ETags — from
+  landing without the Parquet rows they vouch for. Don't go back to per-file `upload_file`.
+- **A pull replaces the DB under whoever has it open.** `db.get_engine` pools connections per
+  path; on Linux they keep reading the replaced file's old inode, and on Windows
+  `hf_hub_download` falls back to overwriting the file in place. `pull_db_from_hf` therefore
+  calls `db.dispose_engines()` before and after downloading. That only covers this process —
+  stop `web-api` (or anything else holding the DB) before a local `pull-hf`.
+- The Space pulls once per **process** (`st.cache_resource`, re-checked hourly), not once per
+  visitor — it used to key the pull on `st.session_state`, so every new browser session
+  re-downloaded the dataset under the sessions already reading it.
 
 ## GitHub Actions semantics (learned the hard way)
 
 - `steps.<id>.outcome` = result **before** `continue-on-error` masking; `conclusion` = after.
-  A skipped step reports `skipped` for both. `policy.yml`'s push condition relies on its pull
-  step's `continue-on-error` using the *identical* `github.event_name != 'schedule'` expression
-  — keep them in sync.
+  A skipped step reports `skipped` for both. `policy.yml`'s push condition repeats its pull
+  step's `inputs.bootstrap == true` test — keep the two in sync.
 - A step `if:` that doesn't call a status function gets an **implicit `success()`** prepended.
   `if: failure()` fires only on real (unmasked) failures — and NOT on cancelled runs, so a
   concurrency eviction is invisible to the alert steps.
+- **GitHub starts cron runs late — hours late.** `daily.yml`'s 20:30 UTC slot started between
+  22:20 and 23:25 UTC throughout September 2026. Never chain workflows by clock offset:
+  `web-deploy.yml` rebuilds on `workflow_run` completion of the five dataset-writing workflows
+  (its cron is only a backstop for pushes made outside Actions). Its `workflow_run` list
+  matches workflow **names** — renaming one of them silently stops the deploy.
 - Default concurrency keeps **one pending run per group** and silently cancels the rest;
   `queue: max` (up to 100, FIFO) fixes that but is invalid combined with
   `cancel-in-progress: true`.
 - Failure alerting convention: last step, `if: failure()`, `::error::` + curl POST
   `{"content": …}` to `$WEBHOOK_URL` guarded by `[ -n "$WEBHOOK_URL" ]`. Every cron has one —
   new workflows should too.
-- `workflow_dispatch` string inputs spliced directly into `run:` blocks are shell-injectable
-  (`backfill.yml` still does this) `(open — P3)` — pass through `env:` instead.
+- **The webhook URL is a secret: its path is the token.** Never log it. That rules out
+  `str(e)` from httpx (status errors quote the full URL) and httpx's own INFO request line,
+  which `cli.py` turns off. Log the status code or the exception class instead, as
+  `notify/webhook.py` and `policy/digest.py` do. Actions masks the secret in CI, but local
+  runs don't.
+- **Never splice `workflow_dispatch` inputs into a `run:` script** — `${{ inputs.x }}` is pasted
+  in before the shell parses it, so a crafted value runs as shell, and `policy.yml`'s job holds
+  the NotebookLM session. Pass them through `env:` and quote the variables, as `backfill.yml`
+  and `policy.yml` do.
 
 ## Exported JSON & the web frontend
 
@@ -261,15 +298,21 @@ fixed.
   — pandas NaN leaked into the wholesale exports once and silently broke live mode for the
   affected area. `export_web._write_json` sanitizes NaN/Inf→null (`allow_nan=False` backstop);
   route any new export through it, never through a bare `json.dumps`.
-- **Every screen falls back to fixtures, and a failed live fetch looks identical to "still
-  loading"** (only PolicyDeepDive surfaces a `stale` banner) `(open — P3)`. If a screen shows
-  suspiciously smooth data, suspect a broken snapshot before suspecting the market. The unused
-  `useSnapshot`/`useManifest` hooks in `lib/data.ts` are the intended error-aware replacement.
-- **The fixtures carry a frozen "today" (2026-07-02).** Live data must never be dated/counted
-  against it: `PolicyDeepDive.dUntil` takes an anchor that flips with `pol.ready`, and
-  MarketData's peak label reads the snapshot's own datetimes (`LiveArea.dDt`). Static caption
-  strings hardcoding that date still exist in `MarketData.tsx` (~lines 927, 1047, 1110, 1227,
-  1269) `(open — P3)` — don't copy them into new live-wired UI.
+- **Scraped links must be http(s) at every layer.** `urljoin` returns a `javascript:` or `data:`
+  href unchanged, and material URLs end up in `window.open`. The scraper keeps only absolute
+  http(s) links (`_is_web_url`), the exporter blanks anything else already in a synced DB
+  (`_web_url`), and the Deep Dive's `openUrl` refuses it. Apply the same rule to any new
+  scraped link that gets rendered.
+- **Every screen falls back to built-in sample data (fixtures), which looks real.** When the
+  export manifest can't load, `App.tsx`'s `DataUnavailable` notice says the figures are sample
+  data. MarketData's KPIs use whichever selected areas loaded and tag a failed area "no data —
+  sample shown". Per-snapshot fallbacks elsewhere are still silent `(open — P3)`. Never add a
+  fixture that can render next to live data without a label; `useSnapshot`/`useManifest` in
+  `lib/data.ts` expose `error` for exactly this.
+- The fixtures' frozen dates (2026-07-01/02) survive only as **loading fallbacks** for MarketData's
+  caption dates (`wsToday`, `balDate`, `icMapDate`, `icTodayDate`, `drCloseDate`); each is
+  replaced by the snapshot's own date once it loads. Don't use them as a fallback in new
+  live-wired UI.
 - ***.live.ts arrays are newest-first** (index 0 = latest, via `rev()`); `windowLive`/
   `windowSupply` flip back to oldest-first for plotting. Check direction before indexing.
 - **The tail of a supply export is padded with all-null rows.** The datetime grid runs to the
@@ -307,15 +350,44 @@ fixed.
 - **MarketOverview and MarketData duplicate helpers that have already drifted** (`chip` vs
   `makeChip`: flat threshold 0.5% vs 0.05%; also `slotLabel`, `segBase`, Gaussian `mk()`)
   `(open — P3)`. Change both copies or extract to `lib/` first.
-- **No CI gate for `web/`** `(open — P2)`: PRs run neither `tsc -b` nor a build; the three
-  `eslint-disable` comments are inert (no linter installed); zero frontend tests. Run
-  `npm --prefix web run build` yourself before considering a web change done.
+- **CI gates `web/`** (the `web` job in `ci.yml`): `npm run lint` (only the React hook rules —
+  `exhaustive-deps` is what keeps data hooks listing `useDataNonce()`), `npm run build`, and
+  `npm test` (vitest, run under both `TZ=UTC` and `TZ=Asia/Tokyo`). Tests live next to the code
+  as `*.test.ts`. Run the same three locally before calling a web change done.
+- **Parse dates only through `lib/time.ts`**: `parseDbTs` (naive DB timestamps are UTC),
+  `parseDay` (a day is UTC midnight; an offset-less timestamp is UTC, never local) and
+  `parseWallClock` (market datetimes keep their JST digits). A bare `Date.parse` of a string
+  without an offset reads it as the viewer's local time — 9 hours out in Tokyo.
+- **`s()` returns cached, frozen style objects** (one per CSS string). Derive a variant by
+  spreading (`{ ...s(x), color }`); assigning to a property of an `s()` result throws. Build its
+  argument from a small set of values (states, theme variables) — never from data or mouse
+  positions, or the cache grows without bound.
+- **Vite prefers `vite.config.js` over `vite.config.ts`.** `tsc -b` used to emit that `.js`
+  (gitignored), so `npm run dev` ran whichever branch last compiled it, including a LAN binding
+  with no `/api` guard. The tsconfigs are now `noEmit` (build info in `node_modules/.tmp`) and
+  every npm script passes `--config vite.config.ts`. Launch Vite through those scripts; a bare
+  `npx vite` still picks up a leftover `.js`.
 - No keyboard/ARIA semantics anywhere (`Hoverable` renders divs; 167 onClick handlers)
   `(open — P3)`. The ⌘K palette and global Escape are the only keyboard paths — don't break
   them, and prefer real `<button>`s in new UI.
-- `web_api.py` is a **localhost dev helper only**: wildcard CORS, zero auth, DB-mutating +
-  subprocess-launching endpoints, no job timeout `(open — P3)`. Never bind it beyond 127.0.0.1
-  or reuse it as a "real" backend.
+- `web_api.py` is a **localhost dev helper only**: DB-mutating + subprocess-launching
+  endpoints, time-capped jobs. **CORS does not protect it** — a foreign page's no-cors POST
+  still executes, it just can't read the answer. So without `REPOWER_API_TOKEN` it refuses
+  non-loopback peers, a non-loopback `Host` (DNS rebinding) and a cross-site `Origin` /
+  `Sec-Fetch-Site`; any loopback origin is allowed, since Vite changes port when 5173 is taken.
+  Keep new routes behind `_check_access` (GETs too — `/api/policy/crosscheck` writes). With the
+  token set, the token replaces those checks. Never bind beyond 127.0.0.1 without one, or reuse
+  it as a "real" backend.
+- **Answering before reading the request body can lose the answer.** If the connection closes
+  with body bytes unread, the OS resets it, and the reset can arrive before the client has read
+  the response. A refused POST then shows up as `ConnectionAbortedError` or a browser network
+  error instead of a 403 (about 1 in 10 on Windows). `_refuse` drains up to
+  `_REFUSED_BODY_MAX` first; any new early-exit path on a POST must do the same.
+- **Through the Vite proxy, every request reaches `web-api` from 127.0.0.1**, so web-api's own
+  loopback check can't tell a LAN visitor from you. The dev server therefore binds `localhost`,
+  and `apiLoopbackOnly` in `vite.config.ts` refuses `/api` to non-loopback peers —
+  `npm run dev -- --host` shares the app on the LAN but never the API. In token mode the proxy
+  adds `X-API-Token` from `REPOWER_API_TOKEN`, so the browser never holds it.
 - **A second `repower web-api` on the same port starts "successfully" and serves nothing.**
   `ThreadingHTTPServer` inherits `allow_reuse_address = 1`, and on Windows SO_REUSEADDR lets a
   second process bind a port that is already bound — it logs `listening on http://127.0.0.1:8787`
@@ -329,6 +401,10 @@ fixed.
   the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/
   `generating`) and the per-meeting failure message; `meetings.json` collapses those into
   `pending`. A read-only deployment shows stale meeting status until `repower export-web` reruns.
+- **The static export never carries raw failure text.** `last_error` can quote the `notebooklm`
+  command line (local temp paths, the user name) and stderr, and the Pages site is public, so
+  `export_policy` passes `error` / `lastUpdateError` through `_public_error` (flag wins, else a
+  neutral line); the live API keeps the raw text. Route any new free-text failure field the same way.
 - **Capacity-market figures are curated by hand from OCCTO PDFs** (`dashboard/capacity_data.py`)
   — there is no machine-readable feed, so a new auction means re-reading the press release.
   `pdfplumber` is broken in this venv (`cryptography` `_rust` DLL); use PyMuPDF (`fitz`).
@@ -409,9 +485,10 @@ fixed.
   opened on the third meeting and the rest of the backlog then failed instantly, one
   meeting per ~15 ms, marking everything blocked. Use the read-only `circuit_cooldown()`
   for checks; `_circuit_retry_after()` consumes the one probe allowed after a cooldown.
-- `pipeline.summarize_meeting` **always creates a fresh NotebookLM notebook** — a
-  timeout→resume cycle orphans the previous one (delete only happens on success/rate-limit
-  paths) `(open — P3)`. Long stalls leak notebooks against the shared account quota.
+- `pipeline.summarize_meeting` creates a fresh NotebookLM notebook per attempt, and first
+  deletes the one a previous attempt recorded for the meeting (`stale_notebook_id`), so a
+  timeout→resume cycle doesn't leak notebooks against the shared account quota. Keep that
+  delete-before-create order.
 - **A `create_notebook` timeout does not mean no notebook was created.** NotebookLM answers
   the RPC and makes one while the client gives up waiting, so a bare `raise` leaks an
   untracked notebook — the 2026-08-16 crash took the account from 13 to 14 notebooks with
@@ -468,8 +545,10 @@ fixed.
   NotebookLM, and `run` doesn't charge those against the budget — otherwise a bad METI day
   silently halves the round. A round still stops after `_MAX_BLOCKED_ATTEMPTS` blocked meetings
   so a host-wide outage can't walk the whole backlog; that bound is logged when hit.
-- OCCTO meeting discovery is a **linear probe** (one request per meeting number, 1s delay) — a
-  committee with `max_meeting` ≈ 150 means ~150 sequential requests on a cold cache.
+- OCCTO meeting discovery reads the committee's list JSON first (one request, cacheable; see the
+  OCCTO section above). Only when that fails does it fall back to the **linear number probe**
+  (one request per meeting number, 1 s apart), which on a cold cache means ~`max_meeting`
+  sequential requests.
 - NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
   a human `notebooklm login` can refresh; `policy.yml` alerts on staleness and must never
   fabricate summaries.
@@ -488,7 +567,9 @@ fixed.
   `/shingikai/.../` committee, stay under `/shingikai/`). Meeting numbers use the *URL* file number,
   so a joint `第15回` linking to `.../suiso_seisaku/014.html` is recorded as 14 — expected, not a bug.
 - **A meeting with no `meeting_date` renders as `検出 YYYY-MM-DD`** (the detection timestamp), not
-  as the date it was held — `build_policy_snapshot` falls back to `updated_at`/`detected_at` and
+  as the date it was held — `build_policy_snapshot` falls back to the JST day of `detected_at`
+  (not `updated_at`, which every retry or materials backfill bumps, and which made healed old
+  meetings look brand new) and
   sets `dateReal: false`, which `PolicyDeepDive.tsx` labels `検出` / `detected`. So a "wrong date"
   report is really a *missing date*, never a display bug: check
   `SELECT meeting_num, meeting_date FROM policy_meeting WHERE committee_key=…` first.
@@ -549,32 +630,39 @@ fixed.
 
 ## Streamlit dashboard
 
+- **The HF Space runs the same `app_main` as local, so its writes must be switched off by hand.**
+  The Space's DB is a throwaway copy that is never pushed back, and its fetches come from
+  HF's network. `_hosted()` (true when HF sets `SPACE_ID`) hides the committee manager and the
+  Generate buttons; any new write control must check it too. Add-by-URL's `probe_url` fetches
+  only METI / OCCTO hosts (`_PROBE_DOMAINS`) — it runs on pasted input, so don't widen it.
 - The `_cache_buster` args are **underscore-prefixed, so Streamlit excludes them from cache
   keys** — the inline comments claiming they key the cache are wrong. Refresh works only
   because the sidebar button calls `st.cache_data.clear()`; don't remove that explicit clear.
-- `legacy.py`'s `main()` + 4 helpers (~380 lines) and `components/product_price_chart.py` are
-  **dead code**; ~⅔ of `i18n.py`'s string table is unreferenced `(open — P3)`. Don't pattern-match
-  new work off them.
+- `legacy.py` now holds only data helpers `app_main.py` still imports (`_db_session`, `_jepx_area`,
+  `_fuels`, `_analyses`); about 18% of `i18n.py`'s string table (13 of 71 keys) is unreferenced
+  `(open — P4)`.
 - Chart components load D3 + Google Fonts from CDNs inside iframes — offline/dev-container runs
-  render empty charts. Nobody has audited how DB-derived strings are templated into that iframe
-  HTML `(open — P4)` — escape anything user/scraper-derived you add there.
+  render empty charts. D3 is pinned with an SRI hash (`components/_util.D3_SCRIPT`), so bumping
+  its version without recomputing the hash blanks every chart. Every value templated into that
+  iframe HTML goes through `html.escape` (titles) or `js_json` (payloads), and
+  `tests/test_components.py` feeds all four charts hostile input — route anything new the same
+  way.
 - `capacity_data.py` is hand-curated — new OCCTO auction results require a code edit; tests
   check shape, not freshness.
 
 ## Tests & CI
 
-- **CI green ≠ safe**: `cli.py` (every cron's entrypoint), `hf_sync.py`, `web_api.py`'s HTTP
-  layer, and `notify/webhook.py` have zero test coverage `(open — P2)` — regressions there
+- **CI green ≠ safe**: `run-all` (the daily cron's entry point) has only a stubbed smoke test
+  (`tests/test_cli.py`: stage order, one failing stage doesn't stop the rest, `--dry-run`
+  reaches notify); the other `cli.py` commands have none `(open — P3)`, so regressions there
   surface only as 05:30-JST production failures.
-- The brand-scrub gates cover only `src space` (CI grep) and `src/repower/**/*.py` (pytest) —
-  NOT `web/`, `docs/`, or workflow YAML `(open — P2)`. A docs leak already happened once
-  (2026-07-03, caught by a manual grep — see `.design-sync/NOTES.md`). Until widened, grep the
-  whole tree yourself before pushing anything ported from `Reference/`.
-- `tests/test_policy.py:480` hardcodes the committee count (`== 14`) — every registry change
-  breaks it with a bare count mismatch `(open — P3)`.
-- There is **no conftest.py**; DB-setup boilerplate is duplicated ~30× across the policy test
-  files `(open — P3)`. Tests are hermetic by monkeypatching the lowest-level I/O boundary
-  (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
+- The brand gates (`tests/test_brand.py` and CI's "No brand trace" step) scan every tracked
+  path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
+  trace themselves; keep it that way in any new check. A docs leak happened once before the
+  gates covered docs (2026-07-03).
+- There is **no conftest.py**; the two-line `db = str(tmp_path / …)` + `store.sync_committees`
+  setup repeats ~58× across six test files. Tests are hermetic by monkeypatching the lowest-level
+  I/O boundary (`http_cache._do_get`, `subprocess.run`) — keep new tests network-free the same way.
 - **Patch the lowest primitive, not a convenience wrapper.** `scraper._fetch` is now a thin
   wrapper over `_fetch_ex`; a test still monkeypatching `_fetch` silently does **real network
   I/O** and passes on a live 304 instead of failing loudly. Patch `_fetch_ex` — it covers both
@@ -583,18 +671,34 @@ fixed.
   banners, Japanese committee names and em dashes raise `UnicodeEncodeError` on a Japanese
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
-- `ruff` runs near-default rules (E4/E7/E9 + F only) and there is no type checker `(open — P2)`
-  — a clean lint proves little.
+- `ruff` runs E, F, I, B and UP (`pyproject.toml`). CI runs `mypy` over every module except the
+  `[tool.mypy] exclude` list (10 not yet type-clean, `(open — P2)`; mostly BeautifulSoup
+  typing). Take a module off that list once it passes. mypy checks 3.12 syntax because numpy's
+  stubs need it; the runtime floor is 3.11.
+- **Declare model columns as `Mapped[...] = mapped_column(...)`, never bare `Column()`.**
+  SQLAlchemy 2.1 types a bare `Column` comparison as `bool`, which fails mypy wherever it is
+  used. Mind nullability: `mapped_column` makes a non-Optional annotation `NOT NULL`, while
+  bare `Column` defaults to nullable — annotate `| None` unless the column is a primary key or
+  says `nullable=False`, or `create_all` builds a different schema. Column annotations use
+  `dt.date`/`dt.datetime` because several models have a column named `date`.
 - Local dev: use `.venv` (Python 3.12) — the PATH `python` is 3.9 without deps.
 
 ## Docker & deployment
 
-- **`docker compose build` has been broken since day one**: the root `Dockerfile` COPYs an
-  `app.py` that only exists once `sync-space.yml` assembles its deploy dir (where `space/app.py`
-  lands at the root) `(open — P3)`. The Space deploy works; local compose does not. Also: no
-  `USER` (runs as root) and the layer order re-installs deps on every `src/` change.
-- `web-deploy.yml` fingerprints the pulled DB to skip identical scheduled rebuilds; a missing
-  DB gets a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
-- Actions are pinned to mutable tags (`@v5`), not SHAs, in secret-bearing workflows
-  `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but `>=0.23` in
-  `pyproject.toml` — version skew between the two install paths is unchecked `(open — P4)`.
+- **The Dockerfile serves two build contexts.** The final `space` stage COPYs an `app.py` that
+  exists only in the deploy dir `sync-space.yml` assembles, so local builds must stop at
+  `--target base` (`docker-compose.yml` does). Dependencies install before `src/` is copied, and
+  the image runs as the non-root `repower` user; keep both.
+- `sync-space.yml` mirrors its deploy dir onto the Space (`delete_patterns=["*"]`): any file on
+  the Space that the deploy dir doesn't contain is deleted on the next sync (`.gitattributes`
+  excepted). Add Space-only files to `space/`, never through the Hub UI.
+- `web-deploy.yml` fingerprints the pulled DB to skip identical automated (`workflow_run` /
+  `schedule`) rebuilds, and those automated runs fail hard on a failed pull; a missing DB gets
+  a per-run-unique `nodb-*` fingerprint (only reachable via push/dispatch bootstrap now).
+- Actions are pinned to commit SHAs (`@<sha> # vN`); Dependabot's `github-actions` updates keep
+  the SHA and comment in step, so edit pins through it or by hand in that same format. Every
+  workflow declares `permissions:` (`contents: read`, plus Pages for `web-deploy.yml`) — give a
+  new workflow the same. There is still no Python lockfile, so CI, Docker and the Space install
+  floating versions `(open — P3)`; `huggingface-hub` is `==1.8.0` in `sync-space.yml` but
+  `>=0.23` in `pyproject.toml` — version skew between the two install paths is unchecked
+  `(open — P4)`.

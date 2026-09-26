@@ -126,8 +126,12 @@ def post_webhook(
         resp.raise_for_status()
         logger.info("Webhook posted successfully (status %d)", resp.status_code)
         return True
+    except httpx.HTTPStatusError as e:
+        # The URL path is the webhook's secret, and str(e) quotes the full URL.
+        logger.error("Webhook failed: HTTP %d", e.response.status_code)
+        return False
     except Exception as e:
-        logger.error("Webhook failed: %s", e)
+        logger.error("Webhook failed: %s", type(e).__name__)
         return False
 
 

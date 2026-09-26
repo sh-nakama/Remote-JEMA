@@ -227,6 +227,16 @@ def search_committees(
 
 
 # ── Public: probe a pasted URL ────────────────────────────────────────────────
+# The only sites the observer reads (EGC is under meti.go.jp); anything else would
+# turn the add-by-URL form into a fetch-anything proxy.
+_PROBE_DOMAINS = ("meti.go.jp", "occto.or.jp")
+
+
+def _probe_host_ok(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in _PROBE_DOMAINS)
+
+
 def probe_url(
     url: str, *, db_path: str | None = None, fetch: FetchFn | None = None,
     validate: bool = True, tracked_urls: set[str] | None = None,
@@ -234,14 +244,14 @@ def probe_url(
 ) -> Candidate | None:
     """Inspect a pasted committee URL → a :class:`Candidate`.
 
-    Returns ``None`` only for non-http(s) input; an unreachable URL still yields
-    a Candidate, with ``note="unreachable"``. Guesses source/key from the URL,
-    reads the page ``<title>``/``<h1>`` for a name, and — when ``validate`` —
-    runs the real detector so the UI can preview how many meetings would be
-    tracked.
+    Returns ``None`` for a URL it won't fetch (not http(s), or not a METI / OCCTO
+    host); an unreachable URL still yields a Candidate, with ``note="unreachable"``.
+    Guesses source/key from the URL, reads the page ``<title>``/``<h1>`` for a name,
+    and — when ``validate`` — runs the real detector so the UI can preview how many
+    meetings would be tracked.
     """
     url = url.strip()
-    if not re.match(r"^https?://", url):
+    if not re.match(r"^https?://", url) or not _probe_host_ok(url):
         return None
     # force=True: the URL may already be in the conditional-GET cache (e.g. an
     # index the catalog crawl touched), and a 304 carries no body to parse.

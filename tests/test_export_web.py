@@ -179,6 +179,55 @@ def test_build_policy_snapshot_synthesis_rollup_and_discovered(tmp_path: Path):
     assert {c["key"]: c for c in build_policy_snapshot(db)["committees"]}["gx_demand"]["tracked"] is True
 
 
+def test_undated_meeting_shows_its_jst_detection_day_not_its_last_update(tmp_path: Path):
+    """A materials backfill or retry bumps updated_at; the card must still show the day
+    the meeting was detected (what the UI labels it), in JST."""
+    from sqlalchemy import text
+
+    from repower.dashboard.export_web import build_policy_snapshot
+    from repower.db import get_engine
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    store.record_meeting("emissions_trading", 7, [
+        Material(7, "007_a", "https://x/7.pdf", "資料", "handout")], db_path=db)
+    with get_engine(db).begin() as con:
+        # 16:30 UTC is 01:30 JST the next day.
+        con.execute(text("UPDATE policy_meeting SET meeting_date = NULL, "
+                         "detected_at = '2026-07-01 16:30:00', updated_at = '2026-09-20 03:00:00' "
+                         "WHERE committee_key = 'emissions_trading' AND meeting_num = 7"))
+
+    m = next(x for x in build_policy_snapshot(db)["meetings"] if x["com"] == "emissions_trading" and x["num"] == 7)
+
+    assert m["date"] == "2026-07-02" and m["dateReal"] is False
+    assert m["sub"].endswith("検出 2026-07-02")
+
+
+def test_export_blanks_material_links_that_are_not_http(tmp_path: Path):
+    """A DB scraped before links were checked at ingest must not publish a javascript: href."""
+    from sqlalchemy import text
+
+    from repower.dashboard.export_web import build_policy_snapshot
+    from repower.db import get_engine
+    from repower.policy import store
+    from repower.policy.scraper import Material
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    store.record_meeting("emissions_trading", 7, [
+        Material(7, "007_a", "https://www.meti.go.jp/7a.pdf", "資料A", "handout"),
+        Material(7, "007_b", "https://www.meti.go.jp/7b.pdf", "資料B", "handout")], db_path=db)
+    with get_engine(db).begin() as con:
+        con.execute(text("UPDATE policy_material SET url = 'javascript:alert(1)//x.pdf' "
+                         "WHERE url LIKE '%7b.pdf'"))
+
+    m = next(x for x in build_policy_snapshot(db)["meetings"] if x["com"] == "emissions_trading" and x["num"] == 7)
+
+    assert sorted(d["url"] for d in m["docs"]) == ["", "https://www.meti.go.jp/7a.pdf"]
+
+
 def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Path):
     """The status payload keeps every errored/mid-flight meeting whatever the cap,
     trims only the quiet `detected` backlog (reporting how much it dropped), and
@@ -217,6 +266,36 @@ def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Pa
     # detected meetings competing for the CAP-2 slots the two pinned rows leave.
     assert out["truncated"]["emissions_trading"] == 6
     assert all(m["state"] == "detected" for m in mine if m["num"] not in (1, 2))
+
+
+def test_export_policy_keeps_raw_failure_text_off_the_public_site(tmp_path: Path):
+    """Raw last_error can quote local paths (the notebooklm argv) and stderr; the
+    static export keeps the flag, and only a neutral line for unflagged failures."""
+    from repower.dashboard.export_web import build_policy_status, export_policy
+    from repower.policy import store
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    local_path = r"C:\Users\someone\AppData\Local\Temp\repower\x.pdf"
+    store.record_meeting("emissions_trading", 1, None, db_path=db)
+    store.record_meeting("emissions_trading", 2, None, db_path=db)
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
+    store.update_meeting(by_num[1], db_path=db, state="error", quality_flag=None,
+                         last_error=f"NotebookLM NotebookLMError: notebooklm source add {local_path} -> exit 1")
+    store.update_meeting(by_num[2], db_path=db, state="error", quality_flag="download_blocked",
+                         last_error=f"1 of 3 document(s) could not be downloaded; staged at {local_path}")
+
+    export_policy(tmp_path / "out", db)
+
+    files = {p.name: p.read_text(encoding="utf-8") for p in (tmp_path / "out" / "policy").glob("*.json")}
+    assert set(files) == {"committees.json", "meetings.json", "status.json"}
+    assert not [name for name, text in files.items() if "someone" in text], "local path leaked"
+    status = {m["num"]: m for m in json.loads(files["status.json"])["meetings"] if m["com"] == "emissions_trading"}
+    assert status[1]["error"] and status[1]["flag"] is None
+    assert status[2]["error"] is None and status[2]["flag"] == "download_blocked"
+    # The live API (local only) still carries the raw text for debugging.
+    live = {m["num"]: m for m in build_policy_status(db)["meetings"] if m["com"] == "emissions_trading"}
+    assert "someone" in live[1]["error"]
 
 
 def test_committees_payload_reports_last_pipeline_event(tmp_path: Path):
