@@ -10,7 +10,7 @@ import { Sidebar, TopBar, PageHeader, ExportButton, useReload } from '../lib/chr
 import { ChartFrame } from '../lib/chart'
 import { downloadCsv } from '../lib/download'
 import { areas } from './MarketData.data'
-import { useWholesaleLive, useDriversLive, useBalancingLive, useTielineLive } from './MarketData.live'
+import { useWholesaleLive, useDriversLive, useBalancingLive, useTielineLive, useAreaDayLive } from './MarketData.live'
 import { buildMarketView, fmtDT, fmtEpoch } from './MarketData.view'
 import type { Domain, DrRange, Gran, Range, View } from './MarketData.view'
 
@@ -31,7 +31,7 @@ export function MarketDataScreen() {
   // unzoomed areas keep the range-derived window.
   const [zoom, setZoom] = useState<Record<string, Domain>>({})
   const [drRange, setDrRange] = useState<DrRange>('90D')
-  const [drOn, setDrOn] = useState<{ jkm: boolean; ncl: boolean; fx: boolean }>({ jkm: true, ncl: true, fx: true })
+  const [drOn, setDrOn] = useState<{ lng: boolean; brent: boolean; fx: boolean }>({ lng: true, brent: true, fx: true })
   // Compare overlay (period-over-period) + inline drill-down accordions.
   const [compare, setCompare] = useState(false)
   const [expandedLine, setExpandedLine] = useState<string | null>(null)
@@ -132,8 +132,8 @@ export function MarketDataScreen() {
   const tProduct = (code: string) => setExpandedProduct((prev) => (prev === code ? null : code))
   const toggleNotif = () => setShowNotif((n) => !n)
   const tRefresh = useReload()
-  const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
-  const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
+  const tLng = () => setDrOn((p) => ({ ...p, lng: !p.lng }))
+  const tBrent = () => setDrOn((p) => ({ ...p, brent: !p.brent }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
 
   const selectedKeys = areas.filter((a) => sel[a.key]).map((a) => a.key)
@@ -141,6 +141,7 @@ export function MarketDataScreen() {
   const driversLive = useDriversLive()
   const balLive = useBalancingLive()
   const tielineLive = useTielineLive('DAM')
+  const areaDayLive = useAreaDayLive()
 
   // ---- notifications (bell popover) ----
   // Derived from what this screen already holds: the export manifest (how fresh
@@ -224,8 +225,8 @@ export function MarketDataScreen() {
 
   // ---- computed (mirror of renderVals) ----
   const v = useMemo(
-    () => buildMarketView({ view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive }),
-    [view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive],
+    () => buildMarketView({ view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive, areaDayLive }),
+    [view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive, areaDayLive],
   )
 
   // ---- section renderers ----
@@ -582,20 +583,22 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Weighted avg ΔkW price<br />加重平均ΔkW価格</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balAvgPrice} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/ΔkW·30min</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · nationwide<SampleTag failed={balLive.failed} /></div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▼ −0.32 (−6.2%)</span>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · nationwide · {v.balDate} vs prior day<SampleTag failed={balLive.failed} /></div>
+                    {v.balPriceChip && (
+                      <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.balPriceChip}</span>
+                    )}
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured volume<br />調達量合計</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balProcTot} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>5 products · vs prior day<SampleTag failed={balLive.failed} /></div>
-                    <span style={v.balD1S}>▲ +214 (+2.4%)</span>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>5 products · average over the day&apos;s slots · vs prior day<SampleTag failed={balLive.failed} /></div>
+                    {v.balProcChip && <span style={v.balProcChip.style}>{v.balProcChip.txt}</span>}
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Shortfall slots<br />調達不足コマ</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>3 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>/ 48</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>三次② evening ramp · 17:00–18:30</div>
-                    <span style={v.balD2S}>▼ −2 slots vs y&apos;day</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balShort} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>/ {v.balSlots}</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.balShortSub}<SampleTag failed={balLive.failed} /></div>
+                    {v.balShortChip && <span style={v.balShortChip.style}>{v.balShortChip.txt}</span>}
                   </div>
                 </div>
 
@@ -603,16 +606,16 @@ export function MarketDataScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Balancing Products <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>需給調整市場 商品別<SampleTag failed={balLive.failed} /></span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>EPRX · FY2025+ · daily · {v.balDate} · nationwide procurement</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>EPRX · {v.balDate} · averages over the day&apos;s 30-min slots · nationwide procurement</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/ΔkW·30min · MW</span>
                   </div>
-                  <div style={s('display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)')}>
-                    <span>PRODUCT · 商品</span><span style={s('text-align:right')}>AVG PRICE</span><span style={s('text-align:right')}>PROCURED</span><span style={s('text-align:right')}>OFFERED</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span>
+                  <div style={s('display:grid;grid-template-columns:1.5fr .8fr .8fr .8fr 1.1fr .7fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)')}>
+                    <span>PRODUCT · 商品</span><span style={s('text-align:right')}>AVG PRICE</span><span style={s('text-align:right')}>PROCURED</span><span style={s('text-align:right')}>OFFERED</span><span style={s('text-align:right')}>ACHIEVEMENT 達成率</span><span style={s('text-align:right')}>SHORT 不足</span>
                   </div>
                   {v.balRows.map((b, bi) => (
                     <Fragment key={bi}>
-                    <Hoverable base={expandedProduct === b.code ? 'display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer;background:var(--hov)' : 'display:grid;grid-template-columns:1.6fr .9fr .9fr .9fr 1.2fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer'} hover="background:var(--hov)" onClick={() => tProduct(b.code)}>
+                    <Hoverable base={expandedProduct === b.code ? 'display:grid;grid-template-columns:1.5fr .8fr .8fr .8fr 1.1fr .7fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer;background:var(--hov)' : 'display:grid;grid-template-columns:1.5fr .8fr .8fr .8fr 1.1fr .7fr;gap:0;align-items:center;padding:10px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer'} hover="background:var(--hov)" onClick={() => tProduct(b.code)}>
                       <span style={s('display:flex;align-items:center;gap:9px;min-width:0')}>
                         <span style={b.dot}></span>
                         <span style={s('font-size:13px;font-weight:600;white-space:nowrap')}>{expandedProduct === b.code ? '▾ ' : '▸ '}{b.jp} <span style={s('font-weight:400;color:var(--mut);font-size:11.5px')}>{b.en}</span></span>
@@ -622,8 +625,9 @@ export function MarketDataScreen() {
                       <span style={s("text-align:right;font-size:13px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{b.off}</span>
                       <span style={s('display:flex;align-items:center;gap:8px;justify-content:flex-end')}>
                         <span style={s('width:72px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0')}><span style={b.bar}></span></span>
-                        <span style={s("font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1")}>{b.ach}%</span>
+                        <span style={s("font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1")}>{b.ach}</span>
                       </span>
+                      <span style={s('text-align:right')}><span style={b.shortS}>{b.shortTxt}</span></span>
                     </Hoverable>
                     {expandedProduct === b.code ? (
                       <div style={s('padding:11px 10px 14px;border-bottom:1px solid var(--dv);background:var(--bg0)')}>
@@ -642,7 +646,7 @@ export function MarketDataScreen() {
                                 <span style={s("text-align:right;font-size:12px;font-feature-settings:'tnum' 1")}>{r.ach != null ? r.ach + '%' : '—'}</span>
                               </div>
                             ))}
-                            <div style={s('font-size:10.5px;color:var(--mut);margin-top:7px')}>{L === 'ja' ? '各エリアの直近ウィンドウ平均（¥/ΔkW·30min · MW）· 達成率＝調達量／応札量' : 'Per-area window averages (¥/ΔkW·30min · MW) · achievement = procured / offered'}</div>
+                            <div style={s('font-size:10.5px;color:var(--mut);margin-top:7px')}>{L === 'ja' ? '最新日の30分コマ平均（¥/ΔkW·30min · MW）· 達成率＝調達量／応札量（広域調達のため他エリアの応札を使うと100%を超えます）' : 'Per-area averages over the latest day\'s slots (¥/ΔkW·30min · MW) · achievement = procured / offered, above 100% where an area drew on other areas\' offers (procurement is nationwide)'}</div>
                           </>
                         ) : (
                           <div style={s('font-size:11.5px;color:var(--mut)')}>{L === 'ja' ? 'エリア別データは読込中です。' : 'Per-area data still loading.'}</div>
@@ -651,7 +655,7 @@ export function MarketDataScreen() {
                     ) : null}
                     </Fragment>
                   ))}
-                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · Prices are weighted daily averages · 価格は日次加重平均</div>
+                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · prices weighted by contracted MW · short = slots where national procurement fell below the requirement · 価格は約定量加重平均 · 不足＝全国の約定量が必要量を下回ったコマ</div>
                 </div>
               </div>
   )
@@ -662,116 +666,76 @@ export function MarketDataScreen() {
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Congested lines now<br />混雑中の連系線</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icCong} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>/ 10 lines</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>≥97% of TTC · latest slot 14:30<SampleTag failed={tielineLive.failed} /></div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▲ +1 line vs y&apos;day same slot</span>
+                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Lines at their limit<br />上限に達した連系線</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icAtN} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>/ {v.icLimN} lines</span></div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>reserved ≥97% of the limit in any slot · {v.icDate}<SampleTag failed={tielineLive.failed} /></div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.icAtChip}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest utilization<br />最高利用率</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icMaxU}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icMaxLabel}<SampleTag failed={tielineLive.failed} /></div>
-                    <span style={v.icWarnChip}>binding since 11:00 · 混雑継続中</span>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest share of limit<br />最高確保率</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icTopPct}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icTopLabel}<SampleTag failed={tielineLive.failed} /></div>
+                    <span style={v.icWarnChip}>{v.icTopChip}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Widest area spread<br />最大エリア価格差</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>¥{v.icSpread} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>/kWh</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>Tokyo vs Kyushu · latest slot</div>
-                    <span style={v.icChipN}>congestion rent signal · 値差＝混雑レント</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icSpread} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>/kWh</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icSpreadSub}<SampleTag failed={areaDayLive.failed} /></div>
+                    <span style={v.icChipN}>JEPX day-ahead · 前日スポット</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Flow in use<br />総送電量</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icFlowTot} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>of {v.icCapTot} MW total TTC<SampleTag failed={tielineLive.failed} /></div>
-                    <span style={v.icChipN}>{v.icUtilTot}% of capability in use</span>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Reserved on average<br />平均確保量</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icResAvg} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>vs {v.icLimAvg} MW of limits · all lines, both directions<SampleTag failed={tielineLive.failed} /></div>
+                    <span style={v.icChipN}>{v.icResPct}% of the limits reserved</span>
                   </div>
                 </div>
 
-                {/* Flow map */}
+                {/* Reservation map */}
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Flow Map — 9 Areas <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線フロー<SampleTag failed={tielineLive.failed} /></span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Net flows at latest slot 14:30 · labels in MW · line width ∝ transfer capability · OCCTO 系統情報 {v.icMapDate}</div>
+                      <div style={s('font-size:16px;font-weight:600')}>Balancing Reservations — 9 Areas <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線の調整力確保<SampleTag failed={tielineLive.failed} /></span></div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>ΔkW reserved on each line for cross-area balancing, at its peak slot · labels in MW · line width ∝ reservation limit · EPRX {v.icDate}</div>
                     </div>
-                    <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>node prices = area spot ¥/kWh</span>
+                    <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>node prices = JEPX area daily average ¥/kWh · {v.areaDate}<SampleTag failed={areaDayLive.failed} /></span>
                   </div>
                   <svg viewBox="0 0 960 360" style={s('width:100%;height:auto;display:block;margin-top:8px')}>
-                    <line x1="885" y1="35" x2="795" y2="95" stroke="#FAC775" strokeWidth="2.8"></line>
-                    <line x1="795" y1="95" x2="700" y2="170" stroke="#EF9F27" strokeWidth="7"></line>
-                    <line x1="565" y1="225" x2="700" y2="170" stroke="#E24B4A" strokeWidth="3.8"></line>
-                    <line x1="425" y1="225" x2="565" y2="225" stroke="#5DCAA5" strokeWidth="4.1"></line>
-                    <line x1="450" y1="110" x2="565" y2="225" stroke="#5DCAA5" strokeWidth="2.3"></line>
-                    <line x1="450" y1="110" x2="425" y2="225" stroke="#5DCAA5" strokeWidth="3.6"></line>
-                    <line x1="250" y1="185" x2="425" y2="225" stroke="#FAC775" strokeWidth="5.5"></line>
-                    <line x1="300" y1="290" x2="425" y2="225" stroke="#FAC775" strokeWidth="3.2"></line>
-                    <line x1="250" y1="185" x2="300" y2="290" stroke="#5DCAA5" strokeWidth="3"></line>
-                    <line x1="85" y1="265" x2="250" y2="185" stroke="#E24B4A" strokeWidth="4.3"></line>
-                    <circle cx="840" cy="65" r="8" style={s('fill:var(--bg1)')} stroke="#FAC775" strokeWidth="1.5"></circle>
-                    <text x="840" y="65" transform="rotate(146 840 65)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#D99A2B">▶</text>
-                    <circle cx="747.5" cy="132.5" r="8" style={s('fill:var(--bg1)')} stroke="#EF9F27" strokeWidth="1.5"></circle>
-                    <text x="747.5" y="132.5" transform="rotate(142 747.5 132.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#EF9F27">▶</text>
-                    <circle cx="632.5" cy="197.5" r="8" style={s('fill:var(--bg1)')} stroke="#E24B4A" strokeWidth="1.5"></circle>
-                    <text x="632.5" y="197.5" transform="rotate(-22 632.5 197.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#E24B4A">▶</text>
-                    <circle cx="495" cy="225" r="8" style={s('fill:var(--bg1)')} stroke="#5DCAA5" strokeWidth="1.5"></circle>
-                    <text x="495" y="225" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#2A9D8F">▶</text>
-                    <circle cx="507.5" cy="167.5" r="8" style={s('fill:var(--bg1)')} stroke="#5DCAA5" strokeWidth="1.5"></circle>
-                    <text x="507.5" y="167.5" transform="rotate(45 507.5 167.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#2A9D8F">▶</text>
-                    <circle cx="437.5" cy="167.5" r="8" style={s('fill:var(--bg1)')} stroke="#5DCAA5" strokeWidth="1.5"></circle>
-                    <text x="437.5" y="167.5" transform="rotate(102 437.5 167.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#2A9D8F">▶</text>
-                    <circle cx="337.5" cy="205" r="8" style={s('fill:var(--bg1)')} stroke="#FAC775" strokeWidth="1.5"></circle>
-                    <text x="337.5" y="205" transform="rotate(13 337.5 205)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#D99A2B">▶</text>
-                    <circle cx="362.5" cy="257.5" r="8" style={s('fill:var(--bg1)')} stroke="#FAC775" strokeWidth="1.5"></circle>
-                    <text x="362.5" y="257.5" transform="rotate(-27 362.5 257.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#D99A2B">▶</text>
-                    <circle cx="275" cy="237.5" r="8" style={s('fill:var(--bg1)')} stroke="#5DCAA5" strokeWidth="1.5"></circle>
-                    <text x="275" y="237.5" transform="rotate(64 275 237.5)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#2A9D8F">▶</text>
-                    <circle cx="167.5" cy="225" r="8" style={s('fill:var(--bg1)')} stroke="#E24B4A" strokeWidth="1.5"></circle>
-                    <text x="167.5" y="225" transform="rotate(-26 167.5 225)" textAnchor="middle" dominantBaseline="central" fontSize="9" fill="#E24B4A">▶</text>
-                    <text x="826" y="44" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.hh}</text>
-                    <text x="735" y="116" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.st}</text>
-                    <text x="626" y="178" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.fc}</text>
+                    <rect x="366" y="80" width="258" height="174" rx="18" fill="none" style={s('stroke:var(--mut)')} strokeDasharray="5 4" opacity="0.7"></rect>
+                    <text x="495" y="72" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>Chubu · Hokuriku · Kansai: combined zones 合成エリア</text>
+                    <text x="495" y="160" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icCombN} combined lines · peak {v.icCombPeak}%</text>
+                    <text x="495" y="175" textAnchor="middle" fontSize="9.5" style={s('fill:var(--mut)')}>see the table below · 詳細は下表</text>
+                    {v.icMap.map((m) => (
+                      <line key={m.key} x1={m.x1} y1={m.y1} x2={m.x2} y2={m.y2} stroke={m.col} strokeWidth={m.w} strokeDasharray={m.dash}>
+                        <title>{m.title}</title>
+                      </line>
+                    ))}
+                    {v.icMap.filter((m) => m.has).map((m) => (
+                      <g key={m.key}>
+                        <circle cx={m.mx} cy={m.my} r="8" style={s('fill:var(--bg1)')} stroke={m.col} strokeWidth="1.5"></circle>
+                        <text x={m.mx} y={m.my} transform={`rotate(${m.ang} ${m.mx} ${m.my})`} textAnchor="middle" dominantBaseline="central" fontSize="9" fill={m.arrowCol}>▶</text>
+                      </g>
+                    ))}
+                    {v.icMap.map((m) => (
+                      <text key={m.key} x={m.lx} y={m.ly} textAnchor={m.anchor} fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{m.label}</text>
+                    ))}
                     <text x="640" y="218" textAnchor="middle" fontSize="9" style={s('fill:var(--mut)')}>50/60 Hz</text>
-                    <text x="495" y="209" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.kc}</text>
-                    <text x="530" y="157" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.hc}</text>
-                    <text x="415" y="164" textAnchor="end" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.hk}</text>
-                    <text x="337" y="187" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.ck}</text>
-                    <text x="372" y="277" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.sk}</text>
-                    <text x="257" y="242" textAnchor="end" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.cs}</text>
-                    <text x="156" y="205" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--tx2)')}>{v.icF.kq}</text>
-                    <rect x="838" y="16" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="885" y="31" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Hokkaido</text>
-                    <text x="885" y="46" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.hokkaido}</text>
-                    <rect x="748" y="76" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="795" y="91" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Tohoku</text>
-                    <text x="795" y="106" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.tohoku}</text>
-                    <rect x="653" y="151" width="94" height="38" rx="12" style={s('fill:var(--acTint);stroke:var(--ac)')}></rect>
-                    <text x="700" y="166" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Tokyo</text>
-                    <text x="700" y="181" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--dn)')}>¥{v.icPx.tepco}</text>
-                    <rect x="518" y="206" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="565" y="221" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Chubu</text>
-                    <text x="565" y="236" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.chubu}</text>
-                    <rect x="403" y="91" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="450" y="106" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Hokuriku</text>
-                    <text x="450" y="121" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.hokuriku}</text>
-                    <rect x="378" y="206" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="425" y="221" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Kansai</text>
-                    <text x="425" y="236" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.kansai}</text>
-                    <rect x="203" y="166" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="250" y="181" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Chugoku</text>
-                    <text x="250" y="196" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.chugoku}</text>
-                    <rect x="253" y="271" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="300" y="286" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Shikoku</text>
-                    <text x="300" y="301" textAnchor="middle" fontSize="10" style={s('fill:var(--mut)')}>¥{v.icPx.shikoku}</text>
-                    <rect x="38" y="246" width="94" height="38" rx="12" style={s('fill:var(--bg3);stroke:var(--bd2)')}></rect>
-                    <text x="85" y="261" textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>Kyushu</text>
-                    <text x="85" y="276" textAnchor="middle" fontSize="10" fontWeight="600" style={s('fill:var(--up)')}>¥{v.icPx.kyushu}</text>
+                    {v.icNodes.map((n) => (
+                      <g key={n.key}>
+                        {n.acc && <rect x={n.cx - 47} y={n.cy - 19} width="94" height="38" rx="12" style={s('fill:var(--bg1)')}></rect>}
+                        <rect x={n.cx - 47} y={n.cy - 19} width="94" height="38" rx="12" style={s(n.acc ? 'fill:var(--acTint);stroke:var(--ac)' : 'fill:var(--bg3);stroke:var(--bd2)')}></rect>
+                        <text x={n.cx} y={n.cy - 4} textAnchor="middle" fontSize="11.5" fontWeight="600" style={s('fill:var(--tx)')}>{n.name}</text>
+                        <text x={n.cx} y={n.cy + 11} textAnchor="middle" fontSize="10" fontWeight={n.pxBold ? 600 : undefined} style={{ fill: n.pxCol }}>¥{n.px}</text>
+                      </g>
+                    ))}
                   </svg>
                   <div style={s('display:flex;align-items:center;gap:16px;margin-top:8px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)')}>
                     <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:14px;height:4px;border-radius:2px;background:#5DCAA5')}></span>&lt;55%</span>
                     <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:14px;height:4px;border-radius:2px;background:#FAC775')}></span>55–85%</span>
                     <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:14px;height:4px;border-radius:2px;background:#EF9F27')}></span>85–97%</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--dn)')}><span style={s('width:14px;height:4px;border-radius:2px;background:#E24B4A')}></span>≥97% congested 混雑</span>
-                    <span style={s('margin-left:auto;color:var(--mut)')}>▶ = net flow direction · utilization of TTC 運用容量に対する利用率</span>
+                    <span style={s('display:inline-flex;align-items:center;gap:6px;font-weight:600;color:var(--dn)')}><span style={s('width:14px;height:4px;border-radius:2px;background:#E24B4A')}></span>≥97% at the limit 上限到達</span>
+                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:14px;height:0;border-top:2px dashed #B4BCC9')}></span>no reservation limit 上限なし</span>
+                    <span style={s('margin-left:auto;color:var(--mut)')}>▶ = direction of the peak reservation · share of the reservation limit 確保上限に対する比率</span>
                   </div>
                 </div>
 
@@ -780,32 +744,32 @@ export function MarketDataScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Interconnector Lines <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線一覧<SampleTag failed={tielineLive.failed} /></span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest slot 14:30 · spread = destination minus origin area price · 値差＝流入側−流出側</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Peak slot per line · EPRX {v.icDate} · spread = destination minus origin JEPX area price (daily average; combined zones use their areas&apos; mean) · 値差＝流入側−流出側</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>MW · ¥/kWh</span>
                   </div>
                   <div style={s('display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;margin-top:12px;font-size:11px;font-weight:600;color:var(--mut);letter-spacing:.04em;padding:0 8px 8px;border-bottom:1px solid var(--dv)')}>
-                    <span>LINE · 連系線</span><span>ROUTE · 区間</span><span style={s('text-align:right')}>FLOW</span><span style={s('text-align:right')}>TTC</span><span style={s('text-align:right')}>UTILIZATION 利用率</span><span style={s('text-align:right')}>SPREAD 値差</span><span style={s('text-align:right')}>CONGESTED 混雑</span>
+                    <span>LINE · 連系線</span><span>ROUTE · 区間</span><span style={s('text-align:right')}>RESERVED</span><span style={s('text-align:right')}>LIMIT</span><span style={s('text-align:right')}>SHARE OF LIMIT 確保率</span><span style={s('text-align:right')}>SPREAD 値差</span><span style={s('text-align:right')}>AT LIMIT 上限</span>
                   </div>
                   {v.icRows.map((ln) => (
                     <Fragment key={ln.key}>
                     <Hoverable base={expandedLine === ln.key ? 'display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer;background:var(--hov)' : 'display:grid;grid-template-columns:1.6fr 1.2fr .55fr .55fr 1.2fr .6fr .8fr;gap:0;align-items:center;padding:9px 8px;border-bottom:1px solid var(--dv);border-radius:8px;cursor:pointer'} hover="background:var(--hov)" onClick={() => tLine(ln.key)}>
                       <span style={s('min-width:0')}><span style={s('display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{expandedLine === ln.key ? '▾ ' : '▸ '}{ln.n1}</span><span style={s('display:block;font-size:10.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.n2}</span></span>
                       <span style={s('font-size:12px;color:var(--tx2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{ln.route}</span>
-                      <span style={s("text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{ln.flow}</span>
-                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{ln.cap}</span>
+                      <span style={s("text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{ln.reserved}</span>
+                      <span style={s("text-align:right;font-size:12.5px;color:var(--tx2);font-feature-settings:'tnum' 1")}>{ln.limit}</span>
                       <span style={s('display:flex;align-items:center;gap:8px;justify-content:flex-end')}>
                         <span style={s('width:64px;height:6px;border-radius:3px;background:var(--bg2);overflow:hidden;flex-shrink:0')}><span style={ln.barS}></span></span>
                         <span style={s("font-size:12px;font-weight:600;width:34px;text-align:right;font-feature-settings:'tnum' 1")}>{ln.pct}</span>
                       </span>
                       <span style={s("text-align:right;font-size:12.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{ln.spread}</span>
-                      <span style={s('text-align:right')}><span style={ln.congS}>{ln.congTxt}</span></span>
+                      <span style={s('text-align:right')}><span style={ln.atS}>{ln.atTxt}</span></span>
                     </Hoverable>
                     {expandedLine === ln.key ? (
                       <div style={s('padding:12px 10px 16px;border-bottom:1px solid var(--dv);background:var(--bg0)')}>
                         <div style={s('display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;flex-wrap:wrap;gap:6px')}>
-                          <span style={s('font-size:12.5px;font-weight:600')}>{L === 'ja' ? '当日の30分コマ別 フロー・利用率' : 'Intraday flow & utilization · 48 × 30-min slots'}</span>
-                          <span style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{ln.route} · {L === 'ja' ? 'ピーク' : 'peak'} {ln.peakPct}% · TTC {ln.cap} MW · {L === 'ja' ? '値差' : 'spread'} {ln.spread}</span>
+                          <span style={s('font-size:12.5px;font-weight:600')}>{L === 'ja' ? '30分コマ別の確保量／上限' : 'Reserved ÷ limit · 48 × 30-min slots'}</span>
+                          <span style={s("font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{ln.route} · {L === 'ja' ? 'ピーク' : 'peak'} {ln.pct}{ln.peakAt ? ' @ ' + ln.peakAt : ''} · {ln.reserved} / {ln.limit} MW · {L === 'ja' ? '値差' : 'spread'} {ln.spread}</span>
                         </div>
                         <div style={s('display:grid;grid-template-columns:repeat(48,1fr);gap:2px;align-items:end;height:64px')}>
                           {ln.bars.map((c, ci) => (
@@ -813,29 +777,29 @@ export function MarketDataScreen() {
                           ))}
                         </div>
                         <div style={s("display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);margin-top:6px;font-feature-settings:'tnum' 1")}><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>23:30</span></div>
-                        <div style={s('font-size:10.5px;color:var(--mut);margin-top:6px')}>{L === 'ja' ? 'バーの高さ＝運用容量に対する利用率 · ホバーでMW表示' : 'Bar height = utilization of TTC · hover for MW'}</div>
+                        <div style={s('font-size:10.5px;color:var(--mut);margin-top:6px')}>{L === 'ja' ? 'バーの高さ＝確保上限に対する確保量の比率（各コマで比率の大きい方向）· ホバーでMW表示' : 'Bar height = share of the reservation limit, larger direction per slot · hover for MW'}</div>
                       </div>
                     ) : null}
                     </Fragment>
                   ))}
-                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>TTC = total transfer capability 運用容量 · flows are net of counter-flows · click a line for hourly detail</div>
+                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>Reserved = ΔkW set aside on the line for cross-area balancing procurement (EPRX) · limit = the most that may be reserved · neither is physical flow · click a line for its 48 slots</div>
                 </div>
 
                 {/* Congestion timeline */}
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Congestion Timeline <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>混雑タイムライン<SampleTag failed={tielineLive.failed} /></span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Utilization by 30-min slot · today {v.icTodayDate} · 30分コマ別利用率</div>
+                      <div style={s('font-size:16px;font-weight:600')}>Reservation Timeline <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>確保率タイムライン<SampleTag failed={tielineLive.failed} /></span></div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Share of the reservation limit by 30-min slot · EPRX {v.icDate} · 30分コマ別の確保率</div>
                     </div>
                     <div style={s('display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px')}>
-                      <span>free</span>
+                      <span>low</span>
                       <span style={s('width:16px;height:10px;background:#9FE1CB;border-radius:2px')}></span>
                       <span style={s('width:16px;height:10px;background:#5DCAA5;border-radius:2px')}></span>
                       <span style={s('width:16px;height:10px;background:#FAC775;border-radius:2px')}></span>
                       <span style={s('width:16px;height:10px;background:#EF9F27;border-radius:2px')}></span>
                       <span style={s('width:16px;height:10px;background:#E24B4A;border-radius:2px')}></span>
-                      <span>congested</span>
+                      <span>at limit</span>
                     </div>
                   </div>
                   <div style={s('display:flex;flex-direction:column;gap:4px;margin-top:14px')}>
@@ -847,7 +811,7 @@ export function MarketDataScreen() {
                             <span key={ci} style={c.s} title={c.t}></span>
                           ))}
                         </div>
-                        <span style={s("width:52px;flex-shrink:0;text-align:right;font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{tl.congTxt}</span>
+                        <span style={s("width:52px;flex-shrink:0;text-align:right;font-size:11px;color:var(--mut);font-feature-settings:'tnum' 1")}>{tl.atShort}</span>
                       </div>
                     ))}
                     <div style={s('display:flex;align-items:center;gap:10px')}>
@@ -867,20 +831,20 @@ export function MarketDataScreen() {
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>JKM LNG front-month<br />JKM（LNGスポット）</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drJkmV} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>$/MMBtu</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>ICE · close {v.drCloseDate} · vs prior close<SampleTag failed={driversLive.failed} /></div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.drJkmC}</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drLngV} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>$/MMBtu</span></div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>JKM=F futures · close {v.drCloseDate} · vs prior close<SampleTag failed={driversLive.failed} /></div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.drLngC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Newcastle coal<br />ニューカッスル石炭</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drNclV} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>$/t</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>ICE FOB front-month · vs prior close<SampleTag failed={driversLive.failed} /></div>
-                    <span style={v.drNclCS}>{v.drNclC}</span>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Brent crude<br />ブレント原油</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drBrentV} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>$/bbl</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>BZ=F futures · front month · vs prior close<SampleTag failed={driversLive.failed} /></div>
+                    <span style={v.drBrentCS}>{v.drBrentC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>USD/JPY<br />ドル円</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drFxV}</div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>TTM · weaker yen = costlier fuel imports<SampleTag failed={driversLive.failed} /></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>JPY=X spot rate · weaker yen = costlier fuel imports<SampleTag failed={driversLive.failed} /></div>
                     <span style={v.drFxCS}>{v.drFxC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
@@ -925,16 +889,16 @@ export function MarketDataScreen() {
                           <text x="930" y="310" textAnchor="middle" fontSize="10.5" fill="currentColor">{v.drX2}</text>
                         </g>
                         <line x1="46" x2="944" y1={v.dr100y} y2={v.dr100y} stroke="#94A3B8" strokeWidth="1" strokeDasharray="2 4" opacity={v.dr100op}></line>
-                        <polyline points={v.drNclPts} fill="none" stroke="#B08968" strokeWidth="1.8" strokeLinejoin="round" opacity={v.drNclOp}></polyline>
+                        <polyline points={v.drBrentPts} fill="none" stroke="#B08968" strokeWidth="1.8" strokeLinejoin="round" opacity={v.drBrentOp}></polyline>
                         <polyline points={v.drFxPts} fill="none" stroke="#8AB17D" strokeWidth="1.8" strokeLinejoin="round" opacity={v.drFxOp}></polyline>
-                        <polyline points={v.drJkmPts} fill="none" stroke="#E76F51" strokeWidth="1.8" strokeLinejoin="round" opacity={v.drJkmOp}></polyline>
+                        <polyline points={v.drLngPts} fill="none" stroke="#E76F51" strokeWidth="1.8" strokeLinejoin="round" opacity={v.drLngOp}></polyline>
                         <polyline points={v.drSpotPts} fill="none" stroke="#00A5CF" strokeWidth="2.6" strokeLinejoin="round"></polyline>
                       </svg>
                     </div>
                     <div style={s('display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap')}>
                       <span style={s('display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--tx2)')}><span style={s('width:20px;height:3px;border-radius:2px;background:#00A5CF')}></span>JEPX spot スポット</span>
-                      <span style={v.drJkmLegS} {...press(tJkm, drOn.jkm)}><span style={s('width:20px;height:3px;border-radius:2px;background:#E76F51')}></span>JKM</span>
-                      <span style={v.drNclLegS} {...press(tNcl, drOn.ncl)}><span style={s('width:20px;height:3px;border-radius:2px;background:#B08968')}></span>Newcastle 石炭</span>
+                      <span style={v.drLngLegS} {...press(tLng, drOn.lng)}><span style={s('width:20px;height:3px;border-radius:2px;background:#E76F51')}></span>JKM</span>
+                      <span style={v.drBrentLegS} {...press(tBrent, drOn.brent)}><span style={s('width:20px;height:3px;border-radius:2px;background:#B08968')}></span>Brent ブレント</span>
                       <span style={v.drFxLegS} {...press(tFx, drOn.fx)}><span style={s('width:20px;height:3px;border-radius:2px;background:#8AB17D')}></span>USD/JPY</span>
                       <span style={s('margin-left:auto;font-size:11px;color:var(--mut)')}>Click legend to toggle · 凡例クリックで切替</span>
                     </div>

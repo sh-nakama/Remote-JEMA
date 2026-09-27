@@ -134,20 +134,32 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
 
 // ── Balancing (需給調整市場 / EPRX) ─────────────────────────────────────────
 
-export interface BalancingStats {
+/** One EPRX day: averages over its slots of the national (all-area) totals; price weighted by contracted MW. */
+export interface BalDay {
+  required_mw: number | null
+  offered_mw: number | null
+  contracted_mw: number | null
+  price: number | null
+}
+
+export interface BalShortfall {
+  slots: number
+  short_slots: number
+  max_gap_mw: number | null
+  longest_run: { start: string; end: string; slots: number } | null
+}
+
+/** `balancing_summary.json` (`export_web.balancing_daily_summary`). */
+export interface BalancingSummary {
   schema: number
-  product_code: string
-  product: string
-  area: string
-  window_days: number
-  start: string
-  end: string
-  avg_demand_mw: number | null
-  avg_contracted_mw: number | null
-  avg_bid_volume_mw: number | null
-  avg_unprocured_mw: number | null
-  avg_price: number | null
-  avg_max_price: number | null
+  dates: string[]
+  national: Record<string, BalDay>
+  products: {
+    code: string
+    product: string
+    days: Record<string, BalDay & BalShortfall>
+    areas: (BalDay & { area: string })[]
+  }[]
 }
 
 export interface BalRow {
@@ -162,82 +174,88 @@ export interface BalAreaRow extends BalRow {
   area: string
 }
 
+/** One product's latest day nationally, with its shortfall and the prior day's for comparison. */
+export interface BalProductLive extends BalRow {
+  short: number
+  slots: number
+  maxGap: number | null
+  run: BalShortfall['longest_run']
+  prevShort: number | null
+}
+
 export interface BalancingLive {
   ready: boolean
   /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
   failed: boolean
-  rows: Record<string, BalRow>
-  /** Per-product, per-area breakdown (procured-desc) for the row drill-down. */
+  rows: Record<string, BalProductLive>
+  /** Per-product, per-area breakdown of the latest day (procured-desc) for the row drill-down. */
   areaRows: Record<string, BalAreaRow[]>
-  procTot: number
-  avgPrice: number | null
-  /** Latest stats-window end date (ISO) across products/areas — caption "as of". */
-  end: string | null
+  /** National figures across all products: the latest EPRX day and the one before it. */
+  day: BalDay | null
+  prev: BalDay | null
+  date: string | null
+  prevDate: string | null
 }
 
 // Frontend balProducts order ↔ exporter product codes.
 export const BAL_CODES = ['1-0', '2-1', '2-2', '3-1', '3-2']
-const BAL_AREAS = ['hokkaido', 'tohoku', 'tepco', 'chubu', 'hokuriku', 'kansai', 'chugoku', 'shikoku', 'kyushu']
 
-/** National balancing KPIs per product: summed procured/required across the 9 areas,
- * mean clearing price. (需給調整市場 is procured nationwide.) */
+const BAL_EMPTY: BalancingLive = { ready: false, failed: false, rows: {}, areaRows: {}, day: null, prev: null, date: null, prevDate: null }
+
+function balRow(d: BalDay): BalRow {
+  const proc = d.contracted_mw ?? 0
+  const off = d.offered_mw ?? 0
+  return { price: d.price, proc, off, ach: off > 0 ? (proc / off) * 100 : null }
+}
+
+/** Reshape the summary for the screen, or null when it holds no usable day. */
+export function balancingFromSummary(s: BalancingSummary): Omit<BalancingLive, 'ready' | 'failed'> | null {
+  const dates = s.dates || []
+  const date = dates[dates.length - 1] ?? null
+  if (!date) return null
+  const prevDate = dates.length > 1 ? dates[dates.length - 2] : null
+  const rows: Record<string, BalProductLive> = {}
+  const areaRows: Record<string, BalAreaRow[]> = {}
+  for (const p of s.products || []) {
+    const d = p.days[date]
+    if (!d) continue
+    const pd = prevDate ? p.days[prevDate] : undefined
+    rows[p.code] = {
+      ...balRow(d),
+      short: d.short_slots,
+      slots: d.slots,
+      maxGap: d.max_gap_mw,
+      run: d.longest_run,
+      prevShort: pd ? pd.short_slots : null,
+    }
+    areaRows[p.code] = (p.areas || []).map((a) => ({ area: a.area, ...balRow(a) }))
+  }
+  if (!Object.keys(rows).length) return null
+  return {
+    rows,
+    areaRows,
+    day: s.national?.[date] ?? null,
+    prev: prevDate ? (s.national?.[prevDate] ?? null) : null,
+    date,
+    prevDate,
+  }
+}
+
+/** The latest EPRX day nationally, per product and overall (需給調整市場 is procured nationwide). */
 export function useBalancingLive(): BalancingLive {
   const nonce = useDataNonce()
-  const [state, setState] = useState<BalancingLive>({ ready: false, failed: false, rows: {}, areaRows: {}, procTot: 0, avgPrice: null, end: null })
+  const [state, setState] = useState<BalancingLive>(BAL_EMPTY)
   useEffect(() => {
     let alive = true
-    const jobs: Promise<BalancingStats | null>[] = []
-    for (const code of BAL_CODES)
-      for (const area of BAL_AREAS)
-        jobs.push(getSnapshot<BalancingStats>(`balancing_stats/${code}/${area}.json`).catch(() => null))
-    Promise.all(jobs)
-      .then((all) => {
+    getSnapshot<BalancingSummary>('balancing_summary.json')
+      .then((snap) => {
         if (!alive) return
-        if (all.every((s) => s == null)) {
-          setState((s) => ({ ...s, ready: false, failed: true }))
-          return
-        }
-        const rows: Record<string, BalRow> = {}
-        const areaRows: Record<string, BalAreaRow[]> = {}
-        let procTot = 0
-        let end: string | null = null
-        for (const s of all) if (s?.end && (!end || s.end > end)) end = s.end
-        for (const code of BAL_CODES) {
-          let proc = 0
-          let off = 0
-          const ps: number[] = []
-          const ar: BalAreaRow[] = []
-          for (const s of all) {
-            if (!s || s.product_code !== code) continue
-            const aProc = s.avg_contracted_mw ?? 0
-            const aOff = s.avg_bid_volume_mw ?? 0
-            if (s.avg_contracted_mw != null) proc += s.avg_contracted_mw
-            if (s.avg_bid_volume_mw != null) off += s.avg_bid_volume_mw
-            if (s.avg_price != null) ps.push(s.avg_price)
-            if (aProc > 0 || aOff > 0 || s.avg_price != null)
-              ar.push({ area: s.area, price: s.avg_price, proc: aProc, off: aOff, ach: aOff > 0 ? (aProc / aOff) * 100 : null })
-          }
-          const price = ps.length ? ps.reduce((a, b) => a + b, 0) / ps.length : null
-          rows[code] = { price, proc, off, ach: off > 0 ? (proc / off) * 100 : null }
-          areaRows[code] = ar.sort((a, b) => b.proc - a.proc)
-          procTot += proc
-        }
-        // Volume-weighted by procured (contracted) MW across products — matches the
-        // "Weighted avg ΔkW price / 加重平均" label (a plain mean over products would
-        // over-weight thinly-procured products).
-        let wNum = 0
-        let wDen = 0
-        for (const code of BAL_CODES) {
-          const r = rows[code]
-          if (r.price != null && r.proc > 0) {
-            wNum += r.price * r.proc
-            wDen += r.proc
-          }
-        }
-        const avgPrice = wDen > 0 ? wNum / wDen : null
-        setState({ ready: true, failed: false, rows, areaRows, procTot, avgPrice, end })
+        const b = balancingFromSummary(snap)
+        setState(b ? { ready: true, failed: false, ...b } : { ...BAL_EMPTY, failed: true })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (alive) setState({ ...BAL_EMPTY, failed: true })
+      })
     return () => {
       alive = false
     }
@@ -246,14 +264,19 @@ export function useBalancingLive(): BalancingLive {
 }
 
 // ── Tieline / interconnectors (連系線) ───────────────────────────────────────
+// EPRX publishes, per line and 30-min slot, the ΔkW reserved on it for cross-area
+// balancing procurement and the limit on such reservations. Neither is physical flow.
 
 export interface TielineLineSnap {
   key: string | null
   pair: string
+  from: string[]
+  to: string[]
   date: string
-  ttc: number | null
-  util: (number | null)[]
-  util_now: number | null
+  reserved_fwd: (number | null)[]
+  reserved_rev: (number | null)[]
+  limit_fwd: (number | null)[]
+  limit_rev: (number | null)[]
 }
 export interface TielineSnapshot {
   schema: number
@@ -261,43 +284,124 @@ export interface TielineSnapshot {
   slots: string[]
   lines: TielineLineSnap[]
 }
+
+/** One direction of a line over the day's 48 slots (NaN where a slot is missing). */
+export interface TlDir {
+  from: string[]
+  to: string[]
+  reserved: number[]
+  limit: number[]
+}
+export interface TlLine {
+  pair: string
+  /** The physical interconnector (`icDefs` key), or null for a combined-zone pair. */
+  key: string | null
+  fwd: TlDir
+  rev: TlDir
+}
 export interface TielineLive {
   ready: boolean
   /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
   failed: boolean
-  byKey: Record<string, { util: number[]; ttc: number | null; utilNow: number | null }>
+  lines: TlLine[]
   /** Snapshot day (ISO, latest across lines) — caption "as of". */
   date: string | null
 }
 
-/** Latest-day 48-slot reserved/TTC utilisation + TTC per mapped interconnector line.
- * Lines with no clean mapping (combined-zone pairs) are absent → caller falls back
- * to the fixture. Utilisation is reserved/TTC (real), typically low (uncongested). */
+/** A reservation at or above this share of its limit counts as "at the limit". */
+export const AT_LIMIT = 0.97
+
+/** One slot of a line, taken from whichever direction holds the larger share of its limit. */
+export interface TlSlot {
+  /** reserved ÷ limit (0–1); NaN when neither direction has a limit in the slot. */
+  share: number
+  reserved: number
+  limit: number
+  rev: boolean
+}
+export interface TlStats {
+  slots: TlSlot[]
+  /** The slot with the highest share, or null when the line has no limit all day. */
+  peak: TlSlot | null
+  peakIdx: number
+  atLimit: number
+  /** Largest limit in either direction over the day (MW). */
+  maxLimit: number
+  /** Day averages of reserved MW and limit MW, both directions summed. */
+  avgReserved: number
+  avgLimit: number
+}
+
+const fin = (x: number) => Number.isFinite(x)
+
+export function tielineStats(ln: TlLine): TlStats {
+  const n = Math.max(ln.fwd.reserved.length, ln.rev.reserved.length)
+  const slots: TlSlot[] = []
+  let sumRes = 0
+  let sumLim = 0
+  let maxLimit = 0
+  const one = (d: TlDir, i: number, rev: boolean): TlSlot => {
+    const r = d.reserved[i]
+    const l = d.limit[i]
+    return {
+      share: fin(l) && l > 0 && fin(r) ? Math.min(1, Math.max(0, r / l)) : NaN,
+      reserved: fin(r) ? r : 0,
+      limit: fin(l) ? l : 0,
+      rev,
+    }
+  }
+  for (let i = 0; i < n; i++) {
+    const f = one(ln.fwd, i, false)
+    const r = one(ln.rev, i, true)
+    slots.push(fin(r.share) && (!fin(f.share) || r.share > f.share) ? r : f)
+    sumRes += f.reserved + r.reserved
+    sumLim += f.limit + r.limit
+    maxLimit = Math.max(maxLimit, f.limit, r.limit)
+  }
+  let peakIdx = -1
+  slots.forEach((x, i) => {
+    if (fin(x.share) && (peakIdx < 0 || x.share > slots[peakIdx].share)) peakIdx = i
+  })
+  return {
+    slots,
+    peak: peakIdx >= 0 ? slots[peakIdx] : null,
+    peakIdx,
+    atLimit: slots.filter((x) => fin(x.share) && x.share >= AT_LIMIT).length,
+    maxLimit,
+    avgReserved: n ? sumRes / n : 0,
+    avgLimit: n ? sumLim / n : 0,
+  }
+}
+
+const num48 = (a: (number | null)[] | undefined): number[] =>
+  Array.from({ length: 48 }, (_, i) => {
+    const v = a?.[i]
+    return typeof v === 'number' && Number.isFinite(v) ? v : NaN
+  })
+
+/** The latest day's reservations on every published line, both directions. */
 export function useTielineLive(market = 'DAM'): TielineLive {
   const nonce = useDataNonce()
-  const [state, setState] = useState<TielineLive>({ ready: false, failed: false, byKey: {}, date: null })
+  const [state, setState] = useState<TielineLive>({ ready: false, failed: false, lines: [], date: null })
   useEffect(() => {
     let alive = true
     getSnapshot<TielineSnapshot>(`tieline/${market}.json`)
       .then((snap) => {
         if (!alive) return
-        const byKey: TielineLive['byKey'] = {}
         let date: string | null = null
-        for (const ln of snap.lines) if (ln.date && (!date || ln.date > date)) date = ln.date
-        for (const ln of snap.lines) {
-          // Skip unmapped pairs and lines with no forward TTC (capacity is on the
-          // reverse leg) — those fall back to the fixture.
-          if (!ln.key || !ln.ttc || ln.ttc <= 0) continue
-          byKey[ln.key] = {
-            util: ln.util.map((x) => (typeof x === 'number' && Number.isFinite(x) ? x : 0)),
-            ttc: ln.ttc,
-            utilNow: ln.util_now,
-          }
-        }
-        setState({ ready: true, failed: false, byKey, date })
+        for (const ln of snap.lines || []) if (ln.date && (!date || ln.date > date)) date = ln.date
+        const lines: TlLine[] = (snap.lines || [])
+          .filter((ln) => ln.from?.length && ln.to?.length)
+          .map((ln) => ({
+            pair: ln.pair,
+            key: ln.key,
+            fwd: { from: ln.from, to: ln.to, reserved: num48(ln.reserved_fwd), limit: num48(ln.limit_fwd) },
+            rev: { from: ln.to, to: ln.from, reserved: num48(ln.reserved_rev), limit: num48(ln.limit_rev) },
+          }))
+        setState(lines.length ? { ready: true, failed: false, lines, date } : { ready: false, failed: true, lines: [], date: null })
       })
       .catch(() => {
-        if (alive) setState({ ready: false, failed: true, byKey: {}, date: null })
+        if (alive) setState({ ready: false, failed: true, lines: [], date: null })
       })
     return () => {
       alive = false
@@ -306,7 +410,48 @@ export function useTielineLive(market = 'DAM'): TielineLive {
   return state
 }
 
+// ── JEPX area prices (interconnector map nodes) ─────────────────────────────
+
+export interface AreaDayLive {
+  ready: boolean
+  /** Loading finished without usable data, so the map is showing its sample prices. */
+  failed: boolean
+  /** Daily average per area (¥/kWh) over the latest day with area prices. */
+  avg: Record<string, number>
+  date: string | null
+}
+
+/** Per-area daily averages of the latest area-price day in `system.json`. */
+export function useAreaDayLive(): AreaDayLive {
+  const nonce = useDataNonce()
+  const [state, setState] = useState<AreaDayLive>({ ready: false, failed: false, avg: {}, date: null })
+  useEffect(() => {
+    let alive = true
+    getSnapshot<{ areas_today?: Record<string, (number | null)[]>; areas_date?: string | null }>('system.json')
+      .then((snap) => {
+        if (!alive) return
+        const avg: Record<string, number> = {}
+        for (const [area, arr] of Object.entries(snap.areas_today || {})) {
+          const xs = (arr || []).filter((x): x is number => typeof x === 'number' && Number.isFinite(x))
+          if (xs.length) avg[area] = xs.reduce((a, b) => a + b, 0) / xs.length
+        }
+        const ok = Object.keys(avg).length > 0
+        setState({ ready: ok, failed: !ok, avg, date: snap.areas_date ?? null })
+      })
+      .catch(() => {
+        if (alive) setState({ ready: false, failed: true, avg: {}, date: null })
+      })
+    return () => {
+      alive = false
+    }
+  }, [nonce])
+  return state
+}
+
 // ── Drivers (fuels / FX) ────────────────────────────────────────────────────
+
+export type DriverKey = 'lng' | 'brent' | 'fx'
+export const DRIVER_KEYS: DriverKey[] = ['lng', 'brent', 'fx']
 
 export interface DriversSnapshot {
   schema: number
@@ -314,10 +459,10 @@ export interface DriversSnapshot {
   end: string | null
   dates: string[]
   spot: (number | null)[]
-  jkm: (number | null)[]
-  ncl: (number | null)[]
-  fx: (number | null)[]
-  corr: { jkm: number | null; ncl: number | null; fx: number | null }
+  lng?: (number | null)[]
+  brent?: (number | null)[]
+  fx?: (number | null)[]
+  corr: Partial<Record<DriverKey, number | null>>
   units: Record<string, string>
   sources: Record<string, string>
 }
@@ -327,10 +472,15 @@ export interface DriversLive {
   /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
   failed: boolean
   spot: number[]
-  jkm: number[]
-  ncl: number[]
+  lng: number[]
+  brent: number[]
   fx: number[]
-  corr: { jkm: number | null; ncl: number | null; fx: number | null }
+  /** Series holding at least one close. The others render as unavailable, never as zeros. */
+  has: Record<DriverKey, boolean>
+  /** Correlation with spot over the trailing 90 days (null when it can't be computed). */
+  corr: Record<DriverKey, number | null>
+  /** Snapshot dates, newest first (aligned to the series). */
+  dates: string[]
   /** Last close date of the series window (ISO) — caption "as of". */
   end: string | null
 }
@@ -346,6 +496,9 @@ function toNewestFirst(a: (number | null)[]): number[] {
   const firstFinite = filled.find((x) => Number.isFinite(x))
   return filled.map((x) => (Number.isFinite(x) ? x : firstFinite ?? 0)).reverse()
 }
+
+const hasClose = (a: (number | null)[] | undefined): boolean =>
+  (a || []).some((x) => typeof x === 'number' && Number.isFinite(x))
 
 export function useDriversLive(): DriversLive {
   const nonce = useDataNonce()
@@ -370,16 +523,31 @@ export function useDriversLive(): DriversLive {
   }, [nonce])
   if (!snap || !snap.dates || snap.dates.length === 0) {
     // A snapshot that loaded but holds no series is as unusable as one that failed.
-    return { ready: false, failed: failed || snap != null, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null }, end: null }
+    return {
+      ready: false,
+      failed: failed || snap != null,
+      spot: [],
+      lng: [],
+      brent: [],
+      fx: [],
+      has: { lng: false, brent: false, fx: false },
+      corr: { lng: null, brent: null, fx: null },
+      dates: [],
+      end: null,
+    }
   }
+  const series = (a: (number | null)[] | undefined) =>
+    hasClose(a) ? toNewestFirst(a!) : snap.dates.map(() => NaN)
   return {
     ready: true,
     failed: false,
     spot: toNewestFirst(snap.spot),
-    jkm: toNewestFirst(snap.jkm),
-    ncl: toNewestFirst(snap.ncl),
-    fx: toNewestFirst(snap.fx),
-    corr: snap.corr || { jkm: null, ncl: null, fx: null },
+    lng: series(snap.lng),
+    brent: series(snap.brent),
+    fx: series(snap.fx),
+    has: { lng: hasClose(snap.lng), brent: hasClose(snap.brent), fx: hasClose(snap.fx) },
+    corr: { lng: snap.corr?.lng ?? null, brent: snap.corr?.brent ?? null, fx: snap.corr?.fx ?? null },
+    dates: snap.dates.slice().reverse(),
     end: snap.end ?? snap.dates[snap.dates.length - 1] ?? null,
   }
 }

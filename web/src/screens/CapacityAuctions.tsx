@@ -8,9 +8,10 @@ import { NotificationsPopover, useNotifSeen, unreadCount } from '../lib/notifica
 import type { NotifItem, NotifSection } from '../lib/notifications'
 import { Sidebar, TopBar, PageHeader, ExportButton, useReload } from '../lib/chrome'
 import { segBase, areaColor, MONTHS, orgColor } from '../lib/chartkit'
-import { CAPACITY_AREAS, maData, ltdaData, polData } from './CapacityAuctions.data'
+import { CAPACITY_AREAS, maData, ltdaData, ltdaRounds } from './CapacityAuctions.data'
 import type { MaRow } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
+import { usePolicyMeetings } from './MarketOverview.live'
 import { downloadCsv } from '../lib/download'
 
 type View = 'main' | 'ltda'
@@ -24,7 +25,7 @@ interface PriceBand {
 }
 
 export function CapacityAuctionsScreen() {
-  const { lang, theme, setScreen, toast } = useApp()
+  const { lang, theme, setScreen, toast, requestCommittee } = useApp()
   const [view, setView] = useState<View>('main')
   const [showNotif, setShowNotif] = useState(false)
 
@@ -32,6 +33,13 @@ export function CapacityAuctionsScreen() {
   const dark = theme === 'dark'
 
   const goPolicy = () => setScreen('policy')
+  const openCommittee = (com: string | undefined, num: number) => {
+    if (com) requestCommittee(com, num || null)
+    setScreen('policy')
+  }
+  const openUrl = (url: string | undefined) => {
+    if (url && /^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
+  }
 
   // Placeholder / toast handlers
   const tRefresh = useReload()
@@ -70,6 +78,7 @@ export function CapacityAuctionsScreen() {
   const cap = useCapacityLive()
   const maSrc = cap.ready ? cap.ma : maData
   const ltdaSrc = cap.ready ? cap.ltda : ltdaData
+  const roundsSrc = cap.ready && cap.rounds.length ? cap.rounds : ltdaRounds
 
   // Derived row data
   const numOf = (v: string | number | undefined): number => {
@@ -339,35 +348,106 @@ export function CapacityAuctionsScreen() {
     } as React.CSSProperties,
   }))
 
-  const polRows = polData.map((p) => ({
-    n1: L === 'ja' ? p.ja : p.en,
-    meta:
-      L === 'ja'
-        ? '第' + p.no + '回 · 2026年' + p.m + '月' + p.day + '日 · ' + p.tier
-        : 'No. ' + p.no + ' · ' + p.day + ' ' + MONTHS[p.m - 1] + ' 2026 · ' + p.tier,
-    summary: L === 'ja' ? p.sJa : p.sEn,
-    sched: !!p.sched,
-    cta: p.sched
-      ? L === 'ja'
-        ? '議題を見る →'
-        : 'View agenda →'
-      : L === 'ja'
-        ? '詳細を見る →'
-        : 'Deep dive →',
-    tierDot: {
-      width: 9,
-      height: 9,
-      borderRadius: 999,
-      background: orgColor(p.tier, dark),
-      flexShrink: 0,
-      marginTop: 6,
-    } as React.CSSProperties,
-  }))
+  // ---- LTDA: every figure below is derived from the curated OCCTO rounds ----
+  const gw = (kw: number) => kw / 1e6
+  const pctOf = (a: number, b: number) => (b > 0 ? Math.round((a / b) * 100) : 0)
+  const techKw = (key: string, i?: number): number => {
+    const kw = ltdaSrc.find((t) => t.key === key)?.kw ?? []
+    return i == null ? kw.reduce((a, b) => a + b, 0) : (kw[i] ?? 0)
+  }
+  const lastR = roundsSrc.length - 1
+  const rLast = roundsSrc[lastR]
+  const rPrev = roundsSrc[lastR - 1]
+  const ltdaKw = roundsSrc.reduce((n, r) => n + r.kw, 0)
+  const ltdaPlants = roundsSrc.reduce((n, r) => n + r.plants, 0)
+  const roundKwDelta = rLast && rPrev ? gw(rLast.kw) - gw(rPrev.kw) : NaN
+  const battShare = (i: number) => pctOf(techKw('battery', i), roundsSrc[i]?.kw ?? 0)
+  const decarbShare = (i?: number) =>
+    i == null ? pctOf(ltdaKw - techKw('lng'), ltdaKw) : pctOf((roundsSrc[i]?.kw ?? 0) - techKw('lng', i), roundsSrc[i]?.kw ?? 0)
+  const fmtDay = (iso: string | undefined) => {
+    const [y, m, d] = (iso ?? '').split('-').map(Number)
+    if (!y || !m || !d) return '—'
+    return L === 'ja' ? `${y}年${m}月${d}日` : `${d} ${MONTHS[m - 1]} ${y}`
+  }
+  // Stacked bars: one per round, largest technology at the base (rows arrive sorted by total).
+  const LT_Y0 = 270
+  const LT_TOP = 14
+  const ltStep = Math.max(1, Math.ceil((Math.max(0.1, ...roundsSrc.map((r) => gw(r.kw))) * 1.05) / 3))
+  const ltY = (g: number) => LT_Y0 - (g / (ltStep * 3)) * (LT_Y0 - LT_TOP)
+  const ltSlot = (944 - 46) / Math.max(roundsSrc.length, 1)
+  const ltBars = roundsSrc.map((r, i) => {
+    const cx = 46 + ltSlot * (i + 0.5)
+    let acc = 0
+    const segs = ltdaSrc
+      .filter((t) => (t.kw?.[i] ?? 0) > 0)
+      .map((t) => {
+        const g = gw(t.kw[i])
+        const y1 = ltY(acc)
+        acc += g
+        const y2 = ltY(acc)
+        return {
+          key: t.key,
+          y: Math.round(y2 * 10) / 10,
+          h: Math.round((y1 - y2) * 10) / 10,
+          fill: dark ? t.cd : t.c,
+          title: `R${r.round} · ${L === 'ja' ? t.ja : t.en} ${g.toFixed(2)} GW · ${t.plants?.[i] ?? 0} ${L === 'ja' ? '件' : 'plants'}`,
+        }
+      })
+    const [py, pm] = r.published.split('-').map(Number)
+    return {
+      round: r.round,
+      x: Math.round(cx - 55),
+      cx: Math.round(cx),
+      segs,
+      total: gw(r.kw).toFixed(2) + ' GW',
+      totalY: Math.round(ltY(acc) - 8),
+      label: `Round ${r.round} · results ${MONTHS[pm - 1] ?? ''} ${py || ''}`,
+    }
+  })
+  // Newest OCCTO publication: an LTDA release (exact day) or a main-auction result (month).
+  const pubDates = [
+    ...roundsSrc.map((r) => ({ t: Date.parse(r.published + 'T00:00:00Z'), txt: r.published })),
+    ...(maLast ? [{ t: heldTs(maLast.held), txt: maLast.held }] : []),
+  ].filter((p) => Number.isFinite(p.t))
+  const lastPublication = pubDates.length ? pubDates.reduce((a, b) => (b.t > a.t ? b : a)).txt : undefined
+
+  // ---- Policy thread: the latest meeting of each capacity-market committee ----
+  const CAPACITY_COMMITTEES = ['youryou_kentoukai', 'stable_power_supply_wg', 'emsc_decarbonization', 'chousei_jukyu']
+  const pol = usePolicyMeetings()
+  const polRows = [...pol.upcoming, ...pol.meetings]
+    .filter((p) => p.key && CAPACITY_COMMITTEES.includes(p.key))
+    .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
+    .slice(0, 4)
+    .map((p) => ({
+      key: (p.key ?? '') + ':' + p.no + (p.sched ? ':s' : ''),
+      com: p.key,
+      no: p.no,
+      n1: L === 'ja' ? p.ja : p.en,
+      meta:
+        (L === 'ja' ? '第' + p.no + '回 · ' : 'No. ' + p.no + ' · ') +
+        (p.dateReal ? fmtDay(p.date) : (L === 'ja' ? '検出 ' : 'detected ') + fmtDay(p.date)) +
+        ' · ' + p.tier,
+      summary: p.done
+        ? (L === 'ja' ? p.sJa : p.sEn) || ''
+        : p.sched
+          ? ''
+          : L === 'ja' ? '要約待ち' : 'Summary pending',
+      sched: !!p.sched,
+      cta: L === 'ja' ? '詳細を見る →' : 'Deep dive →',
+      tierDot: {
+        width: 9,
+        height: 9,
+        borderRadius: 999,
+        background: orgColor(p.tier, dark),
+        flexShrink: 0,
+        marginTop: 6,
+      } as React.CSSProperties,
+    }))
 
   return (
     <>
       {/* ============ SIDEBAR ============ */}
-      <Sidebar active="capacity" unread={notifUnread} onToggleNotif={tNotif} lastPublication="2026-06-27" source="OCCTO auction results · event-driven, not daily" />
+      <Sidebar active="capacity" unread={notifUnread} onToggleNotif={tNotif} lastPublication={lastPublication} source="OCCTO auction results · event-driven, not daily" />
 
       {/* ============ MAIN COLUMN ============ */}
       <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
@@ -588,29 +668,31 @@ export function CapacityAuctionsScreen() {
 
                 <div style={s('display:grid;grid-template-columns:repeat(4,1fr);gap:20px')}>
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
-                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Round 3 awarded<br />第3回 落札容量</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>5.24 <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>GW</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>results Jun 2026 · 84 projects</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▲ +0.39 GW vs Round 2</span>
+                    <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Round {rLast?.round} awarded<br />第{rLast?.round}回 落札容量</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{rLast ? gw(rLast.kw).toFixed(2) : '—'} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>GW</span></div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>results {fmtDay(rLast?.published)} · {rLast?.plants} plants<SampleTag failed={cap.failed} /></div>
+                    {Number.isFinite(roundKwDelta) && (
+                      <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{roundKwDelta >= 0 ? '▲ +' : '▼ −'}{Math.abs(roundKwDelta).toFixed(2)} GW vs Round {rPrev?.round}</span>
+                    )}
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Battery storage share<br />蓄電池シェア</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>32<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>1.68 GW in R3 · largest single tech</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>R1: 27% · R2: 34%</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{battShare(lastR)}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{gw(techKw('battery', lastR)).toFixed(2)} GW in R{rLast?.round} · {ltdaSrc.find((t) => t.key === 'battery')?.plants?.[lastR] ?? 0} plants<SampleTag failed={cap.failed} /></div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{roundsSrc.slice(0, -1).map((r, i) => `R${r.round}: ${battShare(i)}%`).join(' · ')}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Cumulative awarded<br />累計落札</div>
-                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>14.10 <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>3 rounds · COD FY2027–FY2034</div>
-                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--upBg);color:var(--up)")}>storage (battery + pumped) 40%</span>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{gw(ltdaKw).toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{roundsSrc.length} rounds · {ltdaPlants} plants<SampleTag failed={cap.failed} /></div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:var(--upBg);color:var(--up)")}>storage (battery + pumped) {pctOf(techKw('battery') + techKw('pumped'), ltdaKw)}%</span>
                   </div>
-                  <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={goPolicy}>
-                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Round 4 window<br />第4回 応札期間</div>
-                    <div style={s('font-size:33px;font-weight:700;margin-top:10px;line-height:1.15')}>Nov 2026</div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>requirements under committee review · 要件審議中</div>
-                    <span style={s('display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;background:var(--acTint);color:var(--acT)')}>storage threshold open in committee →</span>
-                  </Hoverable>
+                  <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
+                    <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Decarbonised share<br />脱炭素電源の比率</div>
+                    <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{decarbShare()}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>cumulative · the rest is LNG · 残りはLNG<SampleTag failed={cap.failed} /></div>
+                    <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{roundsSrc.map((r, i) => `R${r.round}: ${decarbShare(i)}%`).join(' · ')}</span>
+                  </div>
                 </div>
 
                 {/* Stacked tech chart */}
@@ -618,50 +700,45 @@ export function CapacityAuctionsScreen() {
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
                       <div style={s('font-size:16px;font-weight:600')}>Awarded Capacity by Technology <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別落札容量<SampleTag failed={cap.failed} /></span></div>
-                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>LTDA rounds 1–3 · GW · 20-year fixed revenue contracts · 20年間の固定収入契約</div>
+                      <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>LTDA rounds 1–{roundsSrc.length} · GW · 20-year fixed revenue contracts · 20年間の固定収入契約</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>hover a segment for detail</span>
                   </div>
                   <svg viewBox="0 0 960 300" style={s('width:100%;height:auto;display:block;margin-top:10px')}>
                     <g style={s('color:var(--grid)')}>
-                      <line x1="46" y1="14" x2="944" y2="14" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
-                      <line x1="46" y1="99.3" x2="944" y2="99.3" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
-                      <line x1="46" y1="184.7" x2="944" y2="184.7" stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
+                      {[3, 2, 1].map((k) => (
+                        <line key={k} x1="46" y1={ltY(ltStep * k)} x2="944" y2={ltY(ltStep * k)} stroke="currentColor" strokeWidth="1" strokeDasharray="4 4"></line>
+                      ))}
                       <line x1="46" y1="270" x2="944" y2="270" stroke="currentColor" strokeWidth="1"></line>
                     </g>
                     <g style={s('color:var(--mut)')}>
-                      <text x="38" y="18" textAnchor="end" fontSize="11" fill="currentColor">6 GW</text>
-                      <text x="38" y="103" textAnchor="end" fontSize="11" fill="currentColor">4 GW</text>
-                      <text x="38" y="188" textAnchor="end" fontSize="11" fill="currentColor">2 GW</text>
-                      <text x="216" y="292" textAnchor="middle" fontSize="11" fill="currentColor">Round 1 · results 2024</text>
-                      <text x="495" y="292" textAnchor="middle" fontSize="11" fill="currentColor">Round 2 · results 2025</text>
-                      <text x="774" y="292" textAnchor="middle" fontSize="11" fill="currentColor">Round 3 · results 2026</text>
+                      {[3, 2, 1].map((k) => (
+                        <text key={k} x="38" y={ltY(ltStep * k) + 4} textAnchor="end" fontSize="11" fill="currentColor">{ltStep * k} GW</text>
+                      ))}
+                      {ltBars.map((b) => (
+                        <text key={b.round} x={b.cx} y="292" textAnchor="middle" fontSize="11" fill="currentColor">{b.label}</text>
+                      ))}
                     </g>
-                    <rect x="161" y="223.1" width="110" height="46.9" fill="#00A5CF"><title>R1 · Battery 1.10 GW</title></rect>
-                    <rect x="161" y="198.8" width="110" height="24.3" fill="#4A6FA5"><title>R1 · Pumped hydro 0.57 GW</title></rect>
-                    <rect x="161" y="104.9" width="110" height="93.9" fill="#E9C46A"><title>R1 · LNG decarb-ready 2.20 GW</title></rect>
-                    <rect x="161" y="98.9" width="110" height="6" fill="#2A9D8F"><title>R1 · H2/NH3 0.14 GW</title></rect>
-                    <rect x="440" y="200" width="110" height="70" fill="#00A5CF"><title>R2 · Battery 1.64 GW</title></rect>
-                    <rect x="440" y="187.2" width="110" height="12.8" fill="#4A6FA5"><title>R2 · Pumped hydro 0.30 GW</title></rect>
-                    <rect x="440" y="78.4" width="110" height="108.8" fill="#E9C46A"><title>R2 · LNG decarb-ready 2.55 GW</title></rect>
-                    <rect x="440" y="63" width="110" height="15.4" fill="#2A9D8F"><title>R2 · H2/NH3 0.36 GW</title></rect>
-                    <rect x="719" y="198.3" width="110" height="71.7" fill="#00A5CF"><title>R3 · Battery 1.68 GW</title></rect>
-                    <rect x="719" y="180.4" width="110" height="17.9" fill="#4A6FA5"><title>R3 · Pumped hydro 0.42 GW</title></rect>
-                    <rect x="719" y="82.3" width="110" height="98.1" fill="#E9C46A"><title>R3 · LNG decarb-ready 2.30 GW</title></rect>
-                    <rect x="719" y="55.8" width="110" height="26.5" fill="#2A9D8F"><title>R3 · H2/NH3 0.62 GW</title></rect>
-                    <rect x="719" y="46.4" width="110" height="9.4" fill="#B4BCC9"><title>R3 · Other 0.22 GW</title></rect>
+                    {ltBars.map((b) =>
+                      b.segs.map((g) => (
+                        <rect key={b.round + g.key} x={b.x} y={g.y} width="110" height={g.h} fill={g.fill}>
+                          <title>{g.title}</title>
+                        </rect>
+                      )),
+                    )}
                     <g fontSize="11" fontWeight="600" textAnchor="middle" style={s('fill:var(--tx2)')}>
-                      <text x="216" y="90">4.01 GW</text>
-                      <text x="495" y="54">4.85 GW</text>
-                      <text x="774" y="38">5.24 GW</text>
+                      {ltBars.map((b) => (
+                        <text key={b.round} x={b.cx} y={b.totalY}>{b.total}</text>
+                      ))}
                     </g>
                   </svg>
                   <div style={s('display:flex;align-items:center;gap:16px;margin-top:10px;padding-top:12px;border-top:1px solid var(--dv);flex-wrap:wrap;font-size:11.5px;color:var(--tx2)')}>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#00A5CF')}></span>Battery 蓄電池</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#4A6FA5')}></span>Pumped 揚水</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#E9C46A')}></span>LNG decarb-ready LNG（脱炭素化前提）</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#2A9D8F')}></span>H2 · NH3 水素・アンモニア</span>
-                    <span style={s('display:inline-flex;align-items:center;gap:6px')}><span style={s('width:12px;height:12px;border-radius:4px;background:#B4BCC9')}></span>Other その他</span>
+                    {ltdaSrc.map((t) => (
+                      <span key={t.key} style={s('display:inline-flex;align-items:center;gap:6px')}>
+                        <span style={{ width: 12, height: 12, borderRadius: 4, background: dark ? t.cd : t.c }}></span>
+                        {t.en} {t.ja}
+                      </span>
+                    ))}
                   </div>
                 </div>
 
@@ -693,7 +770,18 @@ export function CapacityAuctionsScreen() {
                       </span>
                     </Hoverable>
                   ))}
-                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>Battery threshold lowered to 10 MW from Round 2 · 第2回から蓄電池の応札下限は10MWに引き下げ</div>
+                  <div style={s('font-size:11px;color:var(--mut);margin-top:10px;display:flex;flex-wrap:wrap;gap:4px 10px')}>
+                    <span>Summed from OCCTO&apos;s per-plant award lists · 落札電源一覧より集計 · results:</span>
+                    {roundsSrc.map((r) =>
+                      r.source ? (
+                        <Hoverable key={r.round} as="span" base="color:var(--acT);cursor:pointer" hover="color:var(--ac)" onClick={() => openUrl(r.source)}>
+                          Round {r.round} ({r.published}) ↗
+                        </Hoverable>
+                      ) : (
+                        <span key={r.round}>Round {r.round} ({r.published})</span>
+                      ),
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -703,15 +791,24 @@ export function CapacityAuctionsScreen() {
               <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                 <div>
                   <div style={s('display:flex;align-items:center;gap:9px')}>
-                    <span style={s('font-size:16px;font-weight:600')}>Policy Thread — Storage × Capacity Market <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>政策スレッド：蓄電池×容量市場</span></span>
+                    <span style={s('font-size:16px;font-weight:600')}>Policy Thread — Capacity Market <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>政策スレッド：容量市場</span></span>
                   </div>
-                  <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Committee decisions shaping the next auction rounds · 次回オークションに影響する審議</div>
+                  <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest meetings of the committees that shape the capacity market and the LTDA · 容量市場・長期脱炭素電源オークションに関わる会議体の直近の会合</div>
                 </div>
                 <Hoverable as="span" base="font-size:12.5px;font-weight:600;color:var(--acT);cursor:pointer;white-space:nowrap;padding-top:4px" hover="color:var(--ac)" onClick={goPolicy}>Open Policy Deep Dive →</Hoverable>
               </div>
               <div style={s('display:flex;flex-direction:column;margin-top:8px')}>
-                {polRows.map((p, i) => (
-                  <Hoverable key={i} base="display:flex;gap:12px;align-items:flex-start;padding:12px 4px;border-top:1px solid var(--dv);cursor:pointer;border-radius:8px" hover="background:var(--hov)" onClick={goPolicy}>
+                {polRows.length === 0 && (
+                  <div style={s('padding:12px 4px;border-top:1px solid var(--dv);font-size:12.5px;color:var(--mut)')}>
+                    {pol.failed
+                      ? L === 'ja' ? '会合データを読み込めませんでした。' : 'Committee meetings could not be loaded.'
+                      : pol.ready
+                        ? L === 'ja' ? '該当する会合はまだありません。' : 'No meetings recorded for these committees yet.'
+                        : L === 'ja' ? '会合を読み込み中…' : 'Loading committee meetings…'}
+                  </div>
+                )}
+                {polRows.map((p) => (
+                  <Hoverable key={p.key} base="display:flex;gap:12px;align-items:flex-start;padding:12px 4px;border-top:1px solid var(--dv);cursor:pointer;border-radius:8px" hover="background:var(--hov)" onClick={() => openCommittee(p.com, p.no)}>
                     <span style={p.tierDot}></span>
                     <div style={s('flex:1;min-width:0')}>
                       <div style={s('display:flex;align-items:center;gap:8px;min-width:0')}>
@@ -729,7 +826,7 @@ export function CapacityAuctionsScreen() {
               </div>
             </div>
 
-            <div style={s('font-size:12px;color:var(--mut);text-align:center;padding:2px 0 6px')}>Published by OCCTO · 容量市場・長期脱炭素電源オークション約定結果 · event-driven · last publication 2026-06-27</div>
+            <div style={s('font-size:12px;color:var(--mut);text-align:center;padding:2px 0 6px')}>Published by OCCTO · 容量市場・長期脱炭素電源オークション約定結果 · event-driven · last publication {lastPublication ?? '—'}</div>
 
           </div>
         </div>

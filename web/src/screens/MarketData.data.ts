@@ -26,26 +26,35 @@ export interface BalProduct {
   proc: string
   off: string
   ach: number
+  short: number
   c: string
   cd: string
 }
 
+/** The seven physically distinct interconnectors (keys match `export_web.PAIR_TO_IC`). The
+ *  Chubu/Hokuriku/Kansai lines are published as combined zones and have no entry here. */
 export interface IcDef {
   key: string
   ja: string
   en: string
-  from: string
-  to: string
-  cap: number
+  short: string
+}
+
+/** A sample day of one EPRX pair's reservations (loading/fallback state only). */
+export interface IcSample {
+  pair: string
+  key: string | null
+  from: string[]
+  to: string[]
+  limit: number
   base: number
   sol: number
   eve: number
   ph: number
-  short: string
 }
 
 export interface DrDef {
-  key: 'jkm' | 'ncl' | 'fx'
+  key: 'lng' | 'brent' | 'fx'
   en: string
   ja: string
   unit: string
@@ -109,32 +118,42 @@ export const areas: Area[] = areaDefs.map((a) => ({
 }))
 
 export const balProducts: BalProduct[] = [
-  { jp: '一次調整力', en: 'Primary (FCR)', price: '6.84', proc: '1,208', off: '1,542', ach: 78, c: '#7B2D8E', cd: '#C77BD8' },
-  { jp: '二次調整力①', en: 'Secondary I', price: '7.12', proc: '1,046', off: '1,180', ach: 89, c: '#E76F51', cd: '#E76F51' },
-  { jp: '二次調整力②', en: 'Secondary II', price: '5.63', proc: '892', off: '1,004', ach: 89, c: '#2A9D8F', cd: '#2A9D8F' },
-  { jp: '三次調整力①', en: 'Tertiary I', price: '4.98', proc: '2,315', off: '2,780', ach: 83, c: '#4A6FA5', cd: '#7C9CD1' },
-  { jp: '三次調整力②', en: 'Tertiary II', price: '3.41', proc: '3,860', off: '4,510', ach: 86, c: '#00A5CF', cd: '#1FB6DC' },
+  { jp: '一次調整力', en: 'Primary (FCR)', price: '6.84', proc: '1,208', off: '1,542', ach: 78, short: 3, c: '#7B2D8E', cd: '#C77BD8' },
+  { jp: '二次調整力①', en: 'Secondary I', price: '7.12', proc: '1,046', off: '1,180', ach: 89, short: 0, c: '#E76F51', cd: '#E76F51' },
+  { jp: '二次調整力②', en: 'Secondary II', price: '5.63', proc: '892', off: '1,004', ach: 89, short: 0, c: '#2A9D8F', cd: '#2A9D8F' },
+  { jp: '三次調整力①', en: 'Tertiary I', price: '4.98', proc: '2,315', off: '2,780', ach: 83, short: 1, c: '#4A6FA5', cd: '#7C9CD1' },
+  { jp: '三次調整力②', en: 'Tertiary II', price: '3.41', proc: '3,860', off: '4,510', ach: 86, short: 3, c: '#00A5CF', cd: '#1FB6DC' },
 ]
 
 export const icDefs: IcDef[] = [
-  { key: 'hh', ja: '北海道本州間連系設備', en: 'Hokkaido–Honshu HVDC', from: 'hokkaido', to: 'tohoku', cap: 900, base: 0.5, sol: 0.28, eve: 0.3, ph: 0.5, short: 'Hokkaido–Tohoku 北本' },
-  { key: 'st', ja: '相馬双葉幹線ほか', en: 'Tohoku–Tokyo', from: 'tohoku', to: 'tepco', cap: 6050, base: 0.68, sol: 0.3, eve: 0.22, ph: 1.2, short: 'Tohoku–Tokyo 相双' },
-  { key: 'fc', ja: '周波数変換設備（FC）', en: 'Tokyo–Chubu 50/60Hz FC', from: 'chubu', to: 'tepco', cap: 2100, base: 0.82, sol: 0.28, eve: 0.18, ph: 2.0, short: 'FC Tokyo–Chubu 周波数変換' },
-  { key: 'kc', ja: '三重東近江線ほか', en: 'Kansai–Chubu', from: 'kansai', to: 'chubu', cap: 2500, base: 0.4, sol: 0.22, eve: 0.18, ph: 2.8, short: 'Kansai–Chubu' },
-  { key: 'hc', ja: '南福光連系所', en: 'Hokuriku–Chubu', from: 'hokuriku', to: 'chubu', cap: 300, base: 0.3, sol: 0.14, eve: 0.1, ph: 3.4, short: 'Hokuriku–Chubu 南福光' },
-  { key: 'hk', ja: '越前嶺南線ほか', en: 'Hokuriku–Kansai', from: 'hokuriku', to: 'kansai', cap: 1900, base: 0.34, sol: 0.15, eve: 0.12, ph: 4.1, short: 'Hokuriku–Kansai' },
-  { key: 'ck', ja: '山崎智頭線ほか', en: 'Chugoku–Kansai', from: 'chugoku', to: 'kansai', cap: 4160, base: 0.46, sol: 0.2, eve: 0.16, ph: 4.9, short: 'Chugoku–Kansai' },
-  { key: 'sk', ja: '阿南紀北直流幹線', en: 'Shikoku–Kansai HVDC', from: 'shikoku', to: 'kansai', cap: 1400, base: 0.56, sol: 0.22, eve: 0.14, ph: 5.6, short: 'Shikoku–Kansai 阿南紀北' },
-  { key: 'cs', ja: '本四連系線', en: 'Chugoku–Shikoku', from: 'chugoku', to: 'shikoku', cap: 1200, base: 0.18, sol: 0.11, eve: 0.08, ph: 0.9, short: 'Chugoku–Shikoku 本四' },
-  { key: 'kq', ja: '関門連系線', en: 'Kyushu–Chugoku (Kanmon)', from: 'kyushu', to: 'chugoku', cap: 2780, base: 0.72, sol: 0.42, eve: 0.1, ph: 1.6, short: 'Kyushu–Chugoku 関門' },
+  { key: 'hh', ja: '北海道本州間連系設備', en: 'Hokkaido–Honshu HVDC', short: 'Hokkaido–Tohoku 北本' },
+  { key: 'st', ja: '相馬双葉幹線ほか', en: 'Tohoku–Tokyo', short: 'Tohoku–Tokyo 相双' },
+  { key: 'fc', ja: '周波数変換設備（FC）', en: 'Tokyo–Chubu 50/60Hz FC', short: 'FC Tokyo–Chubu 周波数変換' },
+  { key: 'ck', ja: '山崎智頭線ほか', en: 'Chugoku–Kansai', short: 'Chugoku–Kansai' },
+  { key: 'sk', ja: '阿南紀北直流幹線', en: 'Shikoku–Kansai HVDC', short: 'Shikoku–Kansai 阿南紀北' },
+  { key: 'cs', ja: '本四連系線', en: 'Chugoku–Shikoku', short: 'Chugoku–Shikoku 本四' },
+  { key: 'kq', ja: '関門連系線', en: 'Kyushu–Chugoku (Kanmon)', short: 'Kyushu–Chugoku 関門' },
 ]
 
-export const icUtil: number[][] = icDefs.map((l) =>
+export const icSample: IcSample[] = [
+  { pair: 'Hokkaido → Tohoku', key: 'hh', from: ['hokkaido'], to: ['tohoku'], limit: 75, base: 0.5, sol: 0.28, eve: 0.3, ph: 0.5 },
+  { pair: 'Tohoku → Tokyo', key: 'st', from: ['tohoku'], to: ['tepco'], limit: 2300, base: 0.08, sol: 0.1, eve: 0.06, ph: 1.2 },
+  { pair: 'Tokyo → Chubu', key: 'fc', from: ['tepco'], to: ['chubu'], limit: 900, base: 0.42, sol: 0.24, eve: 0.18, ph: 2.0 },
+  { pair: 'Chubu → Hokuriku-Kansai', key: null, from: ['chubu'], to: ['hokuriku', 'kansai'], limit: 2650, base: 0.04, sol: 0.03, eve: 0.02, ph: 2.8 },
+  { pair: 'Chubu-Hokuriku → Kansai', key: null, from: ['chubu', 'hokuriku'], to: ['kansai'], limit: 2650, base: 0.05, sol: 0.03, eve: 0.02, ph: 3.4 },
+  { pair: 'Chubu-Kansai → Hokuriku', key: null, from: ['chubu', 'kansai'], to: ['hokuriku'], limit: 1300, base: 0.02, sol: 0.01, eve: 0.01, ph: 4.1 },
+  { pair: 'Kansai → Chugoku', key: 'ck', from: ['kansai'], to: ['chugoku'], limit: 4500, base: 0.08, sol: 0.03, eve: 0.02, ph: 4.9 },
+  { pair: 'Kansai → Shikoku', key: 'sk', from: ['kansai'], to: ['shikoku'], limit: 0, base: 0, sol: 0, eve: 0, ph: 5.6 },
+  { pair: 'Chugoku → Shikoku', key: 'cs', from: ['chugoku'], to: ['shikoku'], limit: 1200, base: 0.01, sol: 0.01, eve: 0.0, ph: 0.9 },
+  { pair: 'Chugoku → Kyushu', key: 'kq', from: ['chugoku'], to: ['kyushu'], limit: 915, base: 0.36, sol: 0.18, eve: 0.1, ph: 1.6 },
+]
+
+/** Sample per-slot share of each pair's limit (0–1), aligned to `icSample`. */
+export const icSampleUtil: number[][] = icSample.map((l) =>
   mk((i, t) =>
-    Math.min(
-      1,
-      Math.max(0.04, l.base + l.sol * G(t, 13, 4.5) + l.eve * G(t, 18.6, 4) + 0.02 * Math.sin(i * 0.9 + l.ph)),
-    ),
+    l.limit > 0
+      ? Math.min(1, Math.max(0, l.base + l.sol * G(t, 13, 4.5) + l.eve * G(t, 18.6, 4) + 0.02 * Math.sin(i * 0.9 + l.ph)))
+      : 0,
   ),
 )
 
@@ -143,13 +162,13 @@ export const drv = {
     { length: 365 },
     (_, d) => 11 + 1.8 * Math.sin(d / 58) + 0.5 * Math.sin(d / 72 + 1) + 1.1 * Math.sin(d / 9.7 + 2) + 0.6 * Math.sin(d / 3.3),
   ),
-  jkm: Array.from(
+  lng: Array.from(
     { length: 365 },
     (_, d) => 11.9 + 1.6 * Math.sin(d / 72 + 1) + 0.8 * Math.sin(d / 13 + 0.5) + 0.35 * Math.sin(d / 4.1),
   ),
-  ncl: Array.from(
+  brent: Array.from(
     { length: 365 },
-    (_, d) => 138 + 9 * Math.sin(d / 85 + 2.2) + 4 * Math.sin(d / 16 + 1.1) + 1.8 * Math.sin(d / 5.2),
+    (_, d) => 74 + 5 * Math.sin(d / 85 + 2.2) + 2.2 * Math.sin(d / 16 + 1.1) + 1 * Math.sin(d / 5.2),
   ),
   fx: Array.from(
     { length: 365 },
@@ -158,8 +177,8 @@ export const drv = {
 }
 
 export const drDefs: DrDef[] = [
-  { key: 'jkm', en: 'JKM LNG', ja: 'JKM（LNG）', unit: '$/MMBtu', src: 'ICE · yfinance', color: '#E76F51', corr: 0.72, dec: 2 },
-  { key: 'ncl', en: 'Newcastle coal', ja: 'NC石炭', unit: '$/t', src: 'ICE · yfinance', color: '#B08968', corr: 0.41, dec: 1 },
-  { key: 'fx', en: 'USD/JPY', ja: 'ドル円', unit: '', src: 'TTM · yfinance', color: '#8AB17D', corr: 0.33, dec: 2 },
+  { key: 'lng', en: 'JKM LNG', ja: 'JKM（LNG）', unit: '$/MMBtu', src: 'JKM=F futures · yfinance', color: '#E76F51', corr: 0.72, dec: 2 },
+  { key: 'brent', en: 'Brent crude', ja: 'ブレント原油', unit: '$/bbl', src: 'BZ=F futures · yfinance', color: '#B08968', corr: 0.41, dec: 2 },
+  { key: 'fx', en: 'USD/JPY', ja: 'ドル円', unit: '', src: 'JPY=X spot · yfinance', color: '#8AB17D', corr: 0.33, dec: 2 },
 ]
 

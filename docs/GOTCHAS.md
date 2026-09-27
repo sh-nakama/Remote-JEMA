@@ -312,14 +312,13 @@ fixed.
   Market Data area); the tag renders nothing while data is live. The Policy Deep Dive has no
   fixtures, so `usePolicyLive`'s `failed` shows a notice over its empty panes instead. Wire any
   new fixture-backed panel the same way: never let a fixture render without a label.
-- **Some figures are sample data even when every snapshot loads** `(open — P3)`: design copy
-  the hi-fi ports hard-coded. Market Data: the balancing and interconnector KPI deltas and
-  Balancing's "Shortfall slots" card; the interconnector node prices, spreads and "Widest area
-  spread" (from fixture area prices); the four lines the tieline export can't map (`kc`, `hc`,
-  `hk`, `sk`). Capacity: the LTDA KPI cards and the "Policy Thread" rows (`polData`). Wire each
-  to real data or label it before relying on it. The exports now carry real figures for all of
-  them (`balancing_summary.json`; the tieline lines' `from`/`to` and reserved/limit arrays;
-  `drivers.json`'s `lng`/`brent`; `ltda.json`'s `rounds`); only the web still has to read them.
+- **No figure is design copy any more** (was an open P3). The hi-fi ports hard-coded KPI deltas,
+  the shortfall card, interconnector prices and spreads, four fixture-only lines, the LTDA cards
+  and the Capacity "Policy Thread" rows. Each now comes from a snapshot (`balancing_summary.json`,
+  the tieline lines' `from`/`to` and reserved/limit arrays, `system.json`'s area prices,
+  `drivers.json`, `ltda.json`'s `rounds`, `policy/meetings.json`) or is gone. A figure with no
+  source should be removed, not approximated: a sample value only stands in while its snapshot
+  loads, or under a `SampleTag` when it fails.
 - **The tieline data is reserved balancing capacity, not flow.** EPRX publishes, per line and
   slot, the ΔkW *reserved* on it for cross-area balancing procurement (`reserved_fwd/rev`)
   against the *limit* on such reservations (`upper_limit_fwd/rev`). Nothing in the dataset is a
@@ -328,18 +327,26 @@ fixed.
   (`Chubu → Hokuriku-Kansai`, `Chubu-Hokuriku → Kansai`, `Chubu-Kansai → Hokuriku`), which
   `export_web._pair_areas` splits into the `from`/`to` area lists; and `Kansai → Shikoku` has a
   zero limit and zero reservation in every slot — a real "none reserved", not missing data.
-- **`balancing_stats/` and `balancing_summary.json` answer different questions.** The stats files
-  are per-area averages over a 30-day window; the summary is the latest EPRX day (and the day
-  before, for day-on-day changes), as averages over the day's slots of the *national* per-slot
-  totals, with prices weighted by contracted MW. A slot is "short" when national contracted MW
-  trails the requirement by more than `_SHORT_TOLERANCE_MW`. Caption each for what it is.
+- **Balancing figures are one EPRX day, nationally.** `balancing_summary.json` holds the latest
+  day and the day before (for the day-on-day chips), as averages over the day's slots of the
+  *national* per-slot totals, with prices weighted by contracted MW. A slot is "short" when
+  national contracted MW trails the requirement by more than `_SHORT_TOLERANCE_MW`. Per-area
+  achievement (procured ÷ offered) can exceed 100%: procurement is nationwide, so an area can
+  clear more than its own offers. The Streamlit dashboard's 30-day `balancing_period_stats` is
+  a different aggregation; the web no longer reads (or exports) its `balancing_stats/` files.
 - **The drivers are the real series now; the old keys were proxies.** `drivers.json` used to
   put Henry Hub (`NG=F`) under a "JKM" label and Brent (`BZ=F`) under "Newcastle coal $/t".
   `lng` is JKM (`JKM=F`) and `brent` is Brent; yfinance has no Newcastle coal series at all.
-  `jkm`/`ncl` stay only until the web switches keys. The export is bounded to
-  `DRIVERS_WINDOW_DAYS` (the web's longest range is 1Y) and the correlation is over the trailing
-  `DRIVERS_CORR_DAYS`, because the web labels it "90d corr" — change the label and the constant
-  together.
+  A series with no closes (JKM until its first back-fill) renders as "— / no closes yet" and is
+  left off the chart; `useDriversLive().has` carries that, so don't coerce it to zeros. The
+  export is bounded to `DRIVERS_WINDOW_DAYS` (the web's longest range is 1Y) and the correlation
+  is over the trailing `DRIVERS_CORR_DAYS`, because the web labels it "90d corr" — change the
+  label and the constant together.
+- **The web build and the snapshots must come from the same commit.** Renaming a snapshot key
+  (e.g. `jkm`→`lng`) breaks an older build reading newer snapshots — its screen crashes rather
+  than falling back. The Pages deploy always pairs them, but a data change that must ship ahead
+  of its web change has to be additive, and a before/after DOM comparison against `main` needs
+  `main`'s copy of the snapshots patched back to the keys it expects.
 - **Fuel tickers back-fill themselves.** `tickers_to_backfill` asks for `BACKFILL_DAYS` of
   history for any ticker whose stored history starts later than that window (a new ticker, or
   the table's May 2026 start), so adding one to `TICKERS` needs no manual backfill. A ticker
@@ -352,7 +359,7 @@ fixed.
   cumulative against the real 23.4 GW). OCCTO's PDFs are AES-encrypted: pypdf needs
   `cryptography` to read them.
 - The fixtures' frozen dates (2026-07-01/02) survive only as **loading fallbacks** for MarketData's
-  caption dates (`wsToday`, `balDate`, `icMapDate`, `icTodayDate`, `drCloseDate`); each is
+  caption dates (`wsToday`, `balDate`, `icDate`, `drCloseDate`); each is
   replaced by the snapshot's own date once it loads. Don't use them as a fallback in new
   live-wired UI.
 - ***.live.ts arrays are newest-first** (index 0 = latest, via `rev()`); `windowLive`/
@@ -451,6 +458,12 @@ fixed.
   the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/
   `generating`) and the per-meeting failure message; `meetings.json` collapses those into
   `pending`. A read-only deployment shows stale meeting status until `repower export-web` reruns.
+- **NotebookLM ends some digests with an offer, not a summary.** About one digest in five opens
+  straight on `### Key decisions` (no lead paragraph) and closes with "💡 Would you like a
+  breakdown…" or "📊 I can compile…". The preview (`prevEn`) used to take the first non-bullet
+  line, so those meetings previewed as the offer — on the Overview radar and the Capacity
+  "Policy Thread". `parse_digest_answer` now drops such lines (`_NOTEBOOK_OFFER`) and falls back
+  to the first bullet. The Japanese briefings carry no such offers.
 - **The static export never carries raw failure text.** `last_error` can quote the `notebooklm`
   command line (local temp paths, the user name) and stderr, and the Pages site is public, so
   `export_policy` passes `error` / `lastUpdateError` through `_public_error` (flag wins, else a

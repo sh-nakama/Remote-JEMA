@@ -49,6 +49,7 @@ export const maData: MaRow[] = [
 ]
 
 export interface LtdaRow {
+  key: string
   en: string
   ja: string
   r1: string
@@ -56,45 +57,39 @@ export interface LtdaRow {
   r3: string
   cum: string
   share: number
+  /** Awarded kW and plant count per round (rounds 1, 2, 3). */
+  kw: number[]
+  plants: number[]
   c: string
   cd: string
 }
 
-export const ltdaData: LtdaRow[] = [
-  { en: 'Battery storage', ja: '蓄電池', r1: '1.10', r2: '1.64', r3: '1.68', cum: '4.42', share: 31, c: '#00A5CF', cd: '#1FB6DC' },
-  { en: 'Pumped hydro', ja: '揚水', r1: '0.57', r2: '0.30', r3: '0.42', cum: '1.29', share: 9, c: '#4A6FA5', cd: '#7C9CD1' },
-  { en: 'LNG (decarb-ready)', ja: 'LNG（脱炭素化前提）', r1: '2.20', r2: '2.55', r3: '2.30', cum: '7.05', share: 50, c: '#E9C46A', cd: '#E9C46A' },
-  { en: 'Hydrogen · Ammonia', ja: '水素・アンモニア', r1: '0.14', r2: '0.36', r3: '0.62', cum: '1.12', share: 8, c: '#2A9D8F', cd: '#2A9D8F' },
-  { en: 'Other (biomass etc.)', ja: 'その他', r1: '—', r2: '—', r3: '0.22', cum: '0.22', share: 2, c: '#B4BCC9', cd: '#5D6B85' },
-]
-
-export interface PolRow {
-  en: string
-  ja: string
-  tier: 'METI' | 'OCCTO'
-  no: number
-  m: number
-  day: number
-  sched?: boolean
-  sEn: string
-  sJa: string
+/** One LTDA round: OCCTO's results release (`capacity_data.ltda_round_rows`). */
+export interface LtdaRound {
+  round: number
+  bid_year: number
+  published: string
+  kw: number
+  plants: number
+  /** OCCTO results PDF and its per-plant appendix (live data only). */
+  source?: string
+  plants_pdf?: string
 }
 
-export const polData: PolRow[] = [
-  {
-    en: 'E&G Basic Policy Subcommittee', ja: '電力・ガス基本政策小委員会', tier: 'METI', no: 84, m: 6, day: 27,
-    sEn: 'Debated capacity-market linkage for long-duration storage; secretariat to draft options for August.',
-    sJa: '長期蓄電池の容量市場連携を審議。8月会合に向け事務局が選択肢を整理へ。',
-  },
-  {
-    en: 'Mid- & Long-term Power Supply WG', ja: '中長期の供給力確保ワーキンググループ', tier: 'OCCTO', no: 12, m: 6, day: 19,
-    sEn: 'Reviewed LTDA auction parameters for FY2028; storage participation thresholds remain open.',
-    sJa: 'FY2028長期脱炭素オークションの諸元を点検。蓄電池の参入閾値は継続審議。',
-  },
-  {
-    en: 'E&G Basic Policy Subcommittee', ja: '電力・ガス基本政策小委員会', tier: 'METI', no: 85, m: 8, day: 5, sched: true,
-    sEn: 'Agenda: 3 design options for long-duration storage capacity-market linkage.',
-    sJa: '議題：長期蓄電池の容量市場連携に関する3つの設計オプション。',
-  },
+// The curated OCCTO figures (`capacity_data.LTDA_TECH`), shown while the snapshot loads.
+export const ltdaData: LtdaRow[] = [
+  { key: 'lng', en: 'LNG (decarb-ready)', ja: 'LNG（脱炭素化前提）', r1: '5.76', r2: '1.31', r3: '3.04', cum: '10.11', share: 43, kw: [5756320, 1314644, 3037866], plants: [10, 4, 4], c: '#E9C46A', cd: '#E9C46A' },
+  { key: 'nuclear', en: 'Nuclear', ja: '原子力', r1: '1.32', r2: '3.15', r3: '1.94', cum: '6.41', share: 27, kw: [1315707, 3153107, 1939123], plants: [1, 3, 2], c: '#7B2D8E', cd: '#C77BD8' },
+  { key: 'battery', en: 'Battery storage', ja: '蓄電池', r1: '1.09', r2: '1.37', r3: '1.25', cum: '3.71', share: 16, kw: [1092076, 1370036, 1251127], plants: [30, 27, 19], c: '#00A5CF', cd: '#1FB6DC' },
+  { key: 'h2nh3', en: 'Hydrogen · Ammonia', ja: '水素・アンモニア', r1: '0.83', r2: '0.09', r3: '0.52', cum: '1.44', share: 6, kw: [825582, 94600, 516687], plants: [6, 1, 4], c: '#2A9D8F', cd: '#2A9D8F' },
+  { key: 'pumped', en: 'Pumped hydro', ja: '揚水', r1: '0.58', r2: '0.36', r3: '0.45', cum: '1.39', share: 6, kw: [576937, 360646, 453439], plants: [3, 2, 2], c: '#4A6FA5', cd: '#7C9CD1' },
+  { key: 'biomass', en: 'Biomass', ja: 'バイオマス', r1: '0.20', r2: '—', r3: '0.10', cum: '0.30', share: 1, kw: [199258, 0, 100926], plants: [2, 0, 1], c: '#8AB17D', cd: '#8AB17D' },
+  { key: 'hydro', en: 'Conventional hydro', ja: '一般水力', r1: '—', r2: '0.05', r3: '—', cum: '0.05', share: 0, kw: [0, 51800, 0], plants: [0, 1, 0], c: '#B4BCC9', cd: '#5D6B85' },
+]
+
+export const ltdaRounds: LtdaRound[] = [
+  { round: 1, bid_year: 2023, published: '2024-04-26', kw: 9765880, plants: 52 },
+  { round: 2, bid_year: 2024, published: '2025-04-28', kw: 6344833, plants: 38 },
+  { round: 3, bid_year: 2025, published: '2026-05-13', kw: 7299168, plants: 32 },
 ]
 
