@@ -1,5 +1,5 @@
 import type { CSSProperties } from 'react'
-import { useApp } from './app'
+import { useApp, type Lang } from './app'
 import { useManifest } from './data'
 import { parseDay } from './time'
 import type { Manifest } from './types'
@@ -15,6 +15,17 @@ import type { Manifest } from './types'
  */
 
 export const STALE_MS = 48 * 60 * 60 * 1000
+
+/** Label for figures shown from the built-in sample data because their snapshot failed to load. */
+export function sampleNote(lang: Lang): string {
+  return lang === 'ja' ? '· データなし（サンプル表示）' : '· no data — sample shown'
+}
+
+/** `sampleNote` appended to a panel title or KPI caption while `failed`; renders nothing otherwise. */
+export function SampleTag({ failed }: { failed: boolean }) {
+  const { lang } = useApp()
+  return failed ? <span style={{ fontWeight: 400 }}> {sampleNote(lang)}</span> : null
+}
 
 /** "2026-07-15T17:33:13+00:00" → "2026-07-15 17:33" (same slicing as Settings). */
 export function fmtStamp(iso: string): string {

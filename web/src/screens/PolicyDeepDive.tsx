@@ -842,6 +842,17 @@ export function PolicyDeepDiveScreen() {
               </div>
             )}
 
+            {/* Neither the live API nor the static export could be read: the empty panes are not "no data". */}
+            {pol.failed && (
+              <div style={s('display:flex;align-items:center;gap:9px;background:var(--warnBg);border:1px solid var(--warnTx);border-radius:12px;padding:9px 14px')}>
+                <span style={s('font-size:12.5px;font-weight:600;color:var(--warnTx)')}>
+                  {L === 'ja'
+                    ? '政策データを読み込めませんでした — 委員会・会合が空なのはそのためです。再読み込みで再試行します。'
+                    : 'Policy data could not be loaded, so no committees or meetings are shown. Reload the page to retry.'}
+                </span>
+              </div>
+            )}
+
             {/* Search & filter bar */}
             <div style={s('background:var(--bg1);border-radius:16px;padding:10px 16px;box-shadow:var(--sh1);display:flex;align-items:center;gap:12px;flex-wrap:wrap')}>
               <div style={s('flex:1;min-width:220px;display:flex;align-items:center;gap:9px;color:var(--mut)')}>

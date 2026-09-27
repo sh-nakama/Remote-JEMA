@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { s, Hoverable, press } from '../lib/style'
 import { useApp } from '../lib/app'
-import { fmtStamp } from '../lib/freshness'
+import { fmtStamp, SampleTag } from '../lib/freshness'
 import { useManifest } from '../lib/data'
 import { NotificationsPopover, useNotifSeen, unreadCount } from '../lib/notifications'
 import type { NotifItem, NotifSection } from '../lib/notifications'
@@ -419,13 +419,13 @@ export function CapacityAuctionsScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>{maLast?.fy} national average<br />全国平均単価</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.natl).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kW·year</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>after 経過措置 · main auction {maLast?.held} · vs {maPrev?.fy}</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>after 経過措置 · main auction {maLast?.held} · vs {maPrev?.fy}<SampleTag failed={cap.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{hdDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured capacity<br />調達容量</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.proc).toFixed(1)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery</div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery<SampleTag failed={cap.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{lastBands.length > 1 ? (L === 'ja' ? `${lastBands.length}価格帯に分断` : `${lastBands.length} clearing prices`) : (L === 'ja' ? '全エリア一律' : 'single national price')}</span>
                   </div>
                   {/* Highest / lowest clearing zone of the newest auction — the areas
@@ -434,13 +434,13 @@ export function CapacityAuctionsScreen() {
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest clearing zone<br />最高値エリア</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(hiBand?.price) ? hiBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{hiBand ? areaNames(hiBand.areas) : '—'}</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{hiBand ? areaNames(hiBand.areas) : '—'}<SampleTag failed={cap.failed} /></div>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...hiDelta.style }}>{hiDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Lowest clearing zone<br />最安値エリア</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(loBand?.price) ? loBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{loBand ? areaNames(loBand.areas) : '—'}{Number.isFinite(spread) && spread > 0 ? ` · spread ${yen(spread)}` : ''}</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{loBand ? areaNames(loBand.areas) : '—'}{Number.isFinite(spread) && spread > 0 ? ` · spread ${yen(spread)}` : ''}<SampleTag failed={cap.failed} /></div>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...loDelta.style }}>{loDelta.txt}</span>
                   </div>
                 </div>
@@ -449,7 +449,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Area <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア別 約定価格</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Area <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア別 約定価格<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · one bar per OCCTO area — equal heights are areas that cleared together · 同一価格のエリアは同じ高さ</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>auction held ~4 years ahead of delivery</span>
@@ -505,7 +505,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Auction Results <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>約定結果一覧</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Auction Results <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>約定結果一覧<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction by delivery year · clearing-price range across the OCCTO areas</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year · GW</span>
@@ -534,7 +534,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Area Clearing Prices <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア毎の約定価格</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Area Clearing Prices <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア毎の約定価格<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Every OCCTO area, every delivery year · shading marks the price bands the auction split into · 濃い網掛けほど高値の価格帯</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year</span>
@@ -617,7 +617,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Awarded Capacity by Technology <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別落札容量</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Awarded Capacity by Technology <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別落札容量<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>LTDA rounds 1–3 · GW · 20-year fixed revenue contracts · 20年間の固定収入契約</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>hover a segment for detail</span>
@@ -669,7 +669,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Technology Breakdown <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別内訳</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Technology Breakdown <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別内訳<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Awarded GW per round · cumulative share of all LTDA awards</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>GW</span>

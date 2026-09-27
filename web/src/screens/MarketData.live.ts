@@ -164,6 +164,8 @@ export interface BalAreaRow extends BalRow {
 
 export interface BalancingLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   rows: Record<string, BalRow>
   /** Per-product, per-area breakdown (procured-desc) for the row drill-down. */
   areaRows: Record<string, BalAreaRow[]>
@@ -181,7 +183,7 @@ const BAL_AREAS = ['hokkaido', 'tohoku', 'tepco', 'chubu', 'hokuriku', 'kansai',
  * mean clearing price. (需給調整市場 is procured nationwide.) */
 export function useBalancingLive(): BalancingLive {
   const nonce = useDataNonce()
-  const [state, setState] = useState<BalancingLive>({ ready: false, rows: {}, areaRows: {}, procTot: 0, avgPrice: null, end: null })
+  const [state, setState] = useState<BalancingLive>({ ready: false, failed: false, rows: {}, areaRows: {}, procTot: 0, avgPrice: null, end: null })
   useEffect(() => {
     let alive = true
     const jobs: Promise<BalancingStats | null>[] = []
@@ -191,6 +193,10 @@ export function useBalancingLive(): BalancingLive {
     Promise.all(jobs)
       .then((all) => {
         if (!alive) return
+        if (all.every((s) => s == null)) {
+          setState((s) => ({ ...s, ready: false, failed: true }))
+          return
+        }
         const rows: Record<string, BalRow> = {}
         const areaRows: Record<string, BalAreaRow[]> = {}
         let procTot = 0
@@ -229,7 +235,7 @@ export function useBalancingLive(): BalancingLive {
           }
         }
         const avgPrice = wDen > 0 ? wNum / wDen : null
-        setState({ ready: true, rows, areaRows, procTot, avgPrice, end })
+        setState({ ready: true, failed: false, rows, areaRows, procTot, avgPrice, end })
       })
       .catch(() => {})
     return () => {
@@ -257,6 +263,8 @@ export interface TielineSnapshot {
 }
 export interface TielineLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   byKey: Record<string, { util: number[]; ttc: number | null; utilNow: number | null }>
   /** Snapshot day (ISO, latest across lines) — caption "as of". */
   date: string | null
@@ -267,7 +275,7 @@ export interface TielineLive {
  * to the fixture. Utilisation is reserved/TTC (real), typically low (uncongested). */
 export function useTielineLive(market = 'DAM'): TielineLive {
   const nonce = useDataNonce()
-  const [state, setState] = useState<TielineLive>({ ready: false, byKey: {}, date: null })
+  const [state, setState] = useState<TielineLive>({ ready: false, failed: false, byKey: {}, date: null })
   useEffect(() => {
     let alive = true
     getSnapshot<TielineSnapshot>(`tieline/${market}.json`)
@@ -286,10 +294,10 @@ export function useTielineLive(market = 'DAM'): TielineLive {
             utilNow: ln.util_now,
           }
         }
-        setState({ ready: true, byKey, date })
+        setState({ ready: true, failed: false, byKey, date })
       })
       .catch(() => {
-        if (alive) setState({ ready: false, byKey: {}, date: null })
+        if (alive) setState({ ready: false, failed: true, byKey: {}, date: null })
       })
     return () => {
       alive = false
@@ -316,6 +324,8 @@ export interface DriversSnapshot {
 
 export interface DriversLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   spot: number[]
   jkm: number[]
   ncl: number[]
@@ -340,20 +350,31 @@ function toNewestFirst(a: (number | null)[]): number[] {
 export function useDriversLive(): DriversLive {
   const nonce = useDataNonce()
   const [snap, setSnap] = useState<DriversSnapshot | null>(null)
+  const [failed, setFailed] = useState(false)
   useEffect(() => {
     let alive = true
     getSnapshot<DriversSnapshot>('drivers.json')
-      .then((d) => alive && setSnap(d))
-      .catch(() => alive && setSnap(null))
+      .then((d) => {
+        if (!alive) return
+        setSnap(d)
+        setFailed(false)
+      })
+      .catch(() => {
+        if (!alive) return
+        setSnap(null)
+        setFailed(true)
+      })
     return () => {
       alive = false
     }
   }, [nonce])
   if (!snap || !snap.dates || snap.dates.length === 0) {
-    return { ready: false, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null }, end: null }
+    // A snapshot that loaded but holds no series is as unusable as one that failed.
+    return { ready: false, failed: failed || snap != null, spot: [], jkm: [], ncl: [], fx: [], corr: { jkm: null, ncl: null, fx: null }, end: null }
   }
   return {
     ready: true,
+    failed: false,
     spot: toNewestFirst(snap.spot),
     jkm: toNewestFirst(snap.jkm),
     ncl: toNewestFirst(snap.ncl),

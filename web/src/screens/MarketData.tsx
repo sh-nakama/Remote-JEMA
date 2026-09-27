@@ -2,7 +2,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { s, Hoverable, RawSvg, press } from '../lib/style'
 import { useApp } from '../lib/app'
-import { fmtStamp, STALE_MS } from '../lib/freshness'
+import { fmtStamp, STALE_MS, SampleTag } from '../lib/freshness'
 import { useManifest } from '../lib/data'
 import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
 import type { NotifItem, NotifSection } from '../lib/notifications'
@@ -582,13 +582,13 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Weighted avg ΔkW price<br />加重平均ΔkW価格</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balAvgPrice} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/ΔkW·30min</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · nationwide</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>all products · nationwide<SampleTag failed={balLive.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▼ −0.32 (−6.2%)</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured volume<br />調達量合計</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.balProcTot} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>5 products · vs prior day</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>5 products · vs prior day<SampleTag failed={balLive.failed} /></div>
                     <span style={v.balD1S}>▲ +214 (+2.4%)</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
@@ -602,7 +602,7 @@ export function MarketDataScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Balancing Products <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>需給調整市場 商品別</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Balancing Products <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>需給調整市場 商品別<SampleTag failed={balLive.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>EPRX · FY2025+ · daily · {v.balDate} · nationwide procurement</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/ΔkW·30min · MW</span>
@@ -664,13 +664,13 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>Congested lines now<br />混雑中の連系線</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icCong} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>/ 10 lines</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>≥97% of TTC · latest slot 14:30</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>≥97% of TTC · latest slot 14:30<SampleTag failed={tielineLive.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>▲ +1 line vs y&apos;day same slot</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest utilization<br />最高利用率</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icMaxU}<span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>%</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icMaxLabel}</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{v.icMaxLabel}<SampleTag failed={tielineLive.failed} /></div>
                     <span style={v.icWarnChip}>binding since 11:00 · 混雑継続中</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
@@ -682,7 +682,7 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Flow in use<br />総送電量</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.icFlowTot} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>MW</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>of {v.icCapTot} MW total TTC</div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>of {v.icCapTot} MW total TTC<SampleTag failed={tielineLive.failed} /></div>
                     <span style={v.icChipN}>{v.icUtilTot}% of capability in use</span>
                   </div>
                 </div>
@@ -691,7 +691,7 @@ export function MarketDataScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Flow Map — 9 Areas <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線フロー</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Flow Map — 9 Areas <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線フロー<SampleTag failed={tielineLive.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Net flows at latest slot 14:30 · labels in MW · line width ∝ transfer capability · OCCTO 系統情報 {v.icMapDate}</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>node prices = area spot ¥/kWh</span>
@@ -779,7 +779,7 @@ export function MarketDataScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Interconnector Lines <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線一覧</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Interconnector Lines <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>連系線一覧<SampleTag failed={tielineLive.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest slot 14:30 · spread = destination minus origin area price · 値差＝流入側−流出側</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>MW · ¥/kWh</span>
@@ -825,7 +825,7 @@ export function MarketDataScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Congestion Timeline <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>混雑タイムライン</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Congestion Timeline <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>混雑タイムライン<SampleTag failed={tielineLive.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Utilization by 30-min slot · today {v.icTodayDate} · 30分コマ別利用率</div>
                     </div>
                     <div style={s('display:flex;align-items:center;gap:5px;font-size:11px;color:var(--mut);flex-shrink:0;padding-top:4px')}>
@@ -868,19 +868,19 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>JKM LNG front-month<br />JKM（LNGスポット）</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drJkmV} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>$/MMBtu</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>ICE · close {v.drCloseDate} · vs prior close</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>ICE · close {v.drCloseDate} · vs prior close<SampleTag failed={driversLive.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{v.drJkmC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Newcastle coal<br />ニューカッスル石炭</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drNclV} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>$/t</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>ICE FOB front-month · vs prior close</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>ICE FOB front-month · vs prior close<SampleTag failed={driversLive.failed} /></div>
                     <span style={v.drNclCS}>{v.drNclC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>USD/JPY<br />ドル円</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{v.drFxV}</div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>TTM · weaker yen = costlier fuel imports</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>TTM · weaker yen = costlier fuel imports<SampleTag failed={driversLive.failed} /></div>
                     <span style={v.drFxCS}>{v.drFxC}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
@@ -898,7 +898,7 @@ export function MarketDataScreen() {
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column')}>
                     <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                       <div>
-                        <div style={s('font-size:16px;font-weight:600')}>Drivers vs Spot — Indexed <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>燃料・為替×スポット</span></div>
+                        <div style={s('font-size:16px;font-weight:600')}>Drivers vs Spot — Indexed <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>燃料・為替×スポット<SampleTag failed={driversLive.failed} /></span></div>
                         <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Rebased to 100 at window start · daily closes · spot = 9-area mean · 期初＝100</div>
                       </div>
                       <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
@@ -942,7 +942,7 @@ export function MarketDataScreen() {
 
                   {/* Driver detail panel */}
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column;min-width:0')}>
-                    <div style={s('font-size:16px;font-weight:600')}>Driver Detail <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>ドライバー詳細</span></div>
+                    <div style={s('font-size:16px;font-weight:600')}>Driver Detail <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>ドライバー詳細<SampleTag failed={driversLive.failed} /></span></div>
                     <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Last close · Δ1d · 30d trend · correlation vs spot</div>
                     <div style={s('display:flex;flex-direction:column;margin-top:6px')}>
                       {v.drPanel.map((p) => (

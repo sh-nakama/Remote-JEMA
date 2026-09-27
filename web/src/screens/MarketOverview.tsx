@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useRef, useState } from 'react'
 import { s, Hoverable, RawSvg, press } from '../lib/style'
 import { useApp } from '../lib/app'
 import { useManifest } from '../lib/data'
-import { fmtStamp, STALE_MS } from '../lib/freshness'
+import { fmtStamp, STALE_MS, SampleTag } from '../lib/freshness'
 import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
 import type { NotifItem, NotifKind, NotifSection } from '../lib/notifications'
 import { usePolicyActivity, POLICY_RECENT_DAYS } from '../lib/policyActivity'
@@ -593,7 +593,7 @@ export function MarketOverviewScreen() {
                   <span style={s('width:30px;height:30px;border-radius:999px;border:1px solid rgba(255,255,255,.45);display:flex;align-items:center;justify-content:center;flex-shrink:0')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></span>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{today[NOW].toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kWh</span></div>
-                <div style={s("font-size:11px;color:rgba(255,255,255,.75);margin-top:2px;font-feature-settings:'tnum' 1")}>slot 14:30 · vs same slot y'day</div>
+                <div style={s("font-size:11px;color:rgba(255,255,255,.75);margin-top:2px;font-feature-settings:'tnum' 1")}>slot 14:30 · vs same slot y'day<SampleTag failed={liveSys.failed} /></div>
                 <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{k1.txt}</span>
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
@@ -602,7 +602,7 @@ export function MarketOverviewScreen() {
                   <Hoverable as="span" base="width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0" hover="color:var(--ac);background:var(--bg0)"><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></Hoverable>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{avg(today).toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
-                <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>48 cleared slots · vs y'day avg</div>
+                <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>48 cleared slots · vs y'day avg<SampleTag failed={liveSys.failed} /></div>
                 <span style={k2.style}>{k2.txt}</span>
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
@@ -611,7 +611,7 @@ export function MarketOverviewScreen() {
                   <span style={s('width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></span>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{today[hiI].toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
-                <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>at {slotLabel(hiI)} · vs y'day high</div>
+                <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>at {slotLabel(hiI)} · vs y'day high<SampleTag failed={liveSys.failed} /></div>
                 <span style={k3.style}>{k3.txt}</span>
               </Hoverable>
               <Hoverable base="background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);cursor:pointer;transition:box-shadow .15s" hover="box-shadow:var(--sh2)" onClick={tMarket}>
@@ -620,7 +620,7 @@ export function MarketOverviewScreen() {
                   <span style={s('width:30px;height:30px;border-radius:999px;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;color:var(--mut);flex-shrink:0')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><line x1="7" y1="17" x2="17" y2="7"></line><polyline points="7 7 17 7 17 17"></polyline></svg>`} /></span>
                 </div>
                 <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{today[loI].toFixed(2)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kWh</span></div>
-                <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>at {slotLabel(loI)} · vs y'day low</div>
+                <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>at {slotLabel(loI)} · vs y'day low<SampleTag failed={liveSys.failed} /></div>
                 <span style={k4.style}>{k4.txt}</span>
               </Hoverable>
             </div>
@@ -631,7 +631,7 @@ export function MarketOverviewScreen() {
               <div ref={chartRef} style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);min-height:360px;display:flex;flex-direction:column')}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                   <div>
-                    <div style={s('font-size:16px;font-weight:600')}>System Price — Intraday <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>システム価格 日中推移</span></div>
+                    <div style={s('font-size:16px;font-weight:600')}>System Price — Intraday <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>システム価格 日中推移<SampleTag failed={liveSys.failed} /></span></div>
                     <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>48 half-hour slots · ¥/kWh · day-ahead 前日約定</div>
                   </div>
                   <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
@@ -698,7 +698,7 @@ export function MarketOverviewScreen() {
   // D · Market Pulse (per-area latest prices)
   const renderMarketPulse = () => (
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1);display:flex;flex-direction:column;min-width:0')}>
-                <div style={s('font-size:16px;font-weight:600')}>Market Pulse <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>スポット概況</span></div>
+                <div style={s('font-size:16px;font-weight:600')}>Market Pulse <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>スポット概況<SampleTag failed={liveSys.failed} /></span></div>
                 <div style={s("font-size:11.5px;color:var(--mut);margin-top:3px;font-feature-settings:'tnum' 1")}>{dataDate.en ? `${dataDate.en} · ${dataDate.ja}` : '—'}{nowSlot ? ` · ${nowSlot} JST` : ''}</div>
                 <div style={s('display:flex;justify-content:space-between;align-items:center;margin-top:12px')}>
                   <span style={s('font-size:12.5px;color:var(--mut)')}>System now · システム</span>
@@ -735,7 +735,7 @@ export function MarketOverviewScreen() {
             <div style={s('background:var(--bg1);border-radius:20px;padding:18px 20px 10px;box-shadow:var(--sh1)')}>
               <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                 <div>
-                  <div style={s('font-size:16px;font-weight:600')}>Recent &amp; Scheduled <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>直近・開催予定</span></div>
+                  <div style={s('font-size:16px;font-weight:600')}>Recent &amp; Scheduled <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>直近・開催予定<SampleTag failed={polMtg.failed} /></span></div>
                   <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Held meetings &amp; scheduled sessions · click → Policy Deep Dive · 開催済みと開催予定の会合</div>
                 </div>
                 <Hoverable base="display:inline-flex;align-items:center;gap:7px;border:1px solid var(--bd2);color:var(--tx2);border-radius:999px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;flex-shrink:0" hover="border-color:var(--ac);color:var(--acT)" onClick={tIcs}>
@@ -789,7 +789,7 @@ export function MarketOverviewScreen() {
               <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                 <div style={s('display:flex;justify-content:space-between;align-items:flex-start;position:relative')}>
                   <div>
-                    <div style={s('font-size:16px;font-weight:600')}>METI Committee Radar <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>委員会レーダー</span></div>
+                    <div style={s('font-size:16px;font-weight:600')}>METI Committee Radar <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>委員会レーダー<SampleTag failed={polMtg.failed} /></span></div>
                     <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Latest session per committee, newest first · 委員会ごとの最新会合・新着順</div>
                     <div style={s('font-size:11px;color:var(--fnt);margin-top:3px')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px;height:11px;vertical-align:-1px"><circle cx="12" cy="12" r="10"></circle><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"></line></svg>`} /> Importance weighting not connected — recency only · 重要度による並べ替えは未接続</div>
                   </div>

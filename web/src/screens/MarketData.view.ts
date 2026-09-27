@@ -5,6 +5,7 @@ import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate, MONTH
 import { gaussian as G } from '../lib/fixtures'
 import { gapSegments, segPoints, bandPoints, PLOT_X0, PLOT_W } from '../lib/chart'
 import type { CSS } from '../lib/style'
+import { sampleNote } from '../lib/freshness'
 import { areas, areaDefs, balProducts, icDefs, icUtil, drv, drDefs } from './MarketData.data'
 import {
   useWholesaleLive,
@@ -477,7 +478,7 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     return {
       key: a.key,
       title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
-      sub: live.ready && !la ? (L === 'ja' ? '· データなし（サンプル表示）' : '· no data — sample shown') : '',
+      sub: live.ready && !la ? sampleNote(L) : '',
       meta:
         'latest ¥' +
         (la && la.latest != null ? la.latest.toFixed(2) : a.intraday[29].toFixed(2)) +
