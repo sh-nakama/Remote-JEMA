@@ -1,10 +1,12 @@
 // Market Data view model: everything the screen displays, computed from its controls and live data.
 // Split out of MarketData.tsx verbatim; the screen memoises buildMarketView on the same inputs.
 import type { Lang } from '../lib/app'
-import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate } from '../lib/chartkit'
+import { CHIP_BASE, makeChip, segBase, filterChipBase, slotLabel, fmtDate, MONTHS } from '../lib/chartkit'
+import { gaussian as G } from '../lib/fixtures'
 import { gapSegments, segPoints, bandPoints, PLOT_X0, PLOT_W } from '../lib/chart'
 import type { CSS } from '../lib/style'
-import { areas, areaDefs, balProducts, icDefs, icUtil, drv, drDefs, gaussian as G } from './MarketData.data'
+import { sampleNote } from '../lib/freshness'
+import { areas, areaDefs, balProducts, icDefs, icUtil, drv, drDefs } from './MarketData.data'
 import {
   useWholesaleLive,
   windowLive,
@@ -37,11 +39,9 @@ export type Domain = [number, number]
 export function dateLabel(daysAgo: number): string {
   const d = new Date(2026, 6, 2)
   d.setDate(d.getDate() - daysAgo)
-  const MO = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-  return MO[d.getMonth()] + ' ' + d.getDate()
+  return MONTHS[d.getMonth()] + ' ' + d.getDate()
 }
 
-export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 export const SHOW_HEATMAP = true
 
 /** ISO datetime → hover label: "Jul 11", or "Jul 11 22:30" for intraday slots.
@@ -478,7 +478,7 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     return {
       key: a.key,
       title: L === 'ja' ? a.ja + ' / ' + a.en : a.en + ' / ' + a.ja,
-      sub: live.ready && !la ? (L === 'ja' ? '· データなし（サンプル表示）' : '· no data — sample shown') : '',
+      sub: live.ready && !la ? sampleNote(L) : '',
       meta:
         'latest ¥' +
         (la && la.latest != null ? la.latest.toFixed(2) : a.intraday[29].toFixed(2)) +
@@ -822,8 +822,6 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     drFxC: kF.txt,
     drFxCS: kF.style,
     drPanel,
-    langJaS: segBase(L === 'ja'),
-    langEnS: segBase(L === 'en'),
     vwWS: segBase(view === 'wholesale'),
     vwBS: segBase(view === 'balancing'),
     vwIS: segBase(view === 'interco'),

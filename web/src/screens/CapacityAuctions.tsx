@@ -1,14 +1,14 @@
 // Ported from screens/capacity-auctions.html — 4th JEMA screen (Capacity & Auctions).
 import { useState } from 'react'
-import { s, Hoverable, RawSvg, press } from '../lib/style'
+import { s, Hoverable, press } from '../lib/style'
 import { useApp } from '../lib/app'
-import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { fmtStamp, SampleTag } from '../lib/freshness'
 import { useManifest } from '../lib/data'
 import { NotificationsPopover, useNotifSeen, unreadCount } from '../lib/notifications'
 import type { NotifItem, NotifSection } from '../lib/notifications'
-import { PolicyNavBadge } from '../lib/policyActivity'
-import { segBase, areaColor } from '../lib/chartkit'
-import { CAPACITY_AREAS, maData, ltdaData, polData, MONTHS } from './CapacityAuctions.data'
+import { Sidebar, TopBar, PageHeader, ExportButton, useReload } from '../lib/chrome'
+import { segBase, areaColor, MONTHS, orgColor } from '../lib/chartkit'
+import { CAPACITY_AREAS, maData, ltdaData, polData } from './CapacityAuctions.data'
 import type { MaRow } from './CapacityAuctions.data'
 import { useCapacityLive } from './CapacityAuctions.live'
 import { downloadCsv } from '../lib/download'
@@ -24,23 +24,17 @@ interface PriceBand {
 }
 
 export function CapacityAuctionsScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, refreshData, refreshing } = useApp()
+  const { lang, theme, setScreen, toast } = useApp()
   const [view, setView] = useState<View>('main')
   const [showNotif, setShowNotif] = useState(false)
 
   const L = lang
   const dark = theme === 'dark'
 
-  // Navigation handlers
-  const goOverview = () => setScreen('overview')
-  const goMarket = () => setScreen('market')
   const goPolicy = () => setScreen('policy')
 
   // Placeholder / toast handlers
-  const tRefresh = () => {
-    refreshData()
-    toast('Reloaded latest data · 最新データを再取得しました')
-  }
+  const tRefresh = useReload()
   const tNotif = () => setShowNotif((n) => !n)
   const tExport = () => {
     const rows = maSrc.map((m) => {
@@ -238,7 +232,7 @@ export function CapacityAuctionsScreen() {
   const heldTs = (held: string | undefined): number => {
     const m = /^([A-Za-z]{3})\s+(\d{4})$/.exec((held ?? '').trim())
     const mi = m ? MONTHS.indexOf(m[1]) : -1
-    return m && mi > 0 ? Date.UTC(Number(m[2]), mi - 1, 1) : NaN
+    return m && mi >= 0 ? Date.UTC(Number(m[2]), mi, 1) : NaN
   }
 
   const auctionItems: NotifItem[] = []
@@ -345,16 +339,12 @@ export function CapacityAuctionsScreen() {
     } as React.CSSProperties,
   }))
 
-  const tierColors: Record<'METI' | 'OCCTO', string> = {
-    METI: 'var(--ac)',
-    OCCTO: dark ? '#7C9CD1' : '#4A6FA5',
-  }
   const polRows = polData.map((p) => ({
     n1: L === 'ja' ? p.ja : p.en,
     meta:
       L === 'ja'
         ? '第' + p.no + '回 · 2026年' + p.m + '月' + p.day + '日 · ' + p.tier
-        : 'No. ' + p.no + ' · ' + p.day + ' ' + MONTHS[p.m] + ' 2026 · ' + p.tier,
+        : 'No. ' + p.no + ' · ' + p.day + ' ' + MONTHS[p.m - 1] + ' 2026 · ' + p.tier,
     summary: L === 'ja' ? p.sJa : p.sEn,
     sched: !!p.sched,
     cta: p.sched
@@ -368,7 +358,7 @@ export function CapacityAuctionsScreen() {
       width: 9,
       height: 9,
       borderRadius: 999,
-      background: tierColors[p.tier],
+      background: orgColor(p.tier, dark),
       flexShrink: 0,
       marginTop: 6,
     } as React.CSSProperties,
@@ -377,120 +367,12 @@ export function CapacityAuctionsScreen() {
   return (
     <>
       {/* ============ SIDEBAR ============ */}
-      <div style={s(`width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);flex-direction:column;padding:22px 16px 16px;overflow-y:auto;${collapsed ? 'display:none' : 'display:flex'}`)}>
-        <div style={s('padding:0 8px')}>
-          <div style={s('display:flex;align-items:center;gap:7px')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:23px;height:23px;color:var(--ac);flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>`} />
-            <span style={s("font-size:21px;font-weight:700;letter-spacing:.01em")}>JEMA</span>
-          </div>
-          <div style={s('font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--mut);margin-top:3px;text-transform:uppercase')}>Japan Energy Market Analytics</div>
-        </div>
-
-        <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:26px 8px 8px')}>MENU · メニュー</div>
-        <div style={s('display:flex;flex-direction:column;gap:3px')}>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={goOverview}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>`} />
-            <span>Market Overview</span>
-            <span style={s('margin-left:auto;font-size:10.5px;font-weight:500;color:var(--mut)')}>概況</span>
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={goMarket}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg>`} />
-            <span>Market Data</span>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;margin-left:auto;color:var(--mut);flex-shrink:0"><path d="M9 18l6-6-6-6"></path></svg>`} />
-          </Hoverable>
-          <div style={s('display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:600;color:var(--acT);background:var(--acTint);cursor:pointer;position:relative')}>
-            <span style={s('position:absolute;left:-16px;top:8px;bottom:8px;width:3px;background:var(--ac);border-radius:0 2px 2px 0')}></span>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg>`} />
-            <span>Capacity &amp; Auctions</span>
-            <span style={s('margin-left:auto;font-size:10.5px;font-weight:500;color:var(--acHi)')}>容量</span>
-          </div>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={goPolicy}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} />
-            <span>Policy Deep Dive</span>
-            <PolicyNavBadge />
-          </Hoverable>
-        </div>
-
-        <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:22px 8px 8px')}>GENERAL · 全般</div>
-        <div style={s('display:flex;flex-direction:column;gap:3px')}>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('watchlist')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} />
-            <span>Watchlist</span>
-            {watch.length > 0 && (
-              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{watch.length}</span>
-            )}
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={tNotif}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            <span>Notifications</span>
-            {notifUnread > 0 && (
-              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
-            )}
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} />
-            <span>Settings</span>
-          </Hoverable>
-        </div>
-
-        <div style={s('flex:1')}></div>
-
-        <Hoverable base="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" hover="background:var(--bg2);color:var(--tx2)" onClick={toggleCollapsed}>
-          <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path></svg>`} />
-          <span>Collapse · 折りたたむ</span>
-        </Hoverable>
-
-        <div style={s('background:linear-gradient(135deg,var(--navyA),var(--navyB));border-radius:16px;padding:15px 15px 13px;color:#FFFFFF;margin-top:12px')}>
-          <div style={s("display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600")}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>`} />Data freshness · データ鮮度
-          </div>
-          <div style={s("font-size:12px;color:rgba(255,255,255,.78);margin-top:6px")}>Last publication <span style={s("font-weight:600;color:#FFFFFF;font-feature-settings:'tnum' 1")}>2026-06-27</span></div>
-          <FreshnessChip inverse style={{ marginTop: 2 }} />
-          <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>OCCTO auction results · event-driven, not daily</div>
-          <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>Refresh · 更新
-          </Hoverable>
-        </div>
-      </div>
+      <Sidebar active="capacity" unread={notifUnread} onToggleNotif={tNotif} lastPublication="2026-06-27" source="OCCTO auction results · event-driven, not daily" />
 
       {/* ============ MAIN COLUMN ============ */}
       <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
 
-        {/* Top bar */}
-        <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
-          <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Capacity &amp; Auctions <span style={s('color:var(--fnt3)')}>·</span> 容量市場・オークション</div>
-          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
-            <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
-            <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
-          </div>
-          <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
-            {dark && (
-              <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />
-            )}
-            {!dark && (
-              <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />
-            )}
-          </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={tNotif} aria-label="Notifications">
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            {notifUnread > 0 && (
-              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
-            )}
-          </Hoverable>
-          <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={segBase(L === 'ja')} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
-            <span style={segBase(L === 'en')} {...press(() => setLang('en'), L === 'en')}>English</span>
-          </div>
-          <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
-            <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
-            <div style={s('line-height:1.25')}>
-              <div style={s('font-size:13px;font-weight:600')}>Analyst</div>
-              <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
-            </div>
-          </div>
-
+        <TopBar screen="capacity" unread={notifUnread} onToggleNotif={tNotif}>
           {/* Notifications — newest auction result, LTDA total, snapshot freshness */}
           <NotificationsPopover
             open={showNotif}
@@ -507,27 +389,18 @@ export function CapacityAuctionsScreen() {
               },
             }}
           />
-        </div>
+        </TopBar>
 
         {/* Scrollable content */}
         <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
           <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px')}>
 
-            {/* Page header */}
-            <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:16px')}>
-              <div>
-                <div style={s('display:flex;align-items:baseline;gap:10px')}>
-                  <span style={s('font-size:26px;font-weight:700;letter-spacing:-.01em')}>Capacity &amp; Auctions</span>
-                  <span style={s('font-size:15px;font-weight:500;color:var(--mut)')}>容量市場・オークション</span>
-                </div>
-                <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>Main auction results &amp; long-term decarbonization auctions (LTDA) · メインオークションと長期脱炭素電源オークション</div>
-              </div>
-              <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>
-                <Hoverable base="display:inline-flex;align-items:center;gap:7px;background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" hover="background:var(--acTint2);border-color:var(--ac)" onClick={tExport}>
-                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`} />Export CSV · 出力
-                </Hoverable>
-              </div>
-            </div>
+            <PageHeader
+              screen="capacity"
+              subtitle="Main auction results & long-term decarbonization auctions (LTDA) · メインオークションと長期脱炭素電源オークション"
+            >
+              <ExportButton onClick={tExport} />
+            </PageHeader>
 
             {/* Sub-view switcher */}
             <div style={s('display:flex;align-items:center;gap:14px;flex-wrap:wrap')}>
@@ -546,13 +419,13 @@ export function CapacityAuctionsScreen() {
                   <div style={s('background:var(--ac);color:#FFFFFF;border-radius:20px;padding:20px;box-shadow:var(--sh1a)')}>
                     <div style={s('font-size:12px;font-weight:600;color:rgba(255,255,255,.85)')}>{maLast?.fy} national average<br />全国平均単価</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.natl).toLocaleString('en-US')} <span style={s('font-size:13px;font-weight:500;color:rgba(255,255,255,.8)')}>¥/kW·year</span></div>
-                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>after 経過措置 · main auction {maLast?.held} · vs {maPrev?.fy}</div>
+                    <div style={s('font-size:11px;color:rgba(255,255,255,.75);margin-top:2px')}>after 経過措置 · main auction {maLast?.held} · vs {maPrev?.fy}<SampleTag failed={cap.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;background:rgba(255,255,255,.24);color:#FFFFFF;margin-top:9px;font-feature-settings:'tnum' 1")}>{hdDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Procured capacity<br />調達容量</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{numOf(maLast?.proc).toFixed(1)} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>GW</span></div>
-                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery</div>
+                    <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{maLast?.ach}% of target · {maLast?.fy} delivery<SampleTag failed={cap.failed} /></div>
                     <span style={s("display:inline-flex;align-items:center;gap:4px;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;margin-top:9px;font-feature-settings:'tnum' 1;background:rgba(138,147,163,.14);color:var(--mut)")}>{lastBands.length > 1 ? (L === 'ja' ? `${lastBands.length}価格帯に分断` : `${lastBands.length} clearing prices`) : (L === 'ja' ? '全エリア一律' : 'single national price')}</span>
                   </div>
                   {/* Highest / lowest clearing zone of the newest auction — the areas
@@ -561,13 +434,13 @@ export function CapacityAuctionsScreen() {
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Highest clearing zone<br />最高値エリア</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(hiBand?.price) ? hiBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{hiBand ? areaNames(hiBand.areas) : '—'}</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{hiBand ? areaNames(hiBand.areas) : '—'}<SampleTag failed={cap.failed} /></div>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...hiDelta.style }}>{hiDelta.txt}</span>
                   </div>
                   <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                     <div style={s('font-size:12px;font-weight:600;color:var(--mut)')}>Lowest clearing zone<br />最安値エリア</div>
                     <div style={s("font-size:33px;font-weight:700;margin-top:10px;font-feature-settings:'tnum' 1;line-height:1.15")}>{Number.isFinite(loBand?.price) ? loBand.price.toLocaleString('en-US') : '—'} <span style={s('font-size:13px;font-weight:500;color:var(--mut)')}>¥/kW</span></div>
-                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{loBand ? areaNames(loBand.areas) : '—'}{Number.isFinite(spread) && spread > 0 ? ` · spread ${yen(spread)}` : ''}</div>
+                    <div style={s('font-size:11px;color:var(--mut);margin-top:2px')}>{loBand ? areaNames(loBand.areas) : '—'}{Number.isFinite(spread) && spread > 0 ? ` · spread ${yen(spread)}` : ''}<SampleTag failed={cap.failed} /></div>
                     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11.5, fontWeight: 600, padding: '3px 9px', borderRadius: 999, marginTop: 9, fontFeatureSettings: "'tnum' 1", ...loDelta.style }}>{loDelta.txt}</span>
                   </div>
                 </div>
@@ -576,7 +449,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Area <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア別 約定価格</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Clearing Price by Area <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア別 約定価格<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction · ¥/kW·year · one bar per OCCTO area — equal heights are areas that cleared together · 同一価格のエリアは同じ高さ</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>auction held ~4 years ahead of delivery</span>
@@ -632,7 +505,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Auction Results <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>約定結果一覧</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Auction Results <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>約定結果一覧<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Main auction by delivery year · clearing-price range across the OCCTO areas</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year · GW</span>
@@ -661,7 +534,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Area Clearing Prices <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア毎の約定価格</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Area Clearing Prices <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>エリア毎の約定価格<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Every OCCTO area, every delivery year · shading marks the price bands the auction split into · 濃い網掛けほど高値の価格帯</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>¥/kW·year</span>
@@ -744,7 +617,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:12px')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Awarded Capacity by Technology <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別落札容量</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Awarded Capacity by Technology <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別落札容量<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>LTDA rounds 1–3 · GW · 20-year fixed revenue contracts · 20年間の固定収入契約</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px;flex-shrink:0')}>hover a segment for detail</span>
@@ -796,7 +669,7 @@ export function CapacityAuctionsScreen() {
                 <div style={s('background:var(--bg1);border-radius:20px;padding:20px;box-shadow:var(--sh1)')}>
                   <div style={s('display:flex;justify-content:space-between;align-items:flex-start')}>
                     <div>
-                      <div style={s('font-size:16px;font-weight:600')}>Technology Breakdown <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別内訳</span></div>
+                      <div style={s('font-size:16px;font-weight:600')}>Technology Breakdown <span style={s('font-size:12.5px;font-weight:400;color:var(--mut)')}>技術別内訳<SampleTag failed={cap.failed} /></span></div>
                       <div style={s('font-size:12px;color:var(--mut);margin-top:1px')}>Awarded GW per round · cumulative share of all LTDA awards</div>
                     </div>
                     <span style={s('font-size:11px;color:var(--mut);padding-top:4px')}>GW</span>

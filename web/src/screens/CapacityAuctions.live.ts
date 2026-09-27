@@ -11,12 +11,14 @@ import type { LtdaRow, MaRow } from './CapacityAuctions.data'
 
 export interface CapacityLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   ma: MaRow[]
   ltda: LtdaRow[]
 }
 
 export function useCapacityLive(): CapacityLive {
-  const [state, setState] = useState<CapacityLive>({ ready: false, ma: [], ltda: [] })
+  const [state, setState] = useState<CapacityLive>({ ready: false, failed: false, ma: [], ltda: [] })
   useEffect(() => {
     let alive = true
     Promise.all([
@@ -25,9 +27,11 @@ export function useCapacityLive(): CapacityLive {
     ])
       .then(([ma, ltda]) => {
         if (!alive) return
-        setState({ ready: true, ma: ma.results || [], ltda: ltda.rows || [] })
+        setState({ ready: true, failed: false, ma: ma.results || [], ltda: ltda.rows || [] })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (alive) setState((s) => ({ ...s, failed: true }))
+      })
     return () => {
       alive = false
     }

@@ -25,6 +25,8 @@ export interface SystemSnapshot {
 
 export interface SystemLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   today: number[]
   yday: number[]
   avg7: number[]
@@ -47,11 +49,12 @@ function fill(live: (number | null)[] | undefined, fx: number[]): number[] {
 
 export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: number[]): SystemLive {
   const [snap, setSnap] = useState<SystemSnapshot | null>(null)
+  const [failed, setFailed] = useState(false)
   useEffect(() => {
     let alive = true
     getSnapshot<SystemSnapshot>('system.json')
       .then((d) => alive && setSnap(d))
-      .catch(() => alive && setSnap(null))
+      .catch(() => alive && setFailed(true))
     return () => {
       alive = false
     }
@@ -59,6 +62,7 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
   if (!snap) {
     return {
       ready: false,
+      failed,
       today: fxToday,
       yday: fxYday,
       avg7: fxAvg7,
@@ -72,6 +76,7 @@ export function useSystemLive(fxToday: number[], fxYday: number[], fxAvg7: numbe
   }
   return {
     ready: true,
+    failed: false,
     today: fill(snap.system_today, fxToday),
     yday: fill(snap.system_yday, fxYday),
     avg7: fill(snap.system_avg7, fxAvg7),
@@ -116,6 +121,8 @@ interface PUpcomingSnap {
 
 export interface PolicyMeetingsLive {
   ready: boolean
+  /** Loading finished without usable data, so the screen is showing its sample (fixture) data. */
+  failed: boolean
   meetings: Meeting[]
   upcoming: Meeting[]
 }
@@ -128,7 +135,7 @@ const TIER = (org: string): 'METI' | 'OCCTO' | 'EGC' =>
  * Both carry the real meeting date + committee key. The caller filters and caps
  * the list; ordering is pure recency. */
 export function usePolicyMeetings(): PolicyMeetingsLive {
-  const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, meetings: [], upcoming: [] })
+  const [state, setState] = useState<PolicyMeetingsLive>({ ready: false, failed: false, meetings: [], upcoming: [] })
   useEffect(() => {
     let alive = true
     Promise.all([
@@ -187,9 +194,11 @@ export function usePolicyMeetings(): PolicyMeetingsLive {
             key: u.committee_key || undefined,
           }
         })
-        setState({ ready: true, meetings, upcoming })
+        setState({ ready: true, failed: false, meetings, upcoming })
       })
-      .catch(() => {})
+      .catch(() => {
+        if (alive) setState((s) => ({ ...s, failed: true }))
+      })
     return () => {
       alive = false
     }

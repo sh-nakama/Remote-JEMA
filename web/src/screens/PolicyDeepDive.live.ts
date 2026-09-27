@@ -83,6 +83,8 @@ export interface PolicyLive {
   /** True when interactive mode had to fall back to the static snapshot because
    * the live API failed (after retries) — the data shown may be stale. */
   stale: boolean
+  /** Neither the live API nor the static export could be read, so the screen is empty. */
+  failed: boolean
   committees: Committee[]
   meetings: Meeting[]
   upcoming: Upcoming[]
@@ -94,7 +96,7 @@ interface Raw {
   upcoming?: UpcomingSnap[]
 }
 
-function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale'> {
+function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
   const committees: Committee[] = (raw.committees || []).map((x) => ({
     key: x.key,
     org: x.org,
@@ -177,7 +179,7 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
   // effect only ran on mount, so newly-detected meetings never appeared until a
   // full reload — the modal refreshed its own catalog but not the screen behind it.
   const nonce = useDataNonce()
-  const [state, setState] = useState<PolicyLive>({ ready: false, stale: false, committees: [], meetings: [], upcoming: [] })
+  const [state, setState] = useState<PolicyLive>({ ready: false, stale: false, failed: false, committees: [], meetings: [], upcoming: [] })
   // Once the live API has served real data this session, keep it "sticky". The
   // `/api/health` probe re-runs on window focus and flips `interactive` false the
   // moment the backend is unreachable (e.g. while `repower web-api` is restarting),
@@ -208,7 +210,10 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
           return new Promise<Raw>((res) => setTimeout(() => res(loadLive(attempt + 1)), 500 * (attempt + 1)))
         })
     const apply = (raw: Raw, stale: boolean) => {
-      if (alive) setState({ ready: true, stale, ...reshape(raw) })
+      if (alive) setState({ ready: true, stale, failed: false, ...reshape(raw) })
+    }
+    const fail = () => {
+      if (alive) setState((s) => ({ ...s, failed: true }))
     }
     if (interactive) {
       loadLive()
@@ -219,14 +224,14 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
         // Live failed after retries. Only downgrade to the static snapshot if we've
         // never shown live data; otherwise keep the last-good live data on screen.
         .catch(() => {
-          if (!hadLive.current) loadStatic().then((raw) => apply(raw, true)).catch(() => {})
+          if (!hadLive.current) loadStatic().then((raw) => apply(raw, true)).catch(fail)
         })
     } else if (!hadLive.current) {
       // Read-only context (no local backend seen this session): the static export is
       // the intended source, not a stale fallback — so don't flag it.
       loadStatic()
         .then((raw) => apply(raw, false))
-        .catch(() => {})
+        .catch(fail)
     }
     // else: `interactive` just went false but live data is already loaded — keep it
     // on screen rather than reverting to the export.
