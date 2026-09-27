@@ -305,10 +305,19 @@ fixed.
   scraped link that gets rendered.
 - **Every screen falls back to built-in sample data (fixtures), which looks real.** When the
   export manifest can't load, `App.tsx`'s `DataUnavailable` notice says the figures are sample
-  data. MarketData's KPIs use whichever selected areas loaded and tag a failed area "no data —
-  sample shown". Per-snapshot fallbacks elsewhere are still silent `(open — P3)`. Never add a
-  fixture that can render next to live data without a label; `useSnapshot`/`useManifest` in
-  `lib/data.ts` expose `error` for exactly this.
+  data. Below that, each fixture-backed hook (`useSystemLive`, `usePolicyMeetings`,
+  `useBalancingLive`, `useTielineLive`, `useDriversLive`, `useCapacityLive`) reports `failed`
+  once loading ends without usable data, and every panel it feeds appends `<SampleTag
+  failed={...} />` (`lib/freshness.tsx`, the same "no data — sample shown" wording as a failed
+  Market Data area); the tag renders nothing while data is live. The Policy Deep Dive has no
+  fixtures, so `usePolicyLive`'s `failed` shows a notice over its empty panes instead. Wire any
+  new fixture-backed panel the same way: never let a fixture render without a label.
+- **Some figures are sample data even when every snapshot loads** `(open — P3)`: design copy
+  the hi-fi ports hard-coded. Market Data: the balancing and interconnector KPI deltas and
+  Balancing's "Shortfall slots" card; the interconnector node prices, spreads and "Widest area
+  spread" (from fixture area prices); the four lines the tieline export can't map (`kc`, `hc`,
+  `hk`, `sk`). Capacity: the LTDA KPI cards and the "Policy Thread" rows (`polData`). Wire each
+  to real data or label it before relying on it.
 - The fixtures' frozen dates (2026-07-01/02) survive only as **loading fallbacks** for MarketData's
   caption dates (`wsToday`, `balDate`, `icMapDate`, `icTodayDate`, `drCloseDate`); each is
   replaced by the snapshot's own date once it loads. Don't use them as a fallback in new
@@ -347,9 +356,14 @@ fixed.
 - **`ChartFrame` charts use `preserveAspectRatio="none"` with `width:100%;height:auto`**, so the
   on-screen height is `viewBoxHeight / 480 × renderedWidth` — the 480×320 expanded chart came
   out ~812 px tall at full width. Pass `cssHeight` to constrain it; the geometry is unaffected.
-- **MarketOverview and MarketData duplicate helpers that have already drifted** (`chip` vs
-  `makeChip`: flat threshold 0.5% vs 0.05%; also `slotLabel`, `segBase`, Gaussian `mk()`)
-  `(open — P3)`. Change both copies or extract to `lib/` first.
+- **Screen chrome and small helpers live in `lib/`, once.** `lib/chrome.tsx` holds the sidebar
+  (with Policy's `IconRail`), `TopBar`, `PageHeader`, `ExportButton` and `useReload`; screens
+  pass only what differs (active screen, unread count, the notifications popover as children,
+  header subtitle and actions). `lib/chartkit.ts` has `chip`/`makeChip` (0.5% flat threshold,
+  per the design spec), `segBase`, `filterChipBase`, `slotLabel`, a 0-indexed `MONTHS` and
+  `orgColor`; `lib/fixtures.ts` the synthetic curve behind the sample data. The copies had
+  drifted before they were merged, so add new shared bits there rather than to a screen. The
+  merge was checked by snapshotting the rendered DOM of 11 views before and after (identical).
 - **CI gates `web/`** (the `web` job in `ci.yml`): `npm run lint` (only the React hook rules —
   `exhaustive-deps` is what keeps data hooks listing `useDataNonce()`), `npm run build`, and
   `npm test` (vitest, run under both `TZ=UTC` and `TZ=Asia/Tokyo`). Tests live next to the code
