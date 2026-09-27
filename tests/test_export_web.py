@@ -187,6 +187,20 @@ def test_parse_digest_answer_splits_sections_and_strips_markdown():
     assert len(secs[1]["items"]) == 2
 
 
+def test_parse_digest_answer_drops_notebook_offers_and_previews_the_first_bullet():
+    answer = (
+        "### Key decisions\n"
+        "* **Shift in Primary Fuel**: the benchmark follows the new fuel [2].\n"
+        "* Second decision.\n\n"
+        "***\n"
+        "💡 Would you like a detailed breakdown of the correction formulas?\n"
+        "📊 I can compile and visualize the estimated balancing costs."
+    )
+    secs, lead = parse_digest_answer(answer)
+    assert lead == "Shift in Primary Fuel: the benchmark follows the new fuel [2]."
+    assert secs == [{"h": "Key decisions", "items": [lead, "Second decision."]}]
+
+
 def test_parse_briefing_keeps_title_and_sections():
     md = "# 第100回 テスト委員会\n\n本会合の概要。\n\n## 1. 主要な論点\n・論点A\n・論点B\n\n## 2. 結論\n決定事項。"
     secs, title, lead = parse_briefing(md)

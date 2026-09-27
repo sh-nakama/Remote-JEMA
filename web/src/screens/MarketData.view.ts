@@ -6,7 +6,7 @@ import { gaussian as G } from '../lib/fixtures'
 import { gapSegments, segPoints, bandPoints, PLOT_X0, PLOT_W } from '../lib/chart'
 import type { CSS } from '../lib/style'
 import { sampleNote } from '../lib/freshness'
-import { areas, areaDefs, balProducts, icDefs, icUtil, drv, drDefs } from './MarketData.data'
+import { areas, areaDefs, balProducts, icDefs, icSample, icSampleUtil, drv, drDefs } from './MarketData.data'
 import {
   useWholesaleLive,
   windowLive,
@@ -15,6 +15,9 @@ import {
   useBalancingLive,
   BAL_CODES,
   useTielineLive,
+  useAreaDayLive,
+  tielineStats,
+  DRIVER_KEYS,
   DAY_MS,
   effectiveRangeDays,
   rangeClampNote,
@@ -22,6 +25,7 @@ import {
   latestPriceT,
   latestSupplyT,
 } from './MarketData.live'
+import type { DriverKey, TlLine } from './MarketData.live'
 
 export type View = 'wholesale' | 'balancing' | 'interco' | 'drivers'
 export type Range = '7D' | '30D' | '60D' | '1Y'
@@ -77,16 +81,17 @@ export interface MarketViewInput {
   expanded: Record<string, boolean>
   zoom: Record<string, Domain>
   drRange: DrRange
-  drOn: { jkm: boolean; ncl: boolean; fx: boolean }
+  drOn: Record<DriverKey, boolean>
   L: Lang
   dark: boolean
   live: ReturnType<typeof useWholesaleLive>
   driversLive: ReturnType<typeof useDriversLive>
   balLive: ReturnType<typeof useBalancingLive>
   tielineLive: ReturnType<typeof useTielineLive>
+  areaDayLive: ReturnType<typeof useAreaDayLive>
 }
 
-export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive }: MarketViewInput) {
+export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive, areaDayLive }: MarketViewInput) {
   const selAreas = areas.filter((a) => sel[a.key])
   const N = { '7D': 7, '30D': 30, '60D': 60, '1Y': 365 }[range]
   const step = range === '1Y' ? 6 : 1
@@ -570,123 +575,227 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
         ' hidden — toggle chips or heatmap rows to show · 非選択エリアは非表示（チップまたはヒートマップ行で切替）'
       : 'All 9 areas shown · 全9エリア表示中'
 
-  // ---- balancing rows ----
+  // ---- balancing: the latest EPRX day, nationally (fixtures while loading) ----
+  const fmtInt = (n: number) => Math.round(n).toLocaleString('en-US')
+  const pName = (bi: number) => (L === 'ja' ? balProducts[bi].jp : balProducts[bi].en)
+  const shortS = (n: number): CSS =>
+    (n > 0
+      ? { fontSize: 11, fontWeight: 600, background: 'var(--warnBg)', color: 'var(--warnTx)', borderRadius: 6, padding: '1px 8px', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }
+      : { fontSize: 11.5, color: 'var(--fnt)', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }) as CSS
   const balRows = balProducts.map((b, bi) => {
-    const lv = balLive.ready ? balLive.rows[BAL_CODES[bi]] : null
-    const price = lv && lv.price != null ? lv.price.toFixed(2) : b.price
-    const proc = lv ? Math.round(lv.proc).toLocaleString('en-US') : b.proc
-    const off = lv ? Math.round(lv.off).toLocaleString('en-US') : b.off
-    const ach = lv && lv.ach != null ? Math.round(lv.ach) : b.ach
-    // Per-area breakdown for the drill-down (procured-desc). Live only.
-    const areaDetail = (balLive.ready ? balLive.areaRows[BAL_CODES[bi]] : undefined) || []
+    const code = BAL_CODES[bi]
+    const lv = balLive.ready ? balLive.rows[code] : undefined
+    // Live but without this product on the latest day: say so rather than show a sample figure.
+    const gone = balLive.ready && !lv
+    const ach = lv ? lv.ach : gone ? null : b.ach
+    const short = lv ? lv.short : gone ? null : b.short
+    const areaDetail = (balLive.ready ? balLive.areaRows[code] : undefined) || []
     return {
       jp: b.jp,
       en: b.en,
-      code: BAL_CODES[bi],
-      price,
-      proc,
-      off,
-      ach,
+      code,
+      price: lv ? (lv.price != null ? lv.price.toFixed(2) : '—') : gone ? '—' : b.price,
+      proc: lv ? fmtInt(lv.proc) : gone ? '—' : b.proc,
+      off: lv ? fmtInt(lv.off) : gone ? '—' : b.off,
+      ach: ach != null ? Math.round(ach) + '%' : '—',
+      shortTxt: short != null ? short + ' / ' + (lv ? lv.slots : 48) : '—',
+      shortS: shortS(short ?? 0),
       areaRows: areaDetail.map((r) => ({
         area: r.area,
         name: areaDefs.find((a) => a.key === r.area)?.[L === 'ja' ? 'ja' : 'en'] || r.area,
         price: r.price != null ? '¥' + r.price.toFixed(2) : '—',
-        proc: Math.round(r.proc).toLocaleString('en-US'),
-        off: Math.round(r.off).toLocaleString('en-US'),
+        proc: fmtInt(r.proc),
+        off: fmtInt(r.off),
         ach: r.ach != null ? Math.round(r.ach) : null,
       })),
       dot: { width: 8, height: 8, borderRadius: 999, background: dark ? b.cd : b.c, flexShrink: 0 } as CSS,
-      bar: { display: 'block', width: ach + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
+      bar: { display: 'block', width: Math.min(100, ach ?? 0) + '%', height: '100%', borderRadius: 3, background: dark ? b.cd : b.c } as CSS,
     }
   })
-  // ---- interconnectors ----
-  const pxN: Record<string, number> = {}
-  areas.forEach((a) => {
-    pxN[a.key] = a.intraday[29]
-  })
-  const icPx: Record<string, string> = {}
-  areas.forEach((a) => {
-    icPx[a.key] = a.intraday[29].toFixed(2)
-  })
-  const fmtMW = (n: number) => Math.round(n).toLocaleString('en-US')
-  const icF: Record<string, string> = {}
-  let icFlowSum = 0
-  let icCapSum = 0
-  let icCongN = 0
-  let icMaxUv = 0
-  let icMaxIdx = -1
+  // National KPIs with real day-on-day changes. A missing prior day leaves the chip out.
+  const bDay = balLive.ready ? balLive.day : null
+  const bPrev = balLive.ready ? balLive.prev : null
+  const dayChip = (cur: number | null | undefined, prev: number | null | undefined, dec: number) =>
+    cur != null && prev != null && prev !== 0 ? makeChip(cur - prev, ((cur - prev) / prev) * 100, dec) : null
+  const balPriceChip = balLive.ready ? dayChip(bDay?.price, bPrev?.price, 2) : { txt: '▼ −0.32 (−6.2%)', style: {} }
+  const balProcChip = balLive.ready
+    ? dayChip(bDay?.contracted_mw, bPrev?.contracted_mw, 0)
+    : { txt: '▲ +214 (+2.4%)', style: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS }
+  // The product with the most short slots (ties: the larger gap) heads the shortfall card.
+  let worst = -1
+  if (balLive.ready)
+    BAL_CODES.forEach((code, bi) => {
+      const r = balLive.rows[code]
+      const w = worst >= 0 ? balLive.rows[BAL_CODES[worst]] : undefined
+      if (r && (!w || r.short > w.short || (r.short === w.short && (r.maxGap ?? 0) > (w.maxGap ?? 0)))) worst = bi
+    })
+  const wr = worst >= 0 ? balLive.rows[BAL_CODES[worst]] : undefined
+  let balShortSub = '三次② evening ramp · 17:00–18:30'
+  let balShortChip: { txt: string; style: CSS } | null = {
+    txt: "▼ −2 slots vs y'day",
+    style: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' },
+  }
+  if (balLive.ready) {
+    balShortSub = !wr
+      ? '—'
+      : wr.short > 0 && wr.run
+        ? `${pName(worst)} · ${L === 'ja' ? '最長' : 'longest run'} ${wr.run.start}–${wr.run.end}`
+        : L === 'ja' ? '全商品で必要量を確保' : 'every product met its requirement'
+    balShortChip = null
+    if (wr && wr.prevShort != null) {
+      const d = wr.short - wr.prevShort
+      // Fewer short slots is the good direction, so the colours invert.
+      balShortChip = {
+        txt: (d > 0 ? '▲ +' : d < 0 ? '▼ −' : '± ') + Math.abs(d) + (L === 'ja' ? ' コマ 前日比' : ' slots vs prior day'),
+        style: {
+          ...CHIP_BASE,
+          background: d > 0 ? 'var(--dnBg)' : d < 0 ? 'var(--upBg)' : 'rgba(138,147,163,.14)',
+          color: d > 0 ? 'var(--dn)' : d < 0 ? 'var(--up)' : 'var(--mut)',
+        },
+      }
+    }
+  }
+
+  // ---- interconnectors: ΔkW reserved for cross-area balancing vs the limit (EPRX) ----
+  const icLines: TlLine[] = tielineLive.ready
+    ? tielineLive.lines
+    : icSample.map((l, li) => ({
+        pair: l.pair,
+        key: l.key,
+        fwd: { from: l.from, to: l.to, reserved: icSampleUtil[li].map((u) => u * l.limit), limit: icSampleUtil[li].map(() => l.limit) },
+        rev: { from: l.to, to: l.from, reserved: icSampleUtil[li].map(() => 0), limit: icSampleUtil[li].map(() => 0) },
+      }))
   const icAreaName = (k: string) => {
     const a = areaDefs.find((x) => x.key === k)
     return a ? (L === 'ja' ? a.ja : a.en) : k
   }
+  const side = (keys: string[]) => keys.map(icAreaName).join(L === 'ja' ? '・' : ' + ')
+  // Node prices: JEPX daily area averages (a sample curve only while system.json loads).
+  const px: Record<string, number> = {}
+  areas.forEach((a) => {
+    px[a.key] = areaDayLive.ready ? (areaDayLive.avg[a.key] ?? NaN) : a.intraday[29]
+  })
+  const sidePx = (keys: string[]) => {
+    const xs = keys.map((k) => px[k]).filter((x) => Number.isFinite(x))
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : NaN
+  }
+  const fmtMW = (n: number) => Math.round(n).toLocaleString('en-US')
   const uColor = (val: number) =>
-    val >= 0.97 ? '#E24B4A' : val >= 0.85 ? '#EF9F27' : val >= 0.55 ? '#FAC775' : val >= 0.35 ? '#5DCAA5' : '#9FE1CB'
-  const icRows = icDefs.map((l, li) => {
-    const tl = tielineLive.ready ? tielineLive.byKey[l.key] : undefined
-    const u = tl ? tl.util : icUtil[li]
-    const capN = tl && tl.ttc != null ? tl.ttc : l.cap
-    const uNow = tl && tl.utilNow != null ? tl.utilNow : u[29]
-    const flow = uNow * capN
-    icF[l.key] = fmtMW(flow)
-    icFlowSum += flow
-    icCapSum += capN
-    if (uNow >= 0.97) icCongN++
-    if (uNow > icMaxUv) {
-      icMaxUv = uNow
-      icMaxIdx = li
+    !Number.isFinite(val) ? '#B4BCC9' : val >= 0.97 ? '#E24B4A' : val >= 0.85 ? '#EF9F27' : val >= 0.55 ? '#FAC775' : val >= 0.35 ? '#5DCAA5' : '#9FE1CB'
+  // North to south; the combined Chubu/Hokuriku/Kansai zones sit between Tokyo–Chubu and Kansai–Chugoku.
+  const IC_ORDER: Record<string, number> = { hh: 0, st: 1, fc: 2, ck: 4, sk: 5, cs: 6, kq: 7 }
+  const icRank = (ln: TlLine) => (ln.key ? (IC_ORDER[ln.key] ?? 8) : 3)
+  const icRows = [...icLines].sort((a, b) => icRank(a) - icRank(b)).map((ln) => {
+    const st = tielineStats(ln)
+    const def = ln.key ? icDefs.find((d) => d.key === ln.key) : undefined
+    const peakDir = st.peak?.rev ? ln.rev : ln.fwd
+    const route = side(peakDir.from) + ' → ' + side(peakDir.to)
+    const pct = st.peak ? Math.round(st.peak.share * 100) : 0
+    const spread = sidePx(peakDir.to) - sidePx(peakDir.from)
+    const tip = (x: (typeof st.slots)[number], i: number) => {
+      const d = x.rev ? ln.rev : ln.fwd
+      return (
+        (def?.short ?? ln.pair) + ' ' + slotLabel(i) + ' · ' +
+        (Number.isFinite(x.share) ? Math.round(x.share * 100) + '% · ' + fmtMW(x.reserved) + ' / ' + fmtMW(x.limit) + ' MW · ' + side(d.from) + ' → ' + side(d.to) : L === 'ja' ? '上限なし' : 'no limit')
+      )
     }
-    const cong = u.filter((x) => x >= 0.97).length
-    const A = (k: string) => areaDefs.find((a) => a.key === k)!
-    const nm = (k: string) => (L === 'ja' ? A(k).ja : A(k).en)
-    const spread = pxN[l.to] - pxN[l.from]
-    const pc = Math.round(uNow * 100)
     return {
-      key: l.key,
-      n1: L === 'ja' ? l.ja : l.en,
-      n2: L === 'ja' ? l.en : l.ja,
-      short: l.short,
-      route: nm(l.from) + ' → ' + nm(l.to),
-      flow: fmtMW(flow),
-      cap: fmtMW(capN),
-      pct: pc + '%',
-      barS: { display: 'block', width: pc + '%', height: '100%', borderRadius: 3, background: uColor(uNow) } as CSS,
-      spread: (spread >= 0 ? '+¥' : '−¥') + Math.abs(spread).toFixed(2),
-      congTxt: cong + ' / 48',
-      congS: (cong > 0
-        ? {
-            fontSize: 11,
-            fontWeight: 600,
-            background: 'var(--warnBg)',
-            color: 'var(--warnTx)',
-            borderRadius: 6,
-            padding: '1px 8px',
-            fontFeatureSettings: "'tnum' 1",
-            whiteSpace: 'nowrap',
-          }
-        : { fontSize: 11.5, color: 'var(--fnt)', fontFeatureSettings: "'tnum' 1", whiteSpace: 'nowrap' }) as CSS,
-      // Intraday drill-down: per-slot utilization + flow (MW), plus peak.
-      peakPct: Math.round(Math.max(...u) * 100),
-      bars: u.map((val, i) => ({
-        h: Math.max(3, Math.round(val * 100)),
-        barCol: { display: 'block', width: '100%', borderRadius: 2, background: uColor(val) } as CSS,
-        t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * capN) + ' MW',
+      key: ln.pair,
+      icKey: ln.key,
+      ln,
+      st,
+      n1: def ? (L === 'ja' ? def.ja : def.en) : side(ln.fwd.from) + ' → ' + side(ln.fwd.to),
+      n2: def ? (L === 'ja' ? def.en : def.ja) : L === 'ja' ? 'combined zone' : '合成エリア（EPRX公表単位）',
+      short: def?.short ?? ln.pair,
+      route,
+      reserved: st.peak ? fmtMW(st.peak.reserved) : '0',
+      limit: st.peak ? fmtMW(st.peak.limit) : '0',
+      pct: st.peak ? pct + '%' : '—',
+      peakAt: st.peakIdx >= 0 ? slotLabel(st.peakIdx) : '',
+      barS: { display: 'block', width: pct + '%', height: '100%', borderRadius: 3, background: uColor(st.peak?.share ?? NaN) } as CSS,
+      spread: Number.isFinite(spread) ? (spread >= 0 ? '+¥' : '−¥') + Math.abs(spread).toFixed(2) : '—',
+      atTxt: st.peak ? st.atLimit + ' / ' + st.slots.length : L === 'ja' ? '確保なし' : 'none reserved',
+      atShort: st.peak ? st.atLimit + ' / ' + st.slots.length : '—',
+      atS: shortS(st.atLimit),
+      bars: st.slots.map((x, i) => ({
+        h: Number.isFinite(x.share) ? Math.max(3, Math.round(x.share * 100)) : 3,
+        barCol: { display: 'block', width: '100%', borderRadius: 2, background: uColor(x.share) } as CSS,
+        t: tip(x, i),
       })),
-      strip: u.map((val, i) => ({
-        s: { height: 14, borderRadius: 2, background: uColor(val) } as CSS,
-        t: l.en + ' ' + slotLabel(i) + ' · ' + Math.round(val * 100) + '% · ' + fmtMW(val * capN) + ' MW',
+      strip: st.slots.map((x, i) => ({
+        s: { height: 14, borderRadius: 2, background: uColor(x.share) } as CSS,
+        t: tip(x, i),
       })),
     }
   })
-  const icMaxDef = icMaxIdx >= 0 ? icDefs[icMaxIdx] : null
-  const icMaxLabel = icMaxDef
-    ? `${L === 'ja' ? icMaxDef.ja : icMaxDef.en} · ${icAreaName(icMaxDef.from)} → ${icAreaName(icMaxDef.to)}`
-    : ''
+  const icLimited = icRows.filter((r) => r.st.peak)
+  const icAtLimit = icLimited.filter((r) => r.st.atLimit > 0)
+  const icAtSlots = icLimited.reduce((n, r) => n + r.st.atLimit, 0)
+  const icTop = icLimited.reduce<(typeof icRows)[number] | null>((a, r) => (!a || r.st.peak!.share > a.st.peak!.share ? r : a), null)
+  const icResAvg = icRows.reduce((n, r) => n + r.st.avgReserved, 0)
+  const icLimAvg = icRows.reduce((n, r) => n + r.st.avgLimit, 0)
+  // Widest JEPX area spread of the day.
+  const pxKeys = areas.map((a) => a.key).filter((k) => Number.isFinite(px[k]))
+  const pxHi = pxKeys.reduce<string | null>((a, k) => (a == null || px[k] > px[a] ? k : a), null)
+  const pxLo = pxKeys.reduce<string | null>((a, k) => (a == null || px[k] < px[a] ? k : a), null)
+  // Map: the seven physical lines drawn between node centres; the combined zones get an outline.
+  const IC_NODE: Record<string, [number, number]> = {
+    hokkaido: [885, 35], tohoku: [795, 95], tepco: [700, 170], chubu: [565, 225], hokuriku: [450, 110],
+    kansai: [425, 225], chugoku: [250, 185], shikoku: [300, 290], kyushu: [85, 265],
+  }
+  const IC_LABEL: Record<string, [number, number, 'middle' | 'end']> = {
+    hh: [826, 44, 'middle'], st: [735, 116, 'middle'], fc: [626, 178, 'middle'], ck: [337, 187, 'middle'],
+    sk: [372, 277, 'middle'], cs: [257, 242, 'end'], kq: [156, 205, 'middle'],
+  }
+  const ARROW_TXT: Record<string, string> = { '#FAC775': '#D99A2B', '#5DCAA5': '#2A9D8F', '#9FE1CB': '#2A9D8F' }
+  const limTop = Math.max(1, ...icRows.map((r) => r.st.maxLimit))
+  const icMap = icRows
+    .filter((r) => r.icKey && IC_LABEL[r.icKey])
+    .map((r) => {
+      const [x1, y1] = IC_NODE[r.ln.fwd.from[0]]
+      const [x2, y2] = IC_NODE[r.ln.fwd.to[0]]
+      const back = !!r.st.peak?.rev
+      const col = uColor(r.st.peak?.share ?? NaN)
+      const [lx, ly, anchor] = IC_LABEL[r.icKey!]
+      return {
+        key: r.icKey!,
+        x1, y1, x2, y2,
+        mx: (x1 + x2) / 2,
+        my: (y1 + y2) / 2,
+        ang: Math.round((Math.atan2(back ? y1 - y2 : y2 - y1, back ? x1 - x2 : x2 - x1) * 180) / Math.PI),
+        col,
+        arrowCol: ARROW_TXT[col] ?? col,
+        w: r.st.peak ? Math.round((2 + 5 * Math.sqrt(r.st.maxLimit / limTop)) * 10) / 10 : 1.5,
+        dash: r.st.peak ? undefined : '4 4',
+        label: r.st.peak ? r.reserved : '—',
+        title: r.n1 + ' · ' + r.route + ' · ' + r.pct,
+        lx, ly, anchor,
+        has: !!r.st.peak,
+      }
+    })
+  const icCombined = icRows.filter((r) => !r.icKey)
+  const icCombPeak = icCombined.reduce((m, r) => Math.max(m, r.st.peak?.share ?? 0), 0)
+  const icNodes = areas.map((a) => {
+    const [cx, cy] = IC_NODE[a.key]
+    return {
+      key: a.key,
+      name: a.en,
+      cx,
+      cy,
+      px: Number.isFinite(px[a.key]) ? px[a.key].toFixed(2) : '—',
+      pxCol: a.key === pxHi ? 'var(--dn)' : a.key === pxLo ? 'var(--up)' : 'var(--mut)',
+      pxBold: a.key === pxHi || a.key === pxLo,
+      acc: a.key === 'tepco',
+    }
+  })
   // ---- drivers (live fuels/FX when loaded, else fixtures) ----
   const dvLive = driversLive.ready
-  const D: { spot: number[]; jkm: number[]; ncl: number[]; fx: number[] } = dvLive
-    ? { spot: driversLive.spot, jkm: driversLive.jkm, ncl: driversLive.ncl, fx: driversLive.fx }
+  const D: Record<'spot' | DriverKey, number[]> = dvLive
+    ? { spot: driversLive.spot, lng: driversLive.lng, brent: driversLive.brent, fx: driversLive.fx }
     : drv
-  const drAvail = Math.min(D.spot.length, D.jkm.length, D.ncl.length, D.fx.length)
+  // A series without closes (e.g. before its first scrape) is left off rather than drawn as zeros.
+  const drHas: Record<DriverKey, boolean> = dvLive ? driversLive.has : { lng: true, brent: true, fx: true }
+  const drAvail = Math.min(D.spot.length, ...DRIVER_KEYS.filter((k) => drHas[k]).map((k) => D[k].length))
   const drN = Math.min({ '30D': 30, '90D': 90, '1Y': 365 }[drRange], drAvail)
   const drStep = drRange === '1Y' ? 3 : 1
   const drIdx: number[] = []
@@ -696,13 +805,10 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     return drIdx.map((d) => (arr[d] / b) * 100)
   }
   const rSpot = reb(D.spot)
-  const rJkm = reb(D.jkm)
-  const rNcl = reb(D.ncl)
-  const rFx = reb(D.fx)
+  const rDr: Record<DriverKey, number[]> = { lng: reb(D.lng), brent: reb(D.brent), fx: reb(D.fx) }
+  const drShown = (k: DriverKey) => drOn[k] && drHas[k]
   const visVals = [...rSpot]
-  if (drOn.jkm) visVals.push(...rJkm)
-  if (drOn.ncl) visVals.push(...rNcl)
-  if (drOn.fx) visVals.push(...rFx)
+  for (const k of DRIVER_KEYS) if (drShown(k)) visVals.push(...rDr[k])
   const drLo = Math.min(...visVals) - 2
   const drHi = Math.max(...visVals) + 2
   const dX = (i: number) => 46 + (i / (drIdx.length - 1)) * 898
@@ -720,42 +826,44 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     opacity: on ? 1 : 0.4,
     textDecoration: on ? 'none' : 'line-through',
   })
-  const drK = (arr: number[]) => {
+  const noCloses = L === 'ja' ? 'データ未取得' : 'no closes yet'
+  const drK = (k: DriverKey) => {
+    const arr = D[k]
     const d = arr[0] - arr[1]
-    return makeChip(d, (d / arr[1]) * 100)
+    return drHas[k]
+      ? makeChip(d, (d / arr[1]) * 100)
+      : { txt: noCloses, style: { ...CHIP_BASE, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } as CSS }
   }
-  const kJ = drK(D.jkm)
-  const kN = drK(D.ncl)
-  const kF = drK(D.fx)
-  const drCorr: Record<'jkm' | 'ncl' | 'fx', number> = {
-    jkm: dvLive && driversLive.corr.jkm != null ? driversLive.corr.jkm : drDefs[0].corr,
-    ncl: dvLive && driversLive.corr.ncl != null ? driversLive.corr.ncl : drDefs[1].corr,
-    fx: dvLive && driversLive.corr.fx != null ? driversLive.corr.fx : drDefs[2].corr,
-  }
-  const drPanel = drDefs.map((dd) => {
+  const drLast = (k: DriverKey, dec: number) => (drHas[k] ? D[k][0].toFixed(dec) : '—')
+  const kL = drK('lng')
+  const kB = drK('brent')
+  const kF = drK('fx')
+  // Live correlations are the exporter's (trailing 90 days); a sample value only stands in for sample data.
+  const drCorr = (k: DriverKey, i: number): number | null => (dvLive ? driversLive.corr[k] : drDefs[i].corr)
+  const drPanel = drDefs.map((dd, i) => {
     const arr = D[dd.key]
-    const d = arr[0] - arr[1]
-    const c = makeChip(d, (d / arr[1]) * 100)
+    const c = drK(dd.key)
     const s30: number[] = []
     for (let d2 = 29; d2 >= 0; d2--) s30.push(arr[d2])
     const mn = Math.min(...s30)
     const mx = Math.max(...s30)
-    const spark = s30
-      .map((val, i) => ((i / 29) * 64).toFixed(1) + ',' + (15.5 - ((val - mn) / (mx - mn || 1)) * 13).toFixed(1))
-      .join(' ')
+    const spark = drHas[dd.key]
+      ? s30.map((val, j) => ((j / 29) * 64).toFixed(1) + ',' + (15.5 - ((val - mn) / (mx - mn || 1)) * 13).toFixed(1)).join(' ')
+      : ''
+    const corr = drCorr(dd.key, i)
     return {
       key: dd.key,
       name: L === 'ja' ? dd.ja : dd.en,
       sub: dd.src,
       unit: dd.unit,
-      last: arr[0].toFixed(dd.dec),
+      last: drLast(dd.key, dd.dec),
       color: dd.color,
       chip: c.txt,
       chipS: { ...c.style, marginTop: 0, padding: '2px 8px' } as CSS,
       dotS: { width: 8, height: 8, borderRadius: 999, background: dd.color, flexShrink: 0 } as CSS,
       spark,
-      corr: drCorr[dd.key].toFixed(2),
-      corrBar: { display: 'block', width: Math.max(0, drCorr[dd.key]) * 100 + '%', height: '100%', borderRadius: 3, background: dd.color } as CSS,
+      corr: corr != null ? corr.toFixed(2) : '—',
+      corrBar: { display: 'block', width: Math.max(0, corr ?? 0) * 100 + '%', height: '100%', borderRadius: 3, background: dd.color } as CSS,
     }
   })
 
@@ -772,53 +880,65 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     if (latest) wsToday = latest
   }
   const tlDate = tielineLive.ready && tielineLive.date ? tielineLive.date.slice(0, 10) : null
+  const drDate = (daysAgo: number) => (dvLive && driversLive.dates[daysAgo] ? fmtDate(driversLive.dates[daysAgo]) : dateLabel(daysAgo))
+  const icDate = tlDate ?? '2026-07-01'
+  const areaDate = areaDayLive.ready && areaDayLive.date ? areaDayLive.date : icDate
 
   return {
     heatDate: wsToday,
-    balDate: balLive.ready && balLive.end ? balLive.end.slice(0, 10) : '2026-07-01',
-    icMapDate: tlDate ?? '2026-07-01',
-    icTodayDate: tlDate ?? '2026-07-02',
+    balDate: balLive.ready && balLive.date ? balLive.date : '2026-07-01',
+    icDate,
+    areaDate,
     drCloseDate: driversLive.ready && driversLive.end ? driversLive.end.slice(0, 10) : '2026-07-01',
-    icCong: icCongN,
-    icMaxU: Math.round(icMaxUv * 100),
-    icMaxLabel,
-    icSpread: (pxN.tepco - pxN.kyushu).toFixed(2),
-    icFlowTot: fmtMW(icFlowSum),
-    icCapTot: fmtMW(icCapSum),
-    icUtilTot: Math.round((icFlowSum / icCapSum) * 100),
-    icPx,
-    icF,
+    icAtN: icAtLimit.length,
+    icLimN: icLimited.length,
+    icAtChip:
+      icAtSlots > 0
+        ? L === 'ja' ? `上限到達 計${icAtSlots}コマ` : `${icAtSlots} slot${icAtSlots === 1 ? '' : 's'} at the limit in total`
+        : L === 'ja' ? '上限到達なし' : 'no line reached its limit',
+    icTopPct: icTop ? Math.round(icTop.st.peak!.share * 100) : 0,
+    icTopLabel: icTop ? `${icTop.n1} · ${icTop.route}` : '—',
+    icTopChip: icTop ? `${L === 'ja' ? 'ピーク' : 'peak'} ${icTop.peakAt} · ${icTop.reserved} / ${icTop.limit} MW` : '—',
+    icSpread: pxHi && pxLo ? '¥' + (px[pxHi] - px[pxLo]).toFixed(2) : '—',
+    icSpreadSub: pxHi && pxLo ? `${icAreaName(pxHi)} vs ${icAreaName(pxLo)} · ${L === 'ja' ? '日平均' : 'daily average'} ${areaDate}` : '—',
+    icResAvg: fmtMW(icResAvg),
+    icLimAvg: fmtMW(icLimAvg),
+    icResPct: icLimAvg > 0 ? Math.round((icResAvg / icLimAvg) * 100) : 0,
     icRows,
-    icWarnChip: { ...CHIP_BASE, background: 'var(--dnBg)', color: 'var(--dn)' } as CSS,
+    icMap,
+    icNodes,
+    icCombN: icCombined.length,
+    icCombPeak: Math.round(icCombPeak * 100),
     icChipN: { ...CHIP_BASE, background: 'rgba(138,147,163,.14)', color: 'var(--mut)' } as CSS,
+    icWarnChip: { ...CHIP_BASE, background: icAtSlots > 0 ? 'var(--dnBg)' : 'rgba(138,147,163,.14)', color: icAtSlots > 0 ? 'var(--dn)' : 'var(--mut)' } as CSS,
     dr30S: segBase(drRange === '30D'),
     dr90S: segBase(drRange === '90D'),
     dr1yS: segBase(drRange === '1Y'),
     drSpotPts: dPts(rSpot),
-    drJkmPts: dPts(rJkm),
-    drNclPts: dPts(rNcl),
-    drFxPts: dPts(rFx),
-    drJkmOp: drOn.jkm ? 1 : 0,
-    drNclOp: drOn.ncl ? 1 : 0,
-    drFxOp: drOn.fx ? 1 : 0,
-    drJkmLegS: drLeg(drOn.jkm),
-    drNclLegS: drLeg(drOn.ncl),
-    drFxLegS: drLeg(drOn.fx),
+    drLngPts: drHas.lng ? dPts(rDr.lng) : '',
+    drBrentPts: drHas.brent ? dPts(rDr.brent) : '',
+    drFxPts: drHas.fx ? dPts(rDr.fx) : '',
+    drLngOp: drShown('lng') ? 1 : 0,
+    drBrentOp: drShown('brent') ? 1 : 0,
+    drFxOp: drShown('fx') ? 1 : 0,
+    drLngLegS: drLeg(drShown('lng')),
+    drBrentLegS: drLeg(drShown('brent')),
+    drFxLegS: drLeg(drShown('fx')),
     drG1: gVal(69),
     drG2: gVal(138),
     drG3: gVal(207),
     drG4: gVal(276),
     dr100y: Math.round(y100 * 10) / 10,
     dr100op: y100 >= 14 && y100 <= 290 ? 0.8 : 0,
-    drX0: dateLabel(drN - 1),
-    drX1: dateLabel(Math.floor(drN / 2)),
-    drX2: dateLabel(0),
-    drJkmV: D.jkm[0].toFixed(2),
-    drJkmC: kJ.txt,
-    drNclV: D.ncl[0].toFixed(1),
-    drNclC: kN.txt,
-    drNclCS: kN.style,
-    drFxV: D.fx[0].toFixed(2),
+    drX0: drDate(drN - 1),
+    drX1: drDate(Math.floor(drN / 2)),
+    drX2: drDate(0),
+    drLngV: drLast('lng', 2),
+    drLngC: kL.txt,
+    drBrentV: drLast('brent', 2),
+    drBrentC: kB.txt,
+    drBrentCS: kB.style,
+    drFxV: drLast('fx', 2),
     drFxC: kF.txt,
     drFxCS: kF.style,
     drPanel,
@@ -859,10 +979,14 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     // the export window, `Weekly`/`Monthly` are floored so a line can be drawn.
     rangeClampNote: rangeClampNote(gran, range),
     balRows,
-    balProcTot: balLive.ready ? Math.round(balLive.procTot).toLocaleString('en-US') : '9,321',
-    balAvgPrice: balLive.ready && balLive.avgPrice != null ? balLive.avgPrice.toFixed(2) : '4.87',
-    balD1S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
-    balD2S: { ...CHIP_BASE, background: 'var(--upBg)', color: 'var(--up)' } as CSS,
+    balProcTot: balLive.ready ? (bDay?.contracted_mw != null ? fmtInt(bDay.contracted_mw) : '—') : '9,321',
+    balAvgPrice: balLive.ready ? (bDay?.price != null ? bDay.price.toFixed(2) : '—') : '4.87',
+    balPriceChip: balPriceChip?.txt ?? null,
+    balProcChip,
+    balShort: balLive.ready ? (wr ? String(wr.short) : '—') : '3',
+    balSlots: wr ? wr.slots : 48,
+    balShortSub,
+    balShortChip,
   }
 }
 

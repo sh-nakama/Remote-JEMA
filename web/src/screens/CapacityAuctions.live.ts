@@ -7,7 +7,7 @@
 
 import { useEffect, useState } from 'react'
 import { getSnapshot } from '../lib/data'
-import type { LtdaRow, MaRow } from './CapacityAuctions.data'
+import type { LtdaRound, LtdaRow, MaRow } from './CapacityAuctions.data'
 
 export interface CapacityLive {
   ready: boolean
@@ -15,19 +15,20 @@ export interface CapacityLive {
   failed: boolean
   ma: MaRow[]
   ltda: LtdaRow[]
+  rounds: LtdaRound[]
 }
 
 export function useCapacityLive(): CapacityLive {
-  const [state, setState] = useState<CapacityLive>({ ready: false, failed: false, ma: [], ltda: [] })
+  const [state, setState] = useState<CapacityLive>({ ready: false, failed: false, ma: [], ltda: [], rounds: [] })
   useEffect(() => {
     let alive = true
     Promise.all([
       getSnapshot<{ results: MaRow[] }>('capacity/main_auction.json'),
-      getSnapshot<{ rows: LtdaRow[] }>('capacity/ltda.json'),
+      getSnapshot<{ rows: LtdaRow[]; rounds?: LtdaRound[] }>('capacity/ltda.json'),
     ])
       .then(([ma, ltda]) => {
         if (!alive) return
-        setState({ ready: true, failed: false, ma: ma.results || [], ltda: ltda.rows || [] })
+        setState({ ready: true, failed: false, ma: ma.results || [], ltda: ltda.rows || [], rounds: ltda.rounds || [] })
       })
       .catch(() => {
         if (alive) setState((s) => ({ ...s, failed: true }))

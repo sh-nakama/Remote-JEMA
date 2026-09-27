@@ -74,13 +74,9 @@ BALANCING_PRODUCTS: list[tuple[str, str]] = [
     ("3-2", "Tertiary 2"),
 ]
 
-# Fuel/FX drivers: (frontend key, fuels_daily ticker). `lng` (JKM=F, real JKM LNG) and
-# `brent` are the real series; `jkm` (Henry Hub) and `ncl` (Brent) are the old keys the
-# current web build reads, kept until it switches. There is no Newcastle coal series.
-DRIVERS: list[tuple[str, str]] = [
-    ("lng", "JKM=F"), ("brent", "BZ=F"), ("fx", "JPY=X"), ("jkm", "NG=F"), ("ncl", "BZ=F"),
-]
-DRIVER_UNITS: dict[str, str] = {"lng": "$/MMBtu", "brent": "$/bbl", "fx": "", "jkm": "$/MMBtu", "ncl": "$/bbl"}
+# Fuel/FX drivers: (frontend key, fuels_daily ticker). yfinance has no Newcastle coal series.
+DRIVERS: list[tuple[str, str]] = [("lng", "JKM=F"), ("brent", "BZ=F"), ("fx", "JPY=X")]
+DRIVER_UNITS: dict[str, str] = {"lng": "$/MMBtu", "brent": "$/bbl", "fx": ""}
 # The web's longest drivers range is 1Y, and it labels the correlation "90d".
 DRIVERS_WINDOW_DAYS = 400
 DRIVERS_CORR_DAYS = 90
@@ -256,6 +252,7 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
         "areas_now": {},
         "areas_today": {},
         "areas_yday": {},
+        "areas_date": None,
     }
     with eng.connect() as con:
         spot = pd.read_sql_query(
@@ -317,6 +314,8 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
         aday = adays[-1]
         aprev = adays[-2] if len(adays) > 1 else None
         today_rows = area_df[area_df["date"] == aday]
+        # The area-price day can differ from the system-price day (`date_today`).
+        payload["areas_date"] = aday
         # Per-area intraday on the 48-slot grid (feeds the Market Pulse sparklines).
         apiv = today_rows.pivot_table(index="time", columns="area", values="price", aggfunc="last")
         payload["areas_today"] = {str(area): _slot_col(apiv, area) for area in apiv.columns}
@@ -334,8 +333,8 @@ def export_system(out: Path, anchor: date, db_path: str | None = None) -> dict:
 
 
 def export_balancing(out: Path, anchor: date) -> dict:
-    """Write ``balancing/{code}/{area}/{level}.json`` + ``balancing_stats/{code}/{area}.json``
-    for the 5 exported adjustment-power products (需給調整市場 / EPRX)."""
+    """Write ``balancing/{code}/{area}/{level}.json`` for the 5 exported adjustment-power
+    products (需給調整市場 / EPRX), plus the national ``balancing_summary.json``."""
     files = 0
     total_bytes = 0
     for code, name in BALANCING_PRODUCTS:
@@ -356,22 +355,6 @@ def export_balancing(out: Path, anchor: date) -> dict:
                 }
                 total_bytes += _write_json(out / "balancing" / code / area / f"{level}.json", payload)
                 files += 1
-            s_start = anchor - timedelta(days=STATS_WINDOW_DAYS)
-            stats = read.balancing_period_stats(name, area, s_start, anchor)
-            total_bytes += _write_json(
-                out / "balancing_stats" / code / f"{area}.json",
-                {
-                    "schema": SCHEMA_VERSION,
-                    "product_code": code,
-                    "product": name,
-                    "area": area,
-                    "window_days": STATS_WINDOW_DAYS,
-                    "start": s_start.isoformat(),
-                    "end": anchor.isoformat(),
-                    **stats,
-                },
-            )
-            files += 1
     # Same wide lookback as the tieline: the anchor follows supply, which runs past EPRX.
     p = Path(EPRX_BALANCING_PARQUET)
     recent = (
@@ -625,15 +608,24 @@ def _md_clean(t: str) -> str:
     return t.replace("**", "").replace("`", "").strip()
 
 
+# NotebookLM ends some answers with an offer of further work ("💡 Would you like a
+# breakdown…", "📊 I can compile…"). It is chat, not part of the meeting summary.
+_NOTEBOOK_OFFER = re.compile(
+    r"^\W*(would you like|do you want|shall i|should i|i can |i could|if you('d| would) like|let me know)", re.I
+)
+
+
 def parse_digest_answer(answer: str | None) -> tuple[list[dict], str]:
     """Split the English digest Markdown into ``[{h, items[]}]`` + a lead preview.
 
     The answer is a lead paragraph followed by ``### Section`` headers with
-    ``* bullet`` items (see policy_meeting.digest_en_json.answer).
+    ``* bullet`` items (see policy_meeting.digest_en_json.answer). Without a lead
+    paragraph the preview is the first bullet.
     """
     sections: list[dict] = []
     cur: dict = {"h": "Summary", "items": []}
     lead = ""
+    first_item = ""
     for raw in (answer or "").split("\n"):
         line = raw.strip()
         if not line:
@@ -642,18 +634,18 @@ def parse_digest_answer(answer: str | None) -> tuple[list[dict], str]:
             if cur["items"]:
                 sections.append(cur)
             cur = {"h": _md_clean(line.lstrip("#").strip()), "items": []}
-        elif line[0] in "*-•":
-            item = _md_clean(line.lstrip("*-• ").strip())
-            if item:
-                cur["items"].append(item)
-        else:
-            item = _md_clean(line)
-            if item:
-                lead = lead or item
-                cur["items"].append(item)
+            continue
+        is_bullet = line[0] in "*-•"
+        item = _md_clean(line.lstrip("*-• ").strip() if is_bullet else line)
+        if not item or _NOTEBOOK_OFFER.search(item):
+            continue
+        if not is_bullet:
+            lead = lead or item
+        first_item = first_item or item
+        cur["items"].append(item)
     if cur["items"]:
         sections.append(cur)
-    return sections, lead
+    return sections, lead or first_item
 
 
 def parse_briefing(md: str | None) -> tuple[list[dict], str, str]:

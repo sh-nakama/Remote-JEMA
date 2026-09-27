@@ -30,8 +30,8 @@ export const CHIP_BASE: CSS = {
  */
 export const CHIP_FLAT_PCT = 0.5
 
-/** Delta chip from an absolute change `d` and its percent change `p`. */
-export function makeChip(d: number, p: number): Chip {
+/** Delta chip from an absolute change `d` (shown to `dec` places) and its percent change `p`. */
+export function makeChip(d: number, p: number, dec = 2): Chip {
   if (Math.abs(p) < CHIP_FLAT_PCT)
     return {
       txt: '— ±0.0%',
@@ -40,7 +40,7 @@ export function makeChip(d: number, p: number): Chip {
   const up = d > 0
   const sgn = up ? '+' : '−'
   return {
-    txt: (up ? '▲ ' : '▼ ') + sgn + Math.abs(d).toFixed(2) + ' (' + sgn + Math.abs(p).toFixed(1) + '%)',
+    txt: (up ? '▲ ' : '▼ ') + sgn + Math.abs(d).toFixed(dec) + ' (' + sgn + Math.abs(p).toFixed(1) + '%)',
     style: {
       ...CHIP_BASE,
       background: up ? 'var(--upBg)' : 'var(--dnBg)',
