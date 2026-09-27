@@ -781,7 +781,8 @@ _FETCH_REMEDIES: dict[str, str] = {
     "deadline_exceeded": "The per-call time budget ran out. Raise the budget for this pass.",
     "not_found": "404 — the committee page has moved or been retired. "
                  "Fix the URL (`policy add --url ...`) or archive it (`policy archive <key>`).",
-    "server_error": "The host returned 5xx/429 past the transient retries. Usually temporary.",
+    "server_error": "The host returned 5xx/429 (or METI's rate-limit 405) past the transient "
+                    "retries. Usually temporary.",
     "network_error": "DNS/TLS/connection failure. Check connectivity to the host.",
     "unexpected_status": "An HTTP status this layer has no handling for — inspect the detail.",
     "parse_error": "Fetched fine but the body could not be parsed — the page layout likely changed.",

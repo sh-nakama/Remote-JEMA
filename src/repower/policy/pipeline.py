@@ -112,7 +112,7 @@ _TRANSIENT_FETCH_KINDS = frozenset({
     "blocked_403",           # host refused this client outright
     "deadline_exceeded",     # ran out of time, not out of document
     "network_error",         # DNS/TLS/connection/timeout
-    "server_error",          # 5xx/429 that survived the transient retries
+    "server_error",          # 5xx/429 (or METI's 405) that survived the transient retries
 })
 
 # Fetch outcomes that mean the *host* has turned on us, so the rest of this

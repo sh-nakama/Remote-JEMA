@@ -489,7 +489,7 @@ def _exists(url: str) -> bool | None:
 
     # HEAD inconclusive (403/405/redirect/error) — confirm via curl_cffi, then plain GET.
     try:
-        from curl_cffi import requests as cr  # type: ignore
+        from curl_cffi import requests as cr
 
         pace_host(url)
         cr_r = cr.get(url, impersonate="chrome", timeout=REQUEST_TIMEOUT, headers=headers)

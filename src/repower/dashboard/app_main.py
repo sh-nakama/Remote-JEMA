@@ -37,16 +37,12 @@ from repower.dashboard.i18n import (
     T,
     metric_labels,
 )
-
-# Salvaged legacy helpers + views (Drivers / Analyses).
-from repower.dashboard.legacy import (
+from repower.dashboard.read import (
+    MIX_COLUMNS,
     _analyses,
     _db_session,
     _fuels,
     _jepx_area,
-)
-from repower.dashboard.read import (
-    MIX_COLUMNS,
     balancing_export_frame,
     balancing_period_stats_cached,
     load_balancing_grid,

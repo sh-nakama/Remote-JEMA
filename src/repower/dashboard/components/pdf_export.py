@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 from matplotlib import font_manager
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.lines import Line2D
+from matplotlib.ticker import MaxNLocator
 
 from repower.dashboard.theme import (
     BRAND_NAVY as NAVY,
@@ -109,7 +111,7 @@ def _draw_volume_ax(ax, region_df, color_map, label_map, vol_metrics):
         ax.step(dt, vals, where="post",
                 color=c, linewidth=0.8, label=label_map.get(m, m))
     ax.tick_params(labelsize=5, length=2, pad=1)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(4, integer=False))
+    ax.yaxis.set_major_locator(MaxNLocator(4, integer=False))
     ax.set_ylabel("MW", fontsize=5, labelpad=2)
 
 
@@ -126,7 +128,7 @@ def _draw_price_ax(ax, region_df, color_map, label_map, price_metrics):
         ax.step(region_df["datetime"], vals, where="post",
                 color=c, linewidth=lw, label=label_map.get(m, m))
     ax.tick_params(labelsize=5, length=2, pad=1)
-    ax.yaxis.set_major_locator(plt.MaxNLocator(4, integer=False))
+    ax.yaxis.set_major_locator(MaxNLocator(4, integer=False))
     ax.set_ylabel("¥/kW·30min", fontsize=5, labelpad=2)
 
 
@@ -242,7 +244,7 @@ def generate_pdf(
             for m in all_metrics:
                 c = color_map.get(m, GREY)
                 lbl = label_map.get(m, m)
-                h = plt.Line2D([0], [0], color=c, linewidth=1.2)
+                h = Line2D([0], [0], color=c, linewidth=1.2)
                 handles.append(h)
                 labels.append(lbl)
             fig.legend(
@@ -359,7 +361,7 @@ def generate_wholesale_pdf(
                 ax_demand.plot(rdf["datetime"], rdf["area_demand_mw"],
                                color=demand_color, linewidth=0.8)
                 ax_demand.tick_params(labelsize=5, length=2, pad=1)
-                ax_demand.yaxis.set_major_locator(plt.MaxNLocator(4, integer=False))
+                ax_demand.yaxis.set_major_locator(MaxNLocator(4, integer=False))
                 ax_demand.set_ylabel("MW", fontsize=5, labelpad=2)
 
             if not has_price:
@@ -371,7 +373,7 @@ def generate_wholesale_pdf(
                 ax_price.plot(rdf["datetime"], rdf["price"],
                               color=price_color, linewidth=0.8)
                 ax_price.tick_params(labelsize=5, length=2, pad=1)
-                ax_price.yaxis.set_major_locator(plt.MaxNLocator(4, integer=False))
+                ax_price.yaxis.set_major_locator(MaxNLocator(4, integer=False))
                 ax_price.set_ylabel("¥/kWh", fontsize=5, labelpad=2)
 
             # Area label on the left y-axis

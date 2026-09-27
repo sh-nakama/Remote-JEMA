@@ -1419,7 +1419,7 @@ This appendix is the honesty layer of the spec. It maps every data element the d
 | Data element | Source | Status | Units | Cadence | Risk / latency |
 |---|---|---|---|---|---|
 | Brent crude / Henry Hub NG / USD·JPY | `FuelDaily` — `ticker ∈ {BZ=F, NG=F, JPY=X}`, `.close`, `.currency` via `fuels_futures.py` (yfinance) | ✅ | USD/bbl, USD proxy, JPY/USD | Daily close, rolling ~7-day cache | yfinance is a **third-party, unstable** feed — gaps/holidays common. NG=F is a *proxy* for JKM, not JKM itself; label carefully. |
-| JEPX ↔ Brent correlation | Pearson r **derived** from `JepxAreaPrice30m` × `FuelDaily` (`legacy.py`) | 🟡 | r (−1..1) | Read-time | Correlation only; not a causal/forecast signal. |
+| JEPX ↔ Brent correlation | Pearson r **derived** from `JepxAreaPrice30m` × `FuelDaily` (`read.py`) | 🟡 | r (−1..1) | Read-time | Correlation only; not a causal/forecast signal. |
 
 #### Analyses — PARTIALLY exists (omitted from nav; see 2.1 / 5.10)
 

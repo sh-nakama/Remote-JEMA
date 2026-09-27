@@ -124,7 +124,7 @@ FETCH_KINDS: tuple[str, ...] = (
     "circuit_open",          # host recently blocked us repeatedly; cooling down
     "deadline_exceeded",     # per-call time budget ran out
     "unexpected_status",     # a status this layer has no handling for
-    "server_error",          # 5xx/429 surviving the transient retries
+    "server_error",          # 5xx/429 (or METI's 405) surviving the transient retries
     "network_error",         # DNS/TLS/connection/timeout
     "parse_error",           # fetched fine, but the body made no sense
 )
@@ -153,7 +153,7 @@ def classify(exc: BaseException) -> str:
             return "not_found"
         if code == 403:
             return "blocked_403"
-        if code == 429 or 500 <= code < 600:
+        if _is_transient_status(str(exc.request.url), code):
             return "server_error"
         return "unexpected_status"
     return "network_error"
@@ -521,9 +521,9 @@ _CHALLENGE_RETRY_DELAYS: tuple[float, ...] = (5.0, 15.0, 30.0)
 # pace instead of milliseconds after the block.
 _CHALLENGE_INITIAL_DELAY: float = 2.0
 
-# Transient-failure retries (429 / 5xx) on the plain-httpx path. Deliberately
-# short and few: unlike the WAF ladder these are for a server having a moment, and
-# every one competes with the rest of the pass for the run's time budget.
+# Transient-failure retries (429 / 5xx, and METI's 405) on the plain-httpx path.
+# Deliberately short and few: unlike the WAF ladder these are for a server having a
+# moment, and every one competes with the rest of the pass for the run's time budget.
 _TRANSIENT_MAX_RETRIES = 3
 _TRANSIENT_BASE_DELAY: float = 1.0
 # Jitter spreads retries so a batch of URLs failing together doesn't resynchronise
@@ -532,6 +532,17 @@ _TRANSIENT_JITTER: float = 0.25
 # Ceiling for any single wait, including a server-supplied Retry-After. A server
 # is allowed to ask for an hour; we are not willing to hold the run that long.
 _RETRY_AFTER_CAP: float = 60.0
+
+# METI's edge answers sustained load with nginx "405 Not Allowed" and serves the same URL a
+# few seconds later, so there it is a rate limit. Anywhere else a 405 is a real error.
+_TRANSIENT_405_HOSTS: frozenset[str] = frozenset({"www.meti.go.jp", "www.egc.meti.go.jp"})
+
+
+def _is_transient_status(url: str, code: int) -> bool:
+    """True for statuses worth retrying: 429, 5xx, and 405 from a METI host."""
+    if code == 429 or 500 <= code < 600:
+        return True
+    return code == 405 and _host_key(url) in _TRANSIENT_405_HOSTS
 
 # Sent on the plain-httpx path only. The curl_cffi path deliberately does NOT get
 # this header: ``impersonate="chrome"`` already supplies the User-Agent matching
@@ -985,7 +996,7 @@ def _parse_retry_after(value: str | None) -> float | None:
 
 
 def _transient_delay(resp: httpx.Response, attempt: int) -> float:
-    """How long to wait before retrying a 429/5xx.
+    """How long to wait before retrying a transient status (see _is_transient_status).
 
     A server-supplied ``Retry-After`` wins (capped, so a hostile or mistaken
     header can't park the run for an hour); otherwise exponential backoff with
@@ -1009,7 +1020,7 @@ def _do_get(
     """Return ``(status_code, content|None, etag, last_modified)``. Raises on
     unexpected HTTP/network errors (after trying the curl fallback if allowed).
 
-    429 and 5xx are retried within the deadline (honouring ``Retry-After``); a
+    429, 5xx and METI's 405 are retried within the deadline (honouring ``Retry-After``); a
     host that keeps blocking us trips its circuit breaker and subsequent calls
     fail immediately instead of re-walking the ladder.
     """
@@ -1110,9 +1121,9 @@ def _do_get(
                 resp.headers.get("ETag"),
                 resp.headers.get("Last-Modified"),
             )
-        # 429/5xx are transient by definition: a single blip would otherwise lose
-        # this month/year file until some later run happens to succeed.
-        transient = resp.status_code == 429 or 500 <= resp.status_code < 600
+        # Transient statuses would otherwise lose this month/year file until some
+        # later run happens to succeed.
+        transient = _is_transient_status(url, resp.status_code)
         if transient and retry_transient and attempt < _TRANSIENT_MAX_RETRIES:
             delay = _transient_delay(resp, attempt)
             if deadline.allows(delay):
@@ -1195,7 +1206,7 @@ def _curl_get(
     *deadline* so a hostile host can't consume the run.
     """
     try:
-        from curl_cffi import requests as cr  # type: ignore
+        from curl_cffi import requests as cr
     except Exception:
         return None
 
