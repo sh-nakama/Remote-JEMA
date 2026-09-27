@@ -317,7 +317,40 @@ fixed.
   Balancing's "Shortfall slots" card; the interconnector node prices, spreads and "Widest area
   spread" (from fixture area prices); the four lines the tieline export can't map (`kc`, `hc`,
   `hk`, `sk`). Capacity: the LTDA KPI cards and the "Policy Thread" rows (`polData`). Wire each
-  to real data or label it before relying on it.
+  to real data or label it before relying on it. The exports now carry real figures for all of
+  them (`balancing_summary.json`; the tieline lines' `from`/`to` and reserved/limit arrays;
+  `drivers.json`'s `lng`/`brent`; `ltda.json`'s `rounds`); only the web still has to read them.
+- **The tieline data is reserved balancing capacity, not flow.** EPRX publishes, per line and
+  slot, the ΔkW *reserved* on it for cross-area balancing procurement (`reserved_fwd/rev`)
+  against the *limit* on such reservations (`upper_limit_fwd/rev`). Nothing in the dataset is a
+  physical flow or a TTC, so don't label it "flow", "TTC" or "congested". Two shapes to expect:
+  since 2026-03-14 the Chubu/Hokuriku/Kansai lines are published as **combined zones**
+  (`Chubu → Hokuriku-Kansai`, `Chubu-Hokuriku → Kansai`, `Chubu-Kansai → Hokuriku`), which
+  `export_web._pair_areas` splits into the `from`/`to` area lists; and `Kansai → Shikoku` has a
+  zero limit and zero reservation in every slot — a real "none reserved", not missing data.
+- **`balancing_stats/` and `balancing_summary.json` answer different questions.** The stats files
+  are per-area averages over a 30-day window; the summary is the latest EPRX day (and the day
+  before, for day-on-day changes), as averages over the day's slots of the *national* per-slot
+  totals, with prices weighted by contracted MW. A slot is "short" when national contracted MW
+  trails the requirement by more than `_SHORT_TOLERANCE_MW`. Caption each for what it is.
+- **The drivers are the real series now; the old keys were proxies.** `drivers.json` used to
+  put Henry Hub (`NG=F`) under a "JKM" label and Brent (`BZ=F`) under "Newcastle coal $/t".
+  `lng` is JKM (`JKM=F`) and `brent` is Brent; yfinance has no Newcastle coal series at all.
+  `jkm`/`ncl` stay only until the web switches keys. The export is bounded to
+  `DRIVERS_WINDOW_DAYS` (the web's longest range is 1Y) and the correlation is over the trailing
+  `DRIVERS_CORR_DAYS`, because the web labels it "90d corr" — change the label and the constant
+  together.
+- **Fuel tickers back-fill themselves.** `tickers_to_backfill` asks for `BACKFILL_DAYS` of
+  history for any ticker whose stored history starts later than that window (a new ticker, or
+  the table's May 2026 start), so adding one to `TICKERS` needs no manual backfill. A ticker
+  whose market genuinely started inside the window is re-fetched in full on every run; that is
+  one larger request, not a fault.
+- **The capacity figures are curated, so each needs its source.** OCCTO publishes no structured
+  feed. `capacity_data.LTDA_TECH` is summed per technology from each round's 落札電源一覧
+  appendix (per-plant listing) and checked by a test against the headline totals in the round's
+  results PDF. The previous LTDA figures came from a design mockup and were wrong (14.1 GW
+  cumulative against the real 23.4 GW). OCCTO's PDFs are AES-encrypted: pypdf needs
+  `cryptography` to read them.
 - The fixtures' frozen dates (2026-07-01/02) survive only as **loading fallbacks** for MarketData's
   caption dates (`wsToday`, `balDate`, `icMapDate`, `icTodayDate`, `drCloseDate`); each is
   replaced by the snapshot's own date once it loads. Don't use them as a fallback in new

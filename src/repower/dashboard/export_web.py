@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 import pandas as pd  # noqa: E402
 from sqlalchemy import RowMapping, func, select, text  # noqa: E402
 
+from repower.config import EPRX_BALANCING_PARQUET  # noqa: E402
 from repower.dashboard import read  # noqa: E402
 from repower.db import (  # noqa: E402
     DemandSupply30m,
@@ -73,9 +74,16 @@ BALANCING_PRODUCTS: list[tuple[str, str]] = [
     ("3-2", "Tertiary 2"),
 ]
 
-# Fuel/FX drivers: (frontend key, fuels_daily ticker). NG=F (Henry Hub gas) and
-# BZ=F (Brent crude) are PROXIES for JKM LNG / Newcastle coal (data-quality caveat).
-DRIVERS: list[tuple[str, str]] = [("jkm", "NG=F"), ("ncl", "BZ=F"), ("fx", "JPY=X")]
+# Fuel/FX drivers: (frontend key, fuels_daily ticker). `lng` (JKM=F, real JKM LNG) and
+# `brent` are the real series; `jkm` (Henry Hub) and `ncl` (Brent) are the old keys the
+# current web build reads, kept until it switches. There is no Newcastle coal series.
+DRIVERS: list[tuple[str, str]] = [
+    ("lng", "JKM=F"), ("brent", "BZ=F"), ("fx", "JPY=X"), ("jkm", "NG=F"), ("ncl", "BZ=F"),
+]
+DRIVER_UNITS: dict[str, str] = {"lng": "$/MMBtu", "brent": "$/bbl", "fx": "", "jkm": "$/MMBtu", "ncl": "$/bbl"}
+# The web's longest drivers range is 1Y, and it labels the correlation "90d".
+DRIVERS_WINDOW_DAYS = 400
+DRIVERS_CORR_DAYS = 90
 
 # EPRX tieline markets and pair->interconnector-key mapping. Pair strings use " → ".
 # 7 of 10 pairs map cleanly to the frontend `icDefs`; the 3 Chubu/Hokuriku/Kansai
@@ -94,6 +102,35 @@ PAIR_TO_IC: dict[str, str] = {
 
 def _norm_pair(pair: str) -> str:
     return pair.replace(" ", "").replace("→", "->")
+
+
+# EPRX's area names in tieline pair strings → the app's area keys.
+_TIELINE_AREA_KEYS: dict[str, str] = {
+    "Hokkaido": "hokkaido", "Tohoku": "tohoku", "Tokyo": "tepco", "Chubu": "chubu",
+    "Hokuriku": "hokuriku", "Kansai": "kansai", "Chugoku": "chugoku", "Shikoku": "shikoku",
+    "Kyushu": "kyushu",
+}
+_TIELINE_SERIES: dict[str, str] = {
+    "reserved_fwd": "reserved_fwd", "reserved_rev": "reserved_rev",
+    "limit_fwd": "upper_limit_fwd", "limit_rev": "upper_limit_rev",
+}
+
+
+def _pair_areas(pair: str) -> tuple[list[str], list[str]]:
+    """``"Chubu-Hokuriku → Kansai"`` → ``(["chubu", "hokuriku"], ["kansai"])``."""
+    src, dst = pair.split("→")
+    return (
+        [_TIELINE_AREA_KEYS[n.strip()] for n in src.split("-")],
+        [_TIELINE_AREA_KEYS[n.strip()] for n in dst.split("-")],
+    )
+
+
+def _num(v: object, digits: int = 1) -> float | None:
+    """A finite number rounded to *digits*, else None."""
+    if v is None or isinstance(v, str):
+        return None
+    f = float(v)  # type: ignore[arg-type]
+    return None if math.isnan(f) or math.isinf(f) else round(f, digits)
 
 
 def _jsonable(obj: object) -> object:
@@ -335,29 +372,136 @@ def export_balancing(out: Path, anchor: date) -> dict:
                 },
             )
             files += 1
+    # Same wide lookback as the tieline: the anchor follows supply, which runs past EPRX.
+    p = Path(EPRX_BALANCING_PARQUET)
+    recent = (
+        pd.read_parquet(p, filters=[
+            ("product", "in", [name for _, name in BALANCING_PRODUCTS]),
+            ("date", ">=", (anchor - timedelta(days=60)).isoformat()),
+            ("date", "<=", anchor.isoformat()),
+        ])
+        if p.exists()
+        else pd.DataFrame()
+    )
+    total_bytes += _write_json(out / "balancing_summary.json", balancing_daily_summary(recent))
+    files += 1
     return {"files": files, "bytes": total_bytes}
 
 
+# A slot counts as short when national contracted MW trails the requirement by more than
+# this; EPRX publishes MW with three decimals, so exact equality is not a safe test.
+_SHORT_TOLERANCE_MW = 0.5
+
+
+def _balancing_day(wide: pd.DataFrame) -> dict:
+    """Averages over the slots of the national (all-area) totals, summed across products."""
+    per_slot = wide.groupby(["product", "time"]).agg(
+        required=("demand_mw", "sum"), offered=("bid_volume_mw", "sum"), contracted=("contracted_mw", "sum"),
+    )
+    per_product = per_slot.groupby(level="product").mean()
+    priced = wide[wide["price_avg"].notna() & (wide["contracted_mw"] > 0)]
+    weight = priced["contracted_mw"].sum()
+    return {
+        "required_mw": _num(per_product["required"].sum()),
+        "offered_mw": _num(per_product["offered"].sum()),
+        "contracted_mw": _num(per_product["contracted"].sum()),
+        "price": _num((priced["price_avg"] * priced["contracted_mw"]).sum() / weight, 3) if weight > 0 else None,
+    }
+
+
+def _shortfall(wide: pd.DataFrame) -> dict:
+    """How many of one product-day's slots were short nationally, the worst gap, and the longest run."""
+    slots = wide.groupby("time").agg(required=("demand_mw", "sum"), contracted=("contracted_mw", "sum")).sort_index()
+    gap = slots["required"] - slots["contracted"]
+    short = list(gap > _SHORT_TOLERANCE_MW)
+    step = timedelta(minutes=24 * 60 // max(len(slots), 1))
+    best_len, best_start, start = 0, 0, None
+    for i, is_short in enumerate([*short, False]):
+        if is_short and start is None:
+            start = i
+        elif not is_short and start is not None:
+            if i - start > best_len:
+                best_len, best_start = i - start, start
+            start = None
+    run = None
+    if best_len:
+        end = datetime.strptime(slots.index[best_start + best_len - 1], "%H:%M") + step
+        run = {
+            "start": slots.index[best_start],
+            "end": "24:00" if end.day > 1 else end.strftime("%H:%M"),
+            "slots": best_len,
+        }
+    return {
+        "slots": len(slots),
+        "short_slots": sum(short),
+        "max_gap_mw": _num(gap.max()) if any(short) else 0.0,
+        "longest_run": run,
+    }
+
+
+def balancing_daily_summary(df: pd.DataFrame, days: int = 2) -> dict:
+    """National figures for the last *days* EPRX dates, per exported product and overall.
+
+    *df* is the long balancing frame (product, area, date, time, metric, value). MW figures
+    are averages over the day's slots of the national (all-area) total; prices are weighted
+    by contracted MW. Each product's latest day also carries its per-area breakdown.
+    """
+    names = [name for _, name in BALANCING_PRODUCTS]
+    empty: dict = {"schema": SCHEMA_VERSION, "dates": [], "national": {}, "products": []}
+    if df.empty:
+        return empty
+    df = df[df["product"].isin(names)].assign(date=lambda d: d["date"].astype(str))
+    dates = sorted(df["date"].unique())[-days:]
+    if not dates:
+        return empty
+    wide = (
+        df[df["date"].isin(dates)]
+        .pivot_table(index=["product", "area", "date", "time"], columns="metric", values="value", aggfunc="first")
+        .reset_index()
+    )
+    for col in ("demand_mw", "bid_volume_mw", "contracted_mw", "price_avg"):
+        if col not in wide:
+            wide[col] = float("nan")
+    products = []
+    for code, name in BALANCING_PRODUCTS:
+        pw = wide[wide["product"] == name]
+        if pw.empty:
+            continue
+        by_day = {str(d): {**_balancing_day(g), **_shortfall(g)} for d, g in pw.groupby("date")}
+        latest = pw[pw["date"] == max(by_day)]
+        areas = [{"area": str(a), **_balancing_day(g)} for a, g in latest.groupby("area")]
+        areas.sort(key=lambda r: r["contracted_mw"] or 0, reverse=True)
+        products.append({"code": code, "product": name, "days": by_day, "areas": areas})
+    return {
+        "schema": SCHEMA_VERSION,
+        "dates": dates,
+        "national": {str(d): _balancing_day(g) for d, g in wide.groupby("date")},
+        "products": products,
+    }
+
+
 def export_drivers(out: Path, anchor: date, db_path: str | None = None) -> dict:
-    """Write ``drivers.json``: daily fuel/FX series (JKM/Newcastle proxies + USD/JPY)
-    aligned with the daily-mean JEPX system price + their Pearson correlation.
+    """Write ``drivers.json``: the last DRIVERS_WINDOW_DAYS of daily fuel/FX closes aligned
+    with the daily-mean JEPX system price, and each series' Pearson correlation with it
+    over the trailing DRIVERS_CORR_DAYS.
 
     Series are chronological (oldest→newest); the frontend adapter reverses them.
     """
     eng = get_engine(db_path)
+    window = {"a": anchor.isoformat(), "s": (anchor - timedelta(days=DRIVERS_WINDOW_DAYS)).isoformat()}
     with eng.connect() as con:
         fuels = pd.read_sql_query(
-            text("SELECT date, ticker, close FROM fuels_daily WHERE date <= :a ORDER BY date"),
+            text("SELECT date, ticker, close FROM fuels_daily WHERE date >= :s AND date <= :a ORDER BY date"),
             con,
-            params={"a": anchor.isoformat()},
+            params=window,
         )
         spot = pd.read_sql_query(
             text(
                 "SELECT date, AVG(system_price) AS spot FROM jepx_spot_30m "
-                "WHERE date <= :a GROUP BY date ORDER BY date"
+                "WHERE date >= :s AND date <= :a GROUP BY date ORDER BY date"
             ),
             con,
-            params={"a": anchor.isoformat()},
+            params=window,
         )
     payload: dict = {
         "schema": SCHEMA_VERSION,
@@ -365,17 +509,14 @@ def export_drivers(out: Path, anchor: date, db_path: str | None = None) -> dict:
         "end": None,
         "dates": [],
         "spot": [],
-        "jkm": [],
-        "ncl": [],
-        "fx": [],
-        "corr": {"jkm": None, "ncl": None, "fx": None},
-        "units": {"jkm": "$/MMBtu", "ncl": "$/bbl", "fx": ""},
+        **{key: [] for key, _ in DRIVERS},
+        "corr": {key: None for key, _ in DRIVERS},
+        "units": DRIVER_UNITS,
         "sources": {key: ticker for key, ticker in DRIVERS},
     }
     if not fuels.empty:
         fuels["date"] = fuels["date"].astype(str)
-        wide = fuels.pivot_table(index="date", columns="ticker", values="close", aggfunc="last")
-        wide = wide.rename(columns={ticker: key for key, ticker in DRIVERS}).sort_index()
+        wide = fuels.pivot_table(index="date", columns="ticker", values="close", aggfunc="last").sort_index()
         if not spot.empty:
             spot["date"] = spot["date"].astype(str)
             wide = wide.join(spot.set_index("date")["spot"], how="left")
@@ -389,7 +530,8 @@ def export_drivers(out: Path, anchor: date, db_path: str | None = None) -> dict:
         def corr(name: str) -> float | None:
             if name not in wide.columns or "spot" not in wide.columns:
                 return None
-            sub = wide[[name, "spot"]].dropna()
+            since = (anchor - timedelta(days=DRIVERS_CORR_DAYS)).isoformat()
+            sub = wide.loc[wide.index > since, [name, "spot"]].dropna()
             if len(sub) < 3:
                 return None
             c = sub[name].corr(sub["spot"])
@@ -401,10 +543,8 @@ def export_drivers(out: Path, anchor: date, db_path: str | None = None) -> dict:
                 "end": dates[-1] if dates else None,
                 "dates": dates,
                 "spot": col("spot"),
-                "jkm": col("jkm"),
-                "ncl": col("ncl"),
-                "fx": col("fx"),
-                "corr": {"jkm": corr("jkm"), "ncl": corr("ncl"), "fx": corr("fx")},
+                **{key: col(ticker) for key, ticker in DRIVERS},
+                "corr": {key: corr(ticker) for key, ticker in DRIVERS},
             }
         )
     n = _write_json(out / "drivers.json", payload)
@@ -433,6 +573,7 @@ def export_tieline(out: Path, anchor: date) -> dict:
             rows.sort(key=lambda r: r["datetime"])
             last_date = rows[-1]["datetime"][:10]
             util: list[float | None] = [None] * 48
+            series: dict[str, list[float | None]] = {k: [None] * 48 for k in _TIELINE_SERIES}
             ttc: float | None = None
             for r in rows:
                 if r["datetime"][:10] != last_date:
@@ -441,6 +582,8 @@ def export_tieline(out: Path, anchor: date) -> dict:
                 idx = SLOT_INDEX.get(t)
                 if idx is None:
                     continue
+                for key, metric in _TIELINE_SERIES.items():
+                    series[key][idx] = _num(r.get(metric))
                 ul = r.get("upper_limit_fwd")
                 rv = r.get("reserved_fwd")
                 if ul not in (None, 0) and rv is not None:
@@ -448,14 +591,18 @@ def export_tieline(out: Path, anchor: date) -> dict:
                 if ul is not None and (ttc is None or ul > ttc):
                     ttc = ul
             util_now = next((x for x in reversed(util) if x is not None), None)
+            src, dst = _pair_areas(pair)
             lines.append(
                 {
                     "key": PAIR_TO_IC.get(_norm_pair(pair)),
                     "pair": pair,
+                    "from": src,
+                    "to": dst,
                     "date": last_date,
                     "ttc": None if ttc is None else round(float(ttc), 1),
                     "util": util,
                     "util_now": util_now,
+                    **series,
                 }
             )
         payload = {"schema": SCHEMA_VERSION, "market": market, "slots": SLOTS, "lines": lines}
@@ -1068,6 +1215,7 @@ def export_capacity(out: Path) -> dict:
     curated, source-cited ``capacity_data`` module (see its docstring). Shapes
     match ``web/src/screens/CapacityAuctions.data.ts`` exactly.
     """
+    from repower.dashboard import capacity_data
     from repower.dashboard.read import load_capacity_ltda, load_capacity_ma
 
     total = 0
@@ -1077,7 +1225,7 @@ def export_capacity(out: Path) -> dict:
     )
     total += _write_json(
         out / "capacity" / "ltda.json",
-        {"schema": SCHEMA_VERSION, "rows": load_capacity_ltda()},
+        {"schema": SCHEMA_VERSION, "rows": load_capacity_ltda(), "rounds": capacity_data.ltda_round_rows()},
     )
     return {"files": 2, "bytes": total}
 

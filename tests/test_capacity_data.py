@@ -108,9 +108,21 @@ def test_by_area_rejects_a_wrong_length_row():
     raise AssertionError("_by_area accepted a short row")
 
 
-def test_ltda_rows_passthrough_shape():
+def test_ltda_round_totals_match_occto_published_figures():
+    # Each results PDF's headline 落札容量 (decarbonised + LNG, 万kW) — the awarded-plant sums
+    # curated per technology must add up to them exactly.
+    published_man_kw = {1: 401.0 + 575.6, 2: 503.0 + 131.5, 3: 426.1 + 303.8}
+    for r in c.ltda_round_rows():
+        assert round(r["kw"] / 10_000, 1) == round(published_man_kw[r["round"]], 1)
+        assert r["source"].startswith("https://www.occto.or.jp/") and r["plants_pdf"].startswith("https://www.occto.or.jp/")
+    assert [r["plants"] for r in c.ltda_round_rows()] == [52, 38, 32]
+
+
+def test_ltda_rows_derive_every_figure_from_the_kw():
     rows = c.ltda_rows()
-    assert len(rows) == 5
-    assert {"en", "ja", "r1", "r2", "r3", "cum", "share", "c", "cd"} <= set(rows[0])
-    # share percentages should sum to ~100.
-    assert 95 <= sum(r["share"] for r in rows) <= 105
+    assert {"key", "en", "ja", "r1", "r2", "r3", "cum", "share", "kw", "plants", "c", "cd"} <= set(rows[0])
+    lng = next(r for r in rows if r["key"] == "lng")
+    assert (lng["r1"], lng["cum"]) == ("5.76", "10.11")
+    hydro = next(r for r in rows if r["key"] == "hydro")
+    assert hydro["r1"] == "—" and hydro["plants"] == [0, 1, 0]
+    assert 99 <= sum(r["share"] for r in rows) <= 101

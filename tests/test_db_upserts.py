@@ -91,6 +91,36 @@ def test_upsert_fuels_idempotent(tmp_path):
     assert count_second == count_first
 
 
+def test_fuels_backfill_only_tickers_missing_their_history(tmp_path):
+    from repower.scrapers import fuels_futures as ff
+
+    db_path = str(tmp_path / "t.db")
+    today = dt.date(2026, 9, 27)
+    upsert_fuels([
+        {"date": today - dt.timedelta(days=ff.BACKFILL_DAYS), "ticker": "BZ=F", "close": 70.0, "currency": "USD"},
+        {"date": dt.date(2026, 5, 4), "ticker": "NG=F", "close": 3.0, "currency": "USD"},
+    ], db_path=db_path)
+
+    # Brent reaches back a full window; Henry Hub starts in May; JKM and USD/JPY have nothing.
+    assert ff.tickers_to_backfill(db_path, today) == {"NG=F", "JKM=F", "JPY=X"}
+
+
+def test_fetch_fuels_reaches_back_only_for_back_filled_tickers(monkeypatch):
+    from repower.scrapers import fuels_futures as ff
+
+    starts: dict[str, dt.date] = {}
+
+    def fake_download(ticker, start, end, **kwargs):
+        starts[ticker] = dt.date.fromisoformat(start)
+        return pd.DataFrame()
+
+    monkeypatch.setattr(ff.yf, "download", fake_download)
+    ff.fetch_fuels(7, frozenset({"JKM=F"}))
+    spans = {t: (dt.date.today() - s).days for t, s in starts.items()}
+    assert set(spans) == set(ff.TICKERS)
+    assert spans["JKM=F"] > 365 and all(v < 30 for t, v in spans.items() if t != "JKM=F")
+
+
 # ── News upsert dedup ──────────────────────────────────────────────────────
 def test_upsert_news_dedup(tmp_path):
     db_path = str(tmp_path / "t.db")
