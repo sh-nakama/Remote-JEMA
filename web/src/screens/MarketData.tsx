@@ -2,11 +2,11 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { s, Hoverable, RawSvg, press } from '../lib/style'
 import { useApp } from '../lib/app'
-import { FreshnessChip, fmtStamp } from '../lib/freshness'
+import { fmtStamp, STALE_MS } from '../lib/freshness'
 import { useManifest } from '../lib/data'
 import { NotificationsPopover, useNotifSeen, unreadCount, tsOfDate } from '../lib/notifications'
 import type { NotifItem, NotifSection } from '../lib/notifications'
-import { PolicyNavBadge } from '../lib/policyActivity'
+import { Sidebar, TopBar, PageHeader, ExportButton, useReload } from '../lib/chrome'
 import { ChartFrame } from '../lib/chart'
 import { downloadCsv } from '../lib/download'
 import { areas } from './MarketData.data'
@@ -15,7 +15,7 @@ import { buildMarketView, fmtDT, fmtEpoch } from './MarketData.view'
 import type { Domain, DrRange, Gran, Range, View } from './MarketData.view'
 
 export function MarketDataScreen() {
-  const { lang, setLang, theme, toggleTheme, setScreen, toast, openOverlay, collapsed, toggleCollapsed, watch, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch, refreshData, refreshing } = useApp()
+  const { lang, theme, setScreen, toast, focusArea, clearFocusArea, defaultGran, isWatched, toggleWatch } = useApp()
   const L = lang
   const dark = theme === 'dark'
 
@@ -131,10 +131,7 @@ export function MarketDataScreen() {
   const tSystem = () => toast('System-weighted series = PROPOSED (data exists, aggregation not wired) · システム系列は提案中')
   const tProduct = (code: string) => setExpandedProduct((prev) => (prev === code ? null : code))
   const toggleNotif = () => setShowNotif((n) => !n)
-  const tRefresh = () => {
-    refreshData()
-    toast('Reloaded latest data · 最新データを再取得しました')
-  }
+  const tRefresh = useReload()
   const tJkm = () => setDrOn((p) => ({ ...p, jkm: !p.jkm }))
   const tNcl = () => setDrOn((p) => ({ ...p, ncl: !p.ncl }))
   const tFx = () => setDrOn((p) => ({ ...p, fx: !p.fx }))
@@ -152,7 +149,6 @@ export function MarketDataScreen() {
   // absent rather than faked.
   const manifest = useManifest()
   const { seenAt: notifSeenAt, markSeen: notifMarkSeen } = useNotifSeen('jema-notif-seen-market')
-  const STALE_MS = 48 * 60 * 60 * 1000
   const MOVE_PCT = 10 // day-on-day threshold for "notable" (JEPX daily averages swing a few % routinely)
 
   const dataItems: NotifItem[] = []
@@ -232,149 +228,10 @@ export function MarketDataScreen() {
     [view, range, gran, sel, closed, expanded, zoom, drRange, drOn, L, dark, live, driversLive, balLive, tielineLive],
   )
 
-  const isDarkB = dark
-  const isLightB = !dark
-
   // ---- section renderers ----
   // Mechanical extraction for navigability: each renderer holds one section's
   // JSX verbatim (same closures over state/`v`) and is called from the single
   // return at the bottom — the rendered tree is identical.
-
-  const renderSidebar = () => (
-      <div style={s(`width:264px;flex-shrink:0;background:var(--bg1);border-right:1px solid var(--bd);flex-direction:column;padding:22px 16px 16px;overflow-y:auto;${collapsed ? 'display:none' : 'display:flex'}`)}>
-        <div style={s('padding:0 8px')}>
-          <div style={s('display:flex;align-items:center;gap:7px')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:23px;height:23px;color:var(--ac);flex-shrink:0"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>`} />
-            <span style={s('font-size:21px;font-weight:700;letter-spacing:.01em')}>JEMA</span>
-          </div>
-          <div style={s('font-size:9px;font-weight:600;letter-spacing:.14em;color:var(--mut);margin-top:3px;text-transform:uppercase')}>Japan Energy Market Analytics</div>
-        </div>
-
-        <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:26px 8px 8px')}>MENU · メニュー</div>
-        <div style={s('display:flex;flex-direction:column;gap:3px')}>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('overview')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><rect x="3" y="3" width="7" height="9" rx="1"></rect><rect x="14" y="3" width="7" height="5" rx="1"></rect><rect x="14" y="12" width="7" height="9" rx="1"></rect><rect x="3" y="16" width="7" height="5" rx="1"></rect></svg>`} /><span>Market Overview</span>
-            <span style={s('margin-left:auto;font-size:10.5px;font-weight:500;color:var(--mut)')}>概況</span>
-          </Hoverable>
-          <div style={s('display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:600;color:var(--acT);background:var(--acTint);cursor:pointer;position:relative')}>
-            <span style={s('position:absolute;left:-16px;top:8px;bottom:8px;width:3px;background:var(--ac);border-radius:0 2px 2px 0')}></span>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M3 3v18h18"></path><path d="M8 17v-3"></path><path d="M13 17V9"></path><path d="M18 17V5"></path></svg>`} /><span>Market Data</span>
-            <span style={s('margin-left:auto;font-size:10.5px;font-weight:500;color:var(--acHi)')}>データ</span>
-          </div>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('capacity')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 22 8.5 12 15 2 8.5 12 2"></polygon><polyline points="2 14 12 20.5 22 14"></polyline></svg>`} /><span>Capacity &amp; Auctions</span>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px;margin-left:auto;color:var(--mut);flex-shrink:0"><path d="M9 18l6-6-6-6"></path></svg>`} />
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => setScreen('policy')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><line x1="3" y1="22" x2="21" y2="22"></line><line x1="6" y1="18" x2="6" y2="11"></line><line x1="10" y1="18" x2="10" y2="11"></line><line x1="14" y1="18" x2="14" y2="11"></line><line x1="18" y1="18" x2="18" y2="11"></line><polygon points="12 2 20 7 4 7"></polygon></svg>`} /><span>Policy Deep Dive</span>
-            <PolicyNavBadge />
-          </Hoverable>
-        </div>
-
-        <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin:22px 8px 8px')}>GENERAL · 全般</div>
-        <div style={s('display:flex;flex-direction:column;gap:3px')}>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('watchlist')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26"></polygon></svg>`} /><span>Watchlist</span>
-            {watch.length > 0 && (
-              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{watch.length}</span>
-            )}
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={toggleNotif}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} /><span>Notifications</span>
-            {notifUnread > 0 && (
-              <span style={s('margin-left:auto;background:var(--acBadge);color:#FFFFFF;font-size:10px;font-weight:600;border-radius:999px;padding:1px 7px')}>{notifUnread}</span>
-            )}
-          </Hoverable>
-          <Hoverable base="display:flex;align-items:center;gap:10px;padding:9px 12px;border-radius:12px;font-size:13.5px;font-weight:500;color:var(--tx2);cursor:pointer" hover="background:var(--acTint2);color:var(--tx)" onClick={() => openOverlay('settings')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;flex-shrink:0"><circle cx="12" cy="12" r="3"></circle><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"></path></svg>`} /><span>Settings</span>
-          </Hoverable>
-        </div>
-
-        <div style={s('flex:1')}></div>
-
-        <Hoverable base="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px" hover="background:var(--bg2);color:var(--tx2)" onClick={toggleCollapsed}>
-          <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><path d="M11 17l-5-5 5-5"></path><path d="M18 17l-5-5 5-5"></path></svg>`} /><span>Collapse · 折りたたむ</span>
-        </Hoverable>
-
-        <div style={s('background:linear-gradient(135deg,var(--navyA),var(--navyB));border-radius:16px;padding:15px 15px 13px;color:#FFFFFF;margin-top:12px')}>
-          <div style={s('display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;color:#7FD4E8;flex-shrink:0"><ellipse cx="12" cy="5" rx="9" ry="3"></ellipse><path d="M3 5v14a9 3 0 0 0 18 0V5"></path><path d="M3 12a9 3 0 0 0 18 0"></path></svg>`} />Data freshness · データ鮮度</div>
-          <FreshnessChip inverse style={{ marginTop: 6 }} />
-          <div style={s('font-size:10.5px;color:rgba(255,255,255,.55);margin-top:2px')}>Hugging Face sync · GitHub Actions daily</div>
-          <Hoverable base="display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(255,255,255,.35);color:#FFFFFF;border-radius:999px;padding:5px 13px;font-size:12px;font-weight:500;cursor:pointer;margin-top:10px" hover="background:rgba(255,255,255,.10)" onClick={tRefresh}>
-            <span style={s(refreshing ? 'display:inline-flex;animation:jema-spin .7s linear infinite' : 'display:inline-flex')}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;flex-shrink:0"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"></path><path d="M21 3v5h-5"></path><path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path><path d="M3 21v-5h5"></path></svg>`} /></span>Refresh · 更新
-          </Hoverable>
-        </div>
-      </div>
-  )
-
-  // Top bar (breadcrumb, search, theme/language toggles, profile)
-  const renderTopBar = () => (
-        <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
-          <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>Market Data <span style={s('color:var(--fnt3)')}>·</span> マーケットデータ</div>
-          <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:16px;height:16px;flex-shrink:0"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.35-4.35"></path></svg>`} />
-            <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
-            <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
-          </div>
-          <div style={s('flex:1')}></div>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
-            {isDarkB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"></line><line x1="12" y1="21" x2="12" y2="23"></line><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line x1="1" y1="12" x2="3" y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg>`} />)}
-            {isLightB && (<RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg>`} />)}
-          </Hoverable>
-          <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={toggleNotif} aria-label="Notifications">
-            <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:19px;height:19px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path><path d="M13.73 21a2 2 0 0 1-3.46 0"></path></svg>`} />
-            {notifUnread > 0 && (
-              <span style={s('position:absolute;top:9px;right:10px;width:8px;height:8px;border-radius:999px;background:var(--ac);border:1.5px solid var(--bg1)')}></span>
-            )}
-          </Hoverable>
-          <div style={s('display:flex;background:var(--bg2);border-radius:999px;padding:3px;flex-shrink:0')}>
-            <span style={v.langJaS} {...press(() => setLang('ja'), L === 'ja')}>日本語</span>
-            <span style={v.langEnS} {...press(() => setLang('en'), L === 'en')}>English</span>
-          </div>
-          <div style={s('display:flex;align-items:center;gap:10px;flex-shrink:0')}>
-            <div style={s('width:34px;height:34px;border-radius:999px;background:var(--avatar);color:#FFFFFF;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600')}>AN</div>
-            <div style={s('line-height:1.25')}>
-              <div style={s('font-size:13px;font-weight:600')}>Analyst</div>
-              <div style={s('font-size:11px;color:var(--mut)')}>analyst@example.jp</div>
-            </div>
-          </div>
-
-          {/* Notifications — snapshot freshness + notable day-on-day moves */}
-          <NotificationsPopover
-            open={showNotif}
-            lang={L}
-            sections={notifSections}
-            seenAt={notifSeenAt}
-            onClose={() => setShowNotif(false)}
-            onMarkRead={notifMarkSeen}
-            action={{
-              label: L === 'ja' ? '政策の通知 →' : 'Policy activity →',
-              onClick: () => {
-                setShowNotif(false)
-                setScreen('policy')
-              },
-            }}
-          />
-        </div>
-  )
-
-  // Page header (title + Export CSV)
-  const renderPageHeader = () => (
-            <div style={s('display:flex;justify-content:space-between;align-items:flex-start;gap:16px')}>
-              <div>
-                <div style={s('display:flex;align-items:baseline;gap:10px')}>
-                  <span style={s('font-size:26px;font-weight:700;letter-spacing:-.01em')}>Market Data</span>
-                  <span style={s('font-size:15px;font-weight:500;color:var(--mut)')}>マーケットデータ</span>
-                </div>
-                <div style={s('font-size:13.5px;color:var(--tx2);margin-top:2px')}>Wholesale &amp; balancing · 9 areas · 30-min resolution · 卸電力・需給調整市場 9エリア 30分値</div>
-              </div>
-              <div style={s('display:flex;gap:10px;flex-shrink:0;padding-top:4px')}>
-                <Hoverable base="display:inline-flex;align-items:center;gap:7px;background:var(--bg1);border:1px solid var(--fnt3);color:var(--tx);border-radius:999px;padding:9px 20px;font-size:13.5px;font-weight:600;cursor:pointer" hover="background:var(--acTint2);border-color:var(--ac)" onClick={tExport}>
-                  <RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;flex-shrink:0"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`} />Export CSV · 出力
-                </Hoverable>
-              </div>
-            </div>
-  )
 
   // Sub-view switcher (Wholesale / Balancing · Interconnectors / Drivers)
   const renderViewSwitcher = () => (
@@ -1120,16 +977,38 @@ export function MarketDataScreen() {
   return (
     <>
       {/* ============ SIDEBAR ============ */}
-      {renderSidebar()}
+      <Sidebar active="market" unread={notifUnread} onToggleNotif={toggleNotif} />
 
       {/* ============ MAIN COLUMN ============ */}
       <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
-        {renderTopBar()}
+        <TopBar screen="market" unread={notifUnread} onToggleNotif={toggleNotif}>
+          {/* Notifications — snapshot freshness + notable day-on-day moves */}
+          <NotificationsPopover
+            open={showNotif}
+            lang={L}
+            sections={notifSections}
+            seenAt={notifSeenAt}
+            onClose={() => setShowNotif(false)}
+            onMarkRead={notifMarkSeen}
+            action={{
+              label: L === 'ja' ? '政策の通知 →' : 'Policy activity →',
+              onClick: () => {
+                setShowNotif(false)
+                setScreen('policy')
+              },
+            }}
+          />
+        </TopBar>
 
         {/* Scrollable content */}
         <div style={s('flex:1;overflow-y:auto;padding:26px 32px 40px')}>
           <div style={s('max-width:1500px;margin:0 auto;display:flex;flex-direction:column;gap:20px')}>
-            {renderPageHeader()}
+            <PageHeader
+              screen="market"
+              subtitle="Wholesale & balancing · 9 areas · 30-min resolution · 卸電力・需給調整市場 9エリア 30分値"
+            >
+              <ExportButton onClick={tExport} />
+            </PageHeader>
             {renderViewSwitcher()}
             {v.isSpotBal && renderControlBar()}
             {v.isWholesale && renderWholesaleView()}

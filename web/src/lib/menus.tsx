@@ -5,6 +5,7 @@ import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import { parseDbTs } from './policyActivity'
 import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s, press } from './style'
+import { orgColor } from './chartkit'
 
 /**
  * Phase 4 — the working global menus (client-side, localStorage-backed):
@@ -985,8 +986,6 @@ function StatusTable({
   const dark = app.theme === 'dark'
   const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
   const [open, setOpen] = useState<Record<string, boolean>>({})
-  const orgColor = (org: string) =>
-    org === 'OCCTO' ? (dark ? '#7C9CD1' : '#4A6FA5') : org === 'EGC' ? (dark ? '#C77BD8' : '#7B2D8E') : 'var(--ac)'
 
   // Meetings grouped per committee, each already newest-activity-first from the
   // backend. Built once per payload rather than per expanded row.
@@ -1062,7 +1061,7 @@ function StatusTable({
 
               <div style={s('min-width:0')}>
                 <div style={s('display:flex;align-items:center;gap:6px;min-width:0')}>
-                  <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${orgColor(c.org)}`)}></span>
+                  <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${orgColor(c.org, dark)}`)}></span>
                   <span style={s('font-size:12.5px;font-weight:600;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>
                     {L === 'ja' ? c.ja : c.en}
                   </span>
@@ -1316,8 +1315,6 @@ function CommitteesManage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, app.interactive])
 
-  const orgColor = (org: string) =>
-    org === 'OCCTO' ? (dark ? '#7C9CD1' : '#4A6FA5') : org === 'EGC' ? (dark ? '#C77BD8' : '#7B2D8E') : 'var(--ac)'
 
   const setTracked = (key: string, enabled: boolean) => {
     if (!app.interactive || busy[key]) return
@@ -1821,7 +1818,7 @@ function CommitteesManage() {
               return (
                 <div key={org} style={s('min-width:0')}>
                   <div style={s('display:flex;align-items:center;gap:7px;margin:0 2px 8px;position:sticky;top:0;z-index:2;background:var(--bg1);padding:4px 0')}>
-                    <span style={s(`width:8px;height:8px;border-radius:999px;background:${orgColor(org)};flex-shrink:0`)}></span>
+                    <span style={s(`width:8px;height:8px;border-radius:999px;background:${orgColor(org, dark)};flex-shrink:0`)}></span>
                     <span style={s('font-size:12px;font-weight:700;letter-spacing:.05em;color:var(--tx2)')}>{org}</span>
                     <span style={s("font-size:11px;color:var(--mut);margin-left:auto;white-space:nowrap;font-feature-settings:'tnum' 1")}>
                       {pick(`${nTracked}/${inOrg.length} tracked`, `${nTracked}/${inOrg.length} 追跡`)}

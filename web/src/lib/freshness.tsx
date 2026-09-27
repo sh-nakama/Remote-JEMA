@@ -14,7 +14,7 @@ import type { Manifest } from './types'
  * export is older than 48 hours.
  */
 
-const STALE_MS = 48 * 60 * 60 * 1000
+export const STALE_MS = 48 * 60 * 60 * 1000
 
 /** "2026-07-15T17:33:13+00:00" → "2026-07-15 17:33" (same slicing as Settings). */
 export function fmtStamp(iso: string): string {

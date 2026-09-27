@@ -15,7 +15,7 @@ export { parseDbTs }
  */
 
 export const POLICY_RECENT_DAYS = 7
-const RECENT_MS = POLICY_RECENT_DAYS * 24 * 60 * 60 * 1000
+export const POLICY_RECENT_MS = POLICY_RECENT_DAYS * 24 * 60 * 60 * 1000
 
 interface MeetingSnap {
   key: string
@@ -74,14 +74,14 @@ export function usePolicyActivity(): PolicyActivity {
         // however old the meeting.)
         const dateIsRecent = (d: string): boolean => {
           const t = parseDay(d)
-          return Number.isFinite(t) && now - t <= RECENT_MS
+          return Number.isFinite(t) && now - t <= POLICY_RECENT_MS
         }
         const summarised: PolicyActivityItem[] = []
         const detected: PolicyActivityItem[] = []
         const coms = new Set<string>()
         for (const m of raw.meetings || []) {
           const ts = parseDbTs(m.updatedAt)
-          if (Number.isNaN(ts) || now - ts > RECENT_MS) continue
+          if (Number.isNaN(ts) || now - ts > POLICY_RECENT_MS) continue
           const item: PolicyActivityItem = {
             key: m.key,
             com: m.com,

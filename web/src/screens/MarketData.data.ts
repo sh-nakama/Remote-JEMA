@@ -1,4 +1,5 @@
 // Fixture data + generators ported from screens/market-data.html DCLogic.
+import { gaussian as G, slots as mk, today } from '../lib/fixtures'
 
 export interface AreaDef {
   key: string
@@ -53,20 +54,6 @@ export interface DrDef {
   corr: number
   dec: number
 }
-
-const G = (t: number, c: number, w: number) => Math.exp(-((t - c) * (t - c)) / w)
-const mk = (f: (i: number, t: number) => number): number[] =>
-  Array.from({ length: 48 }, (_, i) => f(i, i / 2))
-
-export const today: number[] = mk(
-  (i, t) =>
-    9.6 +
-    3.1 * G(t, 8.1, 2.4) -
-    4.2 * G(t, 12.6, 7.5) +
-    12.1 * G(t, 18.7, 2.9) +
-    0.38 * Math.sin(i * 1.63) +
-    0.24 * Math.sin(i * 0.71 + 2.1),
-)
 
 export const areaDefs: AreaDef[] = [
   { key: 'hokkaido', en: 'Hokkaido', ja: '北海道', off: 0.85, ph: 1.1, peak: 5210, solarF: 0.55 },
@@ -176,4 +163,3 @@ export const drDefs: DrDef[] = [
   { key: 'fx', en: 'USD/JPY', ja: 'ドル円', unit: '', src: 'TTM · yfinance', color: '#8AB17D', corr: 0.33, dec: 2 },
 ]
 
-export const gaussian = G

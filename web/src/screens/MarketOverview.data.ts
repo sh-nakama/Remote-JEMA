@@ -1,5 +1,6 @@
 // Fixture data + chart geometry ported verbatim from screens/market-overview.html
 // (the DCLogic constructor + renderVals math). All numbers/labels/colors match.
+import { gaussian as G, slots as mk, today } from '../lib/fixtures'
 
 export interface AreaDef {
   key: string
@@ -48,19 +49,7 @@ export interface FreshRow {
 }
 
 // ---- synthetic price series (48 half-hour slots) ----
-const G = (t: number, c: number, w: number) => Math.exp(-((t - c) * (t - c)) / w)
-const mk = (f: (i: number, t: number) => number): number[] =>
-  Array.from({ length: 48 }, (_, i) => f(i, i / 2))
-
-export const today: number[] = mk(
-  (i, t) =>
-    9.6 +
-    3.1 * G(t, 8.1, 2.4) -
-    4.2 * G(t, 12.6, 7.5) +
-    12.1 * G(t, 18.7, 2.9) +
-    0.38 * Math.sin(i * 1.63) +
-    0.24 * Math.sin(i * 0.71 + 2.1),
-)
+export { today }
 export const yday: number[] = mk(
   (i, t) =>
     10.05 +
@@ -262,7 +251,6 @@ export const freshData: FreshRow[] = [
   { en: 'Policy summaries', ja: '政策要約', subEn: 'lags days', subJa: '', v: '2026-06-28', ok: false, delayed: true },
 ]
 
-export const MO = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 export const enShort: Record<number, string> = { 61: 'System Review WG', 48: 'Balancing Review', 59: 'EGMSC', 85: 'Basic Policy' }
 export const jaShort: Record<number, string> = { 61: '制度検討WG', 48: '需給調整小委', 59: '監視等委', 85: '基本政策小委' }

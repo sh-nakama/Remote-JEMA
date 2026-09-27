@@ -105,12 +105,17 @@ export function areaColor(key: string, dark: boolean): string {
   return c ? c[dark ? 1 : 0] : dark ? '#5D6B85' : '#B4BCC9'
 }
 
+/** Committee organisation's accent colour (METI takes the theme accent). */
+export function orgColor(org: string, dark: boolean): string {
+  return org === 'OCCTO' ? (dark ? '#7C9CD1' : '#4A6FA5') : org === 'EGC' ? (dark ? '#C77BD8' : '#7B2D8E') : 'var(--ac)'
+}
+
 /** 30-min slot index (0–47) → "HH:MM". */
 export function slotLabel(i: number): string {
   return String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 ? '30' : '00')
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+export const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
 /** ISO datetime/date → short axis label ("Jul 2"). */
 export function fmtDate(iso: string): string {
