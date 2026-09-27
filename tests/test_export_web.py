@@ -19,8 +19,10 @@ from repower.dashboard.export_web import (
     _doc_name,
     _doc_size,
     _norm_pair,
+    _pair_areas,
     _slot_col,
     _write_json,
+    balancing_daily_summary,
     parse_briefing,
     parse_digest_answer,
 )
@@ -85,6 +87,85 @@ def test_norm_pair_and_interconnector_mapping():
     assert PAIR_TO_IC[_norm_pair("Chugoku → Kyushu")] == "kq"
     # combined-zone pairs have no clean 1:1 line → not mapped (fixture fallback)
     assert _norm_pair("Chubu-Hokuriku → Kansai") not in PAIR_TO_IC
+
+
+def test_pair_areas_splits_combined_zones_into_area_keys():
+    assert _pair_areas("Tokyo → Chubu") == (["tepco"], ["chubu"])
+    assert _pair_areas("Chubu-Hokuriku → Kansai") == (["chubu", "hokuriku"], ["kansai"])
+
+
+def _balancing_rows(product: str, date_: str, slots: list[tuple[str, dict[str, dict[str, float]]]]) -> list[dict]:
+    """Long balancing rows: for each (time, {area: {metric: value}})."""
+    return [
+        {"product": product, "area": area, "date": date_, "time": t, "metric": m, "value": v}
+        for t, by_area in slots
+        for area, metrics in by_area.items()
+        for m, v in metrics.items()
+    ]
+
+
+def test_balancing_daily_summary_national_figures_and_shortfall():
+    def slot(req_a, con_a, price_a, req_b, con_b, price_b):
+        return {
+            "tepco": {"demand_mw": req_a, "contracted_mw": con_a, "bid_volume_mw": con_a + 10, "price_avg": price_a},
+            "kansai": {"demand_mw": req_b, "contracted_mw": con_b, "bid_volume_mw": con_b + 10, "price_avg": price_b},
+        }
+
+    # Four 6-hour slots: nationally short at 06:00 and 12:00 (a two-slot run), met otherwise.
+    rows = _balancing_rows("Primary", "2026-09-10", [
+        ("00:00", slot(100, 100, 2.0, 50, 50, 4.0)),
+        ("06:00", slot(100, 60, 2.0, 50, 50, 4.0)),
+        ("12:00", slot(100, 100, 2.0, 50, 20, 4.0)),
+        ("18:00", slot(100, 100, 2.0, 50, 50, 4.0)),
+    ]) + _balancing_rows("Primary", "2026-09-09", [("00:00", slot(10, 10, 1.0, 10, 10, 1.0))])
+    s = balancing_daily_summary(pd.DataFrame(rows))
+
+    assert s["dates"] == ["2026-09-09", "2026-09-10"]
+    day = s["products"][0]["days"]["2026-09-10"]
+    assert day["required_mw"] == 150.0  # national per slot, averaged over the day
+    assert day["contracted_mw"] == (150 + 110 + 120 + 150) / 4
+    # Price weighted by contracted MW across areas and slots.
+    assert day["price"] == round((2.0 * (100 + 60 + 100 + 100) + 4.0 * (50 + 50 + 20 + 50)) / 530, 3)
+    assert (day["short_slots"], day["slots"], day["max_gap_mw"]) == (2, 4, 40.0)
+    assert day["longest_run"] == {"start": "06:00", "end": "18:00", "slots": 2}
+    assert s["national"]["2026-09-09"]["contracted_mw"] == 20.0
+    assert [a["area"] for a in s["products"][0]["areas"]] == ["tepco", "kansai"]
+
+
+def test_balancing_daily_summary_ignores_unexported_products_and_empty_input():
+    assert balancing_daily_summary(pd.DataFrame())["products"] == []
+    rows = _balancing_rows("Composite", "2026-09-10", [("00:00", {"tepco": {"demand_mw": 1.0, "contracted_mw": 0.0}})])
+    assert balancing_daily_summary(pd.DataFrame(rows))["dates"] == []
+
+
+def test_export_drivers_bounds_the_window_and_correlates_over_90_days(tmp_path: Path):
+    from datetime import timedelta
+
+    from repower.dashboard.export_web import DRIVERS_WINDOW_DAYS, export_drivers
+    from repower.db import JepxSpot30m, get_session
+    from repower.scrapers.fuels_futures import upsert_fuels
+
+    db = str(tmp_path / "t.db")
+    anchor = date(2026, 9, 10)
+    days = [anchor - timedelta(days=n) for n in range(500)]
+    spot = {d: 10.0 + d.toordinal() % 7 for d in days}
+    # JKM tracks spot over the last 90 days and moves against it before then.
+    upsert_fuels([
+        {"date": d, "ticker": "JKM=F", "currency": "USD",
+         "close": 2 * spot[d] if (anchor - d).days < 90 else 100 - 2 * spot[d]}
+        for d in days
+    ], db_path=db)
+    session = get_session(db)
+    session.add_all(JepxSpot30m(date=d, time="00:00", system_price=spot[d]) for d in days)
+    session.commit()
+    session.close()
+
+    export_drivers(tmp_path, anchor, db)
+    out = json.loads((tmp_path / "drivers.json").read_text(encoding="utf-8"))
+
+    assert (out["start"], out["end"]) == ((anchor - timedelta(days=DRIVERS_WINDOW_DAYS)).isoformat(), "2026-09-10")
+    assert out["corr"]["lng"] == 1.0 and out["corr"]["brent"] is None
+    assert out["sources"]["lng"] == "JKM=F" and out["units"]["brent"] == "$/bbl"
 
 
 def test_parse_digest_answer_splits_sections_and_strips_markdown():

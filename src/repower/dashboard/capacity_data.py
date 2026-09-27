@@ -143,21 +143,41 @@ SOURCES: dict[int, str] = {
     2029: "https://www.occto.or.jp/assets/various/capacity-market/jitsujukyukanren/2029_jitsujukyu_kanren/260123_mainauction_youryouyakujokekka_kouhyou_jitsujukyu2029.pdf",
 }
 
-# ── LTDA (Long-Term Decarbonization Auction) — curated tech breakdown ─────────
-# Contracted capacity (GW) by technology across the auction rounds run to date,
-# plus each technology's share of the cumulative total. Colours are the design
-# tokens the screen paints the stacked bar / legend with (light, dark).
-LTDA: list[dict] = [
-    {"en": "Battery storage", "ja": "蓄電池", "r1": "1.10", "r2": "1.64", "r3": "1.68",
-     "cum": "4.42", "share": 31, "c": "#00A5CF", "cd": "#1FB6DC"},
-    {"en": "Pumped hydro", "ja": "揚水", "r1": "0.57", "r2": "0.30", "r3": "0.42",
-     "cum": "1.29", "share": 9, "c": "#4A6FA5", "cd": "#7C9CD1"},
-    {"en": "LNG (decarb-ready)", "ja": "LNG（脱炭素化前提）", "r1": "2.20", "r2": "2.55", "r3": "2.30",
-     "cum": "7.05", "share": 50, "c": "#E9C46A", "cd": "#E9C46A"},
-    {"en": "Hydrogen · Ammonia", "ja": "水素・アンモニア", "r1": "0.14", "r2": "0.36", "r3": "0.62",
-     "cum": "1.12", "share": 8, "c": "#2A9D8F", "cd": "#2A9D8F"},
-    {"en": "Other (biomass etc.)", "ja": "その他", "r1": "—", "r2": "—", "r3": "0.22",
-     "cum": "0.22", "share": 2, "c": "#B4BCC9", "cd": "#5D6B85"},
+# ── LTDA (Long-Term Decarbonization Auction, 長期脱炭素電源オークション) ─────────
+# Awarded capacity (kW) and plant count per technology and round, summed from the 落札電源一覧
+# appendix of OCCTO's results (every awarded plant with its 電源種 and 落札容量). Each round's
+# total equals the results PDF's headline decarbonised + LNG figures. Rounds are OCCTO's
+# 応札年度 (bidding year); `published` is the results' release date.
+_LTDA_BASE_1 = "https://www.occto.or.jp/assets/market-board/market/oshirase"
+_LTDA_BASE_3 = "https://www.occto.or.jp/assets/various/capacity-market/jitsujukyukanren/2025_boshuyoukou_long"
+LTDA_ROUNDS: list[dict] = [
+    {"round": 1, "bid_year": 2023, "published": "2024-04-26",
+     "source": f"{_LTDA_BASE_1}/2024/files/240426_longauction_youryouyakujokekka_kouhyou_ousatsu2023.pdf",
+     "plants_pdf": f"{_LTDA_BASE_1}/2024/files/240426_longauction_youryouyakujokekka_kouhyou_besshi_ousatsu2023.pdf"},
+    {"round": 2, "bid_year": 2024, "published": "2025-04-28",
+     "source": f"{_LTDA_BASE_1}/2025/files/250428_longauction_youryouyakujokekka_kouhyou_ousatsu2024.pdf",
+     "plants_pdf": f"{_LTDA_BASE_1}/2025/files/250428_longauction_youryouyakujokekka_kouhyou_besshi_ousatsu2024.pdf"},
+    {"round": 3, "bid_year": 2025, "published": "2026-05-13",
+     "source": f"{_LTDA_BASE_3}/260513_longauction_youryouyakujokekka_kouhyou_ousatsu2025.pdf",
+     "plants_pdf": f"{_LTDA_BASE_3}/260513_longauction_youryouyakujokekka_kouhyou_besshi_ousatsu2025.pdf"},
+]
+
+# `awarded` is (kW, plants) for rounds 1, 2, 3. Colours are the design tokens (light, dark).
+LTDA_TECH: list[dict] = [
+    {"key": "lng", "en": "LNG (decarb-ready)", "ja": "LNG（脱炭素化前提）",
+     "awarded": [(5_756_320, 10), (1_314_644, 4), (3_037_866, 4)], "c": "#E9C46A", "cd": "#E9C46A"},
+    {"key": "nuclear", "en": "Nuclear", "ja": "原子力",
+     "awarded": [(1_315_707, 1), (3_153_107, 3), (1_939_123, 2)], "c": "#7B2D8E", "cd": "#C77BD8"},
+    {"key": "battery", "en": "Battery storage", "ja": "蓄電池",
+     "awarded": [(1_092_076, 30), (1_370_036, 27), (1_251_127, 19)], "c": "#00A5CF", "cd": "#1FB6DC"},
+    {"key": "h2nh3", "en": "Hydrogen · Ammonia", "ja": "水素・アンモニア",
+     "awarded": [(825_582, 6), (94_600, 1), (516_687, 4)], "c": "#2A9D8F", "cd": "#2A9D8F"},
+    {"key": "pumped", "en": "Pumped hydro", "ja": "揚水",
+     "awarded": [(576_937, 3), (360_646, 2), (453_439, 2)], "c": "#4A6FA5", "cd": "#7C9CD1"},
+    {"key": "biomass", "en": "Biomass", "ja": "バイオマス",
+     "awarded": [(199_258, 2), (0, 0), (100_926, 1)], "c": "#8AB17D", "cd": "#8AB17D"},
+    {"key": "hydro", "en": "Conventional hydro", "ja": "一般水力",
+     "awarded": [(0, 0), (51_800, 1), (0, 0)], "c": "#B4BCC9", "cd": "#5D6B85"},
 ]
 
 
@@ -213,6 +233,30 @@ def main_auction_rows() -> list[dict]:
     return rows
 
 
+def _gw(kw: int) -> str:
+    """kW as ``1.23`` GW (two decimals), or ``—`` for nothing awarded."""
+    return f"{kw / 1_000_000:.2f}" if kw else "—"
+
+
 def ltda_rows() -> list[dict]:
-    """Curated LTDA technology breakdown in the screen's ``LtdaRow`` shape."""
-    return [dict(r) for r in LTDA]
+    """LTDA technology breakdown in the screen's ``LtdaRow`` shape (plus raw kW and plant counts)."""
+    total = sum(kw for t in LTDA_TECH for kw, _ in t["awarded"])
+    rows: list[dict] = []
+    for t in LTDA_TECH:
+        kws = [kw for kw, _ in t["awarded"]]
+        rows.append({
+            "key": t["key"], "en": t["en"], "ja": t["ja"],
+            "r1": _gw(kws[0]), "r2": _gw(kws[1]), "r3": _gw(kws[2]),
+            "cum": _gw(sum(kws)), "share": round(100 * sum(kws) / total),
+            "kw": kws, "plants": [n for _, n in t["awarded"]],
+            "c": t["c"], "cd": t["cd"],
+        })
+    return rows
+
+
+def ltda_round_rows() -> list[dict]:
+    """Per-round totals: awarded kW, plant count, release date and OCCTO source links."""
+    return [
+        {**r, "kw": sum(t["awarded"][i][0] for t in LTDA_TECH), "plants": sum(t["awarded"][i][1] for t in LTDA_TECH)}
+        for i, r in enumerate(LTDA_ROUNDS)
+    ]

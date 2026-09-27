@@ -28,7 +28,8 @@ are hidden there); new UI work goes into `web/`.
   DAM markets. Downloaded from EPRX as per-fiscal-year ZIPs (CP932 CSVs),
   handling the 8-block→48-block and March-2026 combined-zone transitions.
 - **Fuel / FX futures** — daily closes via [yfinance](https://github.com/ranaroussi/yfinance):
-  Brent crude (`BZ=F`), Henry Hub natural gas (`NG=F`), and USD/JPY (`JPY=X`).
+  JKM LNG (`JKM=F`), Brent crude (`BZ=F`), Henry Hub natural gas (`NG=F`), and USD/JPY
+  (`JPY=X`). A ticker with less than ~800 days stored is back-filled on the next scrape.
 - **Energy news RSS** — METI, OCCTO, and a Google News JP query, keyword-filtered
   for power-market relevance.
 
