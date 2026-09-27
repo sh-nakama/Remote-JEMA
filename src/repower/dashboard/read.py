@@ -2,8 +2,7 @@
 
 Pure helpers (``aggregate``, reducer inference) are uncached and unit-testable.
 The ``load_*`` functions hit the DB, pivot long→wide, and run ``aggregate``;
-they are wrapped with ``@st.cache_data`` and take a trailing cache-buster int
-to mirror the legacy loader patterns.
+they are wrapped with ``@st.cache_data`` and take a trailing cache-buster int.
 
 Output frames always carry a ``datetime`` column equal to the bucket start
 (the original datetime for ``Native``), so the D3 components — which parse
@@ -22,8 +21,11 @@ from sqlalchemy import and_, func, select
 
 from repower.config import EPRX_BALANCING_PARQUET, EPRX_TIELINE_PARQUET
 from repower.db import (
+    AnalysisRecord,
     DemandSupply30m,
+    FuelDaily,
     JepxAreaPrice30m,
+    JepxSpot30m,
     get_session,
     init_db,
 )
@@ -169,7 +171,7 @@ def aggregate(
     return out.sort_values(group_keys).reset_index(drop=True)
 
 
-# ── DB session (cached like legacy) ────────────────────────────────────────
+# ── DB session ─────────────────────────────────────────────────────────────
 
 @st.cache_resource
 def _db_session():
@@ -180,7 +182,7 @@ def _db_session():
 def _rollover_datetime(df: pd.DataFrame) -> pd.DataFrame:
     """Apply the '24:00' end-of-day rollover and build a ``datetime`` column.
 
-    Ported from legacy.py: rows reported at 24:00 roll over to next-day 00:00.
+    Rows reported at 24:00 roll over to next-day 00:00.
     """
     rollover = df["time"].astype(str).str.strip() == "24:00"
     if rollover.any():
@@ -191,6 +193,84 @@ def _rollover_datetime(df: pd.DataFrame) -> pd.DataFrame:
         df.loc[rollover, "time"] = "00:00"
     df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"].astype(str))
     return df
+
+
+# ── Drivers / Analyses tabs (uncached row loaders) ─────────────────────────
+
+def _jepx(start: date, end: date) -> pd.DataFrame:
+    session = _db_session()
+    rows = session.execute(
+        select(JepxSpot30m).where(
+            and_(JepxSpot30m.date >= start, JepxSpot30m.date <= end)
+        )
+    ).scalars().all()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        [{c.name: getattr(r, c.name) for c in JepxSpot30m.__table__.columns} for r in rows]
+    )
+    df["datetime"] = pd.to_datetime(df["date"].astype(str) + " " + df["time"])
+    df = df.sort_values(["datetime", "id"]).drop_duplicates("datetime", keep="last")
+    df = df.sort_values("datetime").reset_index(drop=True)
+    return df
+
+
+def _jepx_area(area: str, start: date, end: date) -> pd.DataFrame:
+    """Per-area JEPX spot price. Falls back to the wide table's ``tokyo_area_price`` if
+    ``jepx_area_price_30m`` is empty (older HF DB snapshots).
+
+    Returns a DataFrame with columns ``date, time, price, datetime``.
+    """
+    session = _db_session()
+    rows = session.execute(
+        select(JepxAreaPrice30m).where(
+            and_(
+                JepxAreaPrice30m.area == area,
+                JepxAreaPrice30m.date >= start,
+                JepxAreaPrice30m.date <= end,
+            )
+        )
+    ).scalars().all()
+    if rows:
+        df = pd.DataFrame(
+            [{c.name: getattr(r, c.name) for c in JepxAreaPrice30m.__table__.columns} for r in rows]
+        )[["area", "date", "time", "price"]]
+    else:
+        # Only Tokyo lives in the wide table.
+        wide = _jepx(start, end)
+        if wide.empty or area != "tepco":
+            return pd.DataFrame()
+        df = wide[["date", "time", "tokyo_area_price"]].rename(
+            columns={"tokyo_area_price": "price"}
+        )
+    df = _rollover_datetime(df)
+    return df.sort_values("datetime").drop_duplicates("datetime", keep="last").reset_index(drop=True)
+
+
+def _fuels(start: date, end: date) -> pd.DataFrame:
+    session = _db_session()
+    rows = session.execute(
+        select(FuelDaily).where(
+            and_(FuelDaily.date >= start, FuelDaily.date <= end)
+        )
+    ).scalars().all()
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        [{c.name: getattr(r, c.name) for c in FuelDaily.__table__.columns} for r in rows]
+    )
+    df = df.sort_values(["date", "ticker", "id"]).drop_duplicates(["date", "ticker"], keep="last")
+    return df.sort_values(["ticker", "date"]).reset_index(drop=True)
+
+
+def _analyses() -> pd.DataFrame:
+    session = _db_session()
+    rows = session.query(AnalysisRecord).order_by(AnalysisRecord.date.desc()).limit(30).all()
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        [{c.name: getattr(r, c.name) for c in AnalysisRecord.__table__.columns} for r in rows]
+    )
 
 
 # ── Wholesale (JEPX + supply) ──────────────────────────────────────────────

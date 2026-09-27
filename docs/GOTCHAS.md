@@ -164,14 +164,14 @@ fixed.
   as the header so the page and its requests agree. Note
   `--disable-blink-features=AutomationControlled` does **not** cover this — that hides
   `navigator.webdriver`, a different signal.
-- **METI's remaining ceiling shows up as `405 Not Allowed`, and it is transient** `(open — P3)`.
+- **METI's remaining ceiling shows up as `405 Not Allowed`, and it is transient.**
   Seen twice under sustained load — on the 21st URL of a fast burst, and on directory-style index
   URLs during a full `detect` — then 200 for the same URL spaced a few seconds later, with or
-  without a token. nginx's "Not Allowed" phrasing suggests a layer below CloudFront. It is
-  currently classified `unexpected_status` and **not** retried (`_do_get` treats only 429/5xx as
-  transient), so callers see a hard error and `policy/scraper` re-requests it at a higher level.
-  Whether to make 405 transient *for these hosts* is unresolved — a genuine 405 is not transient,
-  so don't blanket-retry it.
+  without a token. nginx's "Not Allowed" phrasing suggests a layer below CloudFront. `_do_get`
+  retries a 405 like a 429/5xx, but **only for `_TRANSIENT_405_HOSTS`** (the two METI hosts),
+  and `classify` reports one that outlives the retries as `server_error`, so `pipeline` treats it
+  as the host's condition rather than charging the meeting's retry budget. A genuine 405 is not
+  transient, so never add a host there without having watched it recover.
 - **The policy workflows need `playwright install chromium`, not just the pip extra.** `pip
   install -e ".[browser]"` (and `notebooklm-py[browser]`) bring the *Python package*; the browser
   binary it drives is a separate download. Without it `browser_clearance.available()` is True but
@@ -641,9 +641,11 @@ fixed.
 - The `_cache_buster` args are **underscore-prefixed, so Streamlit excludes them from cache
   keys** — the inline comments claiming they key the cache are wrong. Refresh works only
   because the sidebar button calls `st.cache_data.clear()`; don't remove that explicit clear.
-- `legacy.py` now holds only data helpers `app_main.py` still imports (`_db_session`, `_jepx_area`,
-  `_fuels`, `_analyses`); about 18% of `i18n.py`'s string table (13 of 71 keys) is unreferenced
-  `(open — P4)`.
+- The Drivers/Analyses loaders (`_jepx_area`, `_fuels`, `_analyses`) live in `read.py` beside the
+  one `@st.cache_resource` `_db_session`; `legacy.py` used to hold a second cached session. The
+  `met_*` keys in `i18n.py` look unreferenced but are built as `T(f"met_{key}")` by
+  `metric_labels()`; `tests/test_i18n.py` checks both those and every literal `T("...")` key,
+  since `T()` silently falls back to printing the key.
 - Chart components load D3 + Google Fonts from CDNs inside iframes — offline/dev-container runs
   render empty charts. D3 is pinned with an SRI hash (`components/_util.D3_SCRIPT`), so bumping
   its version without recomputing the hash blanks every chart. Every value templated into that
@@ -655,10 +657,12 @@ fixed.
 
 ## Tests & CI
 
-- **CI green ≠ safe**: `run-all` (the daily cron's entry point) has only a stubbed smoke test
-  (`tests/test_cli.py`: stage order, one failing stage doesn't stop the rest, `--dry-run`
-  reaches notify); the other `cli.py` commands have none `(open — P3)`, so regressions there
-  surface only as 05:30-JST production failures.
+- **CI green ≠ safe for the crons**, so `tests/test_cli.py` runs every `python -m repower.cli`
+  line found in the workflows with its real arguments (and all I/O stubbed), renders `--help`
+  for every command, and checks every import inside `cli.py` resolves (commands import what
+  they use when they run, so a rename breaks only that command). A new workflow command whose
+  implementation isn't stubbed in its `stubs` fixture fails there on its first network call;
+  add the stub rather than weakening the guard.
 - The brand gates (`tests/test_brand.py` and CI's "No brand trace" step) scan every tracked
   path and file, with only `CLAUDE.md` allowed. They build the word at runtime so they carry no
   trace themselves; keep it that way in any new check. A docs leak happened once before the
@@ -676,7 +680,10 @@ fixed.
   Windows console (cp932) *mid-command*, which reads as a crash in the scrape rather than in
   the printing.
 - `ruff` runs E, F, I, B and UP (`pyproject.toml`), and CI runs `mypy` over every module in
-  `src/repower`; keep both clean. mypy checks 3.12 syntax because numpy's stubs need it; the
+  `src/repower` with `check_untyped_defs`, `strict_equality`, `warn_unused_ignores` and
+  `no_implicit_reexport`; keep both clean. So import names from their defining module
+  (`matplotlib.ticker.MaxNLocator`, not `plt.MaxNLocator`), and delete a `# type: ignore` once
+  it stops suppressing anything. mypy checks 3.12 syntax because numpy's stubs need it; the
   runtime floor is 3.11. Read a BeautifulSoup link with `scraper.href_of(a)`, not `a["href"]`,
   which bs4 types as possibly multi-valued.
 - **Declare model columns as `Mapped[...] = mapped_column(...)`, never bare `Column()`.**

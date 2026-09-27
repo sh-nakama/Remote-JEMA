@@ -769,6 +769,27 @@ def test_5xx_not_retried_when_caller_opts_out(monkeypatch):
     assert len(calls) == 1, "retry_transient=False must fail fast"
 
 
+def test_meti_405_is_retried_as_transient(monkeypatch):
+    # METI's edge answers sustained load with 405 and serves the same URL seconds later.
+    calls = _fake_httpx(monkeypatch, [(405, {}, b""), (200, {}, b"ok")])
+    _no_curl(monkeypatch)
+    _fake_clock(monkeypatch)
+    monkeypatch.setattr(http_cache, "_budget_used", {})
+
+    assert http_cache._do_get("https://www.meti.go.jp/f", {}, True, 30.0)[1] == b"ok"
+    assert len(calls) == 2
+
+
+def test_405_from_other_hosts_is_not_retried(monkeypatch):
+    # Anywhere else a 405 is a genuine method error; retrying only delays the failure.
+    calls = _fake_httpx(monkeypatch, [(405, {}, b"")])
+    _no_curl(monkeypatch)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        http_cache._do_get("https://www.occto.or.jp/f", {}, True, 30.0)
+    assert len(calls) == 1
+
+
 def test_429_honours_retry_after_seconds(monkeypatch):
     _fake_httpx(monkeypatch, [(429, {"Retry-After": "7"}, b""), (200, {}, b"ok")])
     _no_curl(monkeypatch)
@@ -1085,13 +1106,16 @@ def test_classify_maps_each_typed_exception_to_a_stable_kind():
         assert expected in http_cache.FETCH_KINDS
     # HTTP status errors are split by code rather than lumped together, so a
     # moved page (404) is never mistaken for a host refusing us (403).
-    def _status(code):
-        req = httpx.Request("GET", "http://h/f")
+    def _status(code, url="http://h/f"):
+        req = httpx.Request("GET", url)
         return httpx.HTTPStatusError("s", request=req, response=httpx.Response(code, request=req))
 
     assert http_cache.classify(_status(404)) == "not_found"
     assert http_cache.classify(_status(403)) == "blocked_403"
     assert http_cache.classify(_status(503)) == "server_error"
+    # A 405 that outlived the retries is METI's rate limit (a host condition), not the document.
+    assert http_cache.classify(_status(405, "https://www.meti.go.jp/f")) == "server_error"
+    assert http_cache.classify(_status(405)) == "unexpected_status"
     # Must never raise on the failure path — a second failure would mask the first.
     assert http_cache.classify(ValueError("nonsense")) in http_cache.FETCH_KINDS
 
