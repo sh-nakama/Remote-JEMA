@@ -224,6 +224,7 @@ def run_all(
         typer.echo(f"   {sum(r['dated'] for r in dated)} meeting date(s) filled")
     except Exception as e:  # noqa: BLE001 — policy detection must not break the data pipeline
         typer.echo(f"   policy detect skipped: {e}", err=True)
+    _retag_policy()
 
     typer.echo("═══ POLICY SCHEDULE ═══")
     try:
@@ -486,6 +487,19 @@ def _report_deferred(count: int, noun: str) -> None:
         )
 
 
+def _retag_policy() -> None:
+    """Refresh rule-based topic tags (DB-only, idempotent). Never fails the caller: a
+    tagging bug must not cost the day's scrape or the HF push."""
+    from repower.policy.tagging import retag
+
+    try:
+        res = retag()
+    except Exception as e:  # noqa: BLE001 — tagging is derived data; the scrape matters more
+        typer.echo(f"   policy tags skipped: {e}", err=True)
+        return
+    typer.echo(f"   policy tags: {len(res['meetings'])} meeting(s), {len(res['committees'])} committee(s) updated")
+
+
 @policy_app.command("detect")
 def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
@@ -505,6 +519,8 @@ def policy_detect(
         )
     typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
     _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
+    if not dry_run:
+        _retag_policy()
 
 
 @policy_app.command("dates")
@@ -614,6 +630,7 @@ def policy_run(
     for host, n in sorted((summary.get("skipped_hosts") or {}).items()):
         typer.echo(f"  skipped {n} meeting(s) on {host} - its circuit breaker is open; "
                    f"they stay pending.")
+    _retag_policy()  # new briefings: tag any meeting NotebookLM did not classify
     _warn_if_stopped_early(summary, "remaining meetings stay pending - retry later.")
 
 
@@ -660,6 +677,7 @@ def policy_backfill(
         f"backfilled {committee}: done={summary['done']} errored={summary['errored']} "
         f"synthesized={summary['synthesized']}"
     )
+    _retag_policy()
     _warn_if_stopped_early(summary, "re-run this backfill later to continue.")
 
 
@@ -671,6 +689,7 @@ def policy_resume():
     _require_auth_or_exit()
     summary = resume()
     typer.echo(f"resumed: done={summary['done']} errored={summary['errored']}")
+    _retag_policy()
     _warn_if_stopped_early(summary, "re-run `policy resume` later to finish.")
 
 
@@ -916,6 +935,114 @@ def policy_doctor(
     if archived:
         typer.echo(f"({len(archived)} archived committee(s) excluded: "
                    f"{', '.join(sorted(c['key'] for c in archived))})")
+
+
+@policy_app.command("tags")
+def policy_tags():
+    """List the topic-tag vocabulary (key, group, Japanese / English label)."""
+    from repower.policy import tags as tg
+
+    names = {g.key: g.ja for g in tg.GROUPS}
+    group = None
+    for t in tg.TAGS:
+        if t.group != group:
+            group = t.group
+            typer.echo(f"\n{names[group]}")
+        typer.echo(f"  {t.key:<18}{t.ja} / {t.en}")
+
+
+def _fmt_tags(keys: list[str] | None) -> str:
+    return "—" if keys is None else (", ".join(keys) if keys else "(none)")
+
+
+@policy_app.command("tag")
+def policy_tag(
+    apply: bool = typer.Option(False, "--apply", help="Write the tags (default: dry run, show the diff only)"),
+    committee: str = typer.Option("all", help="Committee key or 'all'"),
+    scope: str = typer.Option("all", help="'committees', 'meetings' or 'all'"),
+    show: int = typer.Option(40, help="Max changes to list per kind (0 = all)"),
+):
+    """Apply rule-based topic tags to committees and meetings (no network, no auth).
+
+    Dry run by default: prints what *would* change so the tagging can be reviewed before
+    it touches the DB. Tags set by a person (`policy tag-set`), curated in the config, or
+    classified by NotebookLM outrank the rules and are never overwritten here. The daily
+    pipeline runs this with --apply semantics on every run.
+    """
+    from repower.policy import tags as tg
+    from repower.policy.store import sync_committees
+    from repower.policy.tagging import retag
+
+    if scope not in ("all", "committees", "meetings"):
+        typer.echo("--scope must be committees, meetings or all")
+        raise typer.Exit(code=2)
+    sync_committees()
+    res = retag(apply=apply, committee=None if committee == "all" else committee,
+                committees=scope != "meetings", meetings=scope != "committees")
+    for kind, label in (("committees", "Committees"), ("meetings", "Meetings")):
+        rows = res[kind]
+        if not rows:
+            continue
+        typer.echo(f"\n{label} ({len(rows)} {'updated' if apply else 'would change'}):")
+        for r in rows if not show else rows[:show]:
+            who = r["key"] + (f" 第{r['num']}回" if "num" in r else "")
+            typer.echo(f"  {who:<40}{_fmt_tags(r['old'])}  →  {_fmt_tags(r['new'])}  [{r['source']}]")
+        if show and len(rows) > show:
+            typer.echo(f"  … {len(rows) - show} more (use --show 0 to list all)")
+    counts: dict[str, int] = {}
+    for r in res["meetings"] + res["committees"]:
+        for k in r["new"]:
+            counts[k] = counts.get(k, 0) + 1
+    if counts:
+        typer.echo("\nBy tag: " + ", ".join(f"{k} {counts[k]}" for k in tg.TAG_KEYS if k in counts))
+    typer.echo(
+        f"\n{'Applied' if apply else 'Dry run — nothing written; re-run with --apply'}: "
+        f"{len(res['committees'])} committee(s), {len(res['meetings'])} meeting(s) "
+        f"of {res['checked']['committees']} / {res['checked']['meetings']} checked."
+    )
+
+
+@policy_app.command("tag-set")
+def policy_tag_set(
+    committee: str = typer.Argument(..., help="Committee key"),
+    tags: list[str] = typer.Argument(None, help="Tag keys (see `policy tags`)"),
+    meeting: int | None = typer.Option(None, "--meeting", help="Tag this meeting instead of the committee"),
+    none: bool = typer.Option(False, "--none", help="Pin 'no topic' (an empty set)"),
+    auto: bool = typer.Option(False, "--auto", help="Drop the pin; the automatic rules own it again"),
+):
+    """Pin a committee's (or one meeting's) tags by hand.
+
+    A pin outranks every automatic source, so the daily run will not change it. Use
+    --auto to hand it back to the rules.
+    """
+    from repower.policy.tagging import clear_manual_tags, retag, set_manual_tags
+
+    where = committee + (f" 第{meeting}回" if meeting is not None else "")
+    if auto:
+        if tags or none:
+            typer.echo("--auto takes no tags")
+            raise typer.Exit(code=2)
+        if not clear_manual_tags(committee, meeting_num=meeting):
+            typer.echo(f"no such {'meeting' if meeting is not None else 'committee'}: {where}")
+            raise typer.Exit(code=1)
+        retag(committee=committee)
+        typer.echo(f"{where}: pin removed; tags recomputed by the rules")
+        return
+    if not tags and not none:
+        typer.echo("give at least one tag, or --none, or --auto")
+        raise typer.Exit(code=2)
+    if tags and none:
+        typer.echo("--none cannot be combined with tags")
+        raise typer.Exit(code=2)
+    try:
+        ok = set_manual_tags(committee, list(tags or []), meeting_num=meeting)
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(code=2) from e
+    if not ok:
+        typer.echo(f"no such {'meeting' if meeting is not None else 'committee'}: {where}")
+        raise typer.Exit(code=1)
+    typer.echo(f"{where}: pinned to {_fmt_tags(list(tags or []))}")
 
 
 @policy_app.command("add")

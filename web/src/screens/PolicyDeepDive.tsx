@@ -11,6 +11,10 @@ import { filterChipBase, MONTHS, orgColor } from '../lib/chartkit'
 import { POLICY_RECENT_DAYS as RECENT_DAYS, POLICY_RECENT_MS as RECENT_MS } from '../lib/policyActivity'
 import { IconRail, TopBar, PageHeader } from '../lib/chrome'
 import { downloadIcs } from '../lib/download'
+import {
+  committeesWithTopicMeetings, matchesTags, tagCounts, tagLabel, tagsByGroup, toggleTag,
+} from '../lib/policyTags'
+import { TagPills } from '../lib/TagPills'
 
 type AnyMeeting = Meeting | Upcoming
 
@@ -106,6 +110,10 @@ export function PolicyDeepDiveScreen() {
   const [comOpen, setComOpen] = useState(false)
   const [dateOpen, setDateOpen] = useState(false)
   const [dateFilter, setDateFilter] = useState<'all' | '30d' | '90d' | 'year' | 'upcoming'>('all')
+  // Topic filter (renewable / storage / grid tags): the selected tag keys, matched as
+  // "any of". Multi-select, so its dropdown stays open while you pick.
+  const [topics, setTopics] = useState<string[]>([])
+  const [topicOpen, setTopicOpen] = useState(false)
   // Committee explorer sort: default (priority) order, or reorder by the most
   // recently updated committee (max meeting updatedAt).
   const [comSort, setComSort] = useState<'priority' | 'recent'>('priority')
@@ -157,6 +165,18 @@ export function PolicyDeepDiveScreen() {
   const meetings = pol.ready ? pol.meetings : []
   const untracked: Meeting[] = []
   const upcoming: Upcoming[] = pol.ready ? pol.upcoming : []
+  // Topic filter. A meeting is matched on its own tags; a committee on its standing tags
+  // *or* on holding a matching meeting (its own tags only roll up from recurring
+  // topics); a scheduled meeting has no content yet, so it goes by its committee.
+  const vocab = pol.tagVocab
+  const topicOn = topics.length > 0
+  const topicComs = committeesWithTopicMeetings(topics, meetings)
+  const comTags: Record<string, string[] | undefined> = {}
+  for (const c of committees) comTags[c.key] = c.tags
+  const topicMeetingOk = (m: Meeting) => matchesTags(topics, m.tags)
+  const topicComOk = (c: (typeof committees)[number]) => !topicOn || matchesTags(topics, c.tags) || topicComs.has(c.key)
+  const meetingTopicCounts = tagCounts(meetings)
+  const toggleTopic = (k: string) => setTopics((t) => toggleTag(t, k))
   // Countdown anchor: real today (midnight), used by the upcoming/next-meeting math.
   const now = new Date()
   const dayAnchor = new Date(now.getFullYear(), now.getMonth(), now.getDate())
@@ -186,7 +206,7 @@ export function PolicyDeepDiveScreen() {
   // in a list they just re-filtered.
   useEffect(() => {
     setFeedLimit(FEED_PAGE)
-  }, [committee, followedOnly, coverage, dateFilter, q, feedSort])
+  }, [committee, followedOnly, coverage, dateFilter, q, feedSort, topics])
 
   // ---- handlers ----
   const selAll = () => {
@@ -407,7 +427,7 @@ export function PolicyDeepDiveScreen() {
         // Flat, cross-org list newest-first so the most recently updated
         // committees surface at the top regardless of source.
         const items = committees
-          .filter((c) => !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c))
+          .filter((c) => !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c) && topicComOk(c))
           .sort((a, b) => (comRecency[b.key] ?? -Infinity) - (comRecency[a.key] ?? -Infinity))
           .map(mapCom)
         return items.length
@@ -420,7 +440,7 @@ export function PolicyDeepDiveScreen() {
       })()
     : orgs.map((org) => {
         const items = committees
-          .filter((c) => c.org === org && !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c))
+          .filter((c) => c.org === org && !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c) && topicComOk(c))
           .map(mapCom)
         const total = committees.filter((c) => c.org === org && !isArchived(c)).length
         return {
@@ -436,7 +456,7 @@ export function PolicyDeepDiveScreen() {
   // a separate collapsed section; searchable but not subject to the Followed-only
   // filter so they can always be found and restored. Newest last-meeting first.
   const archivedItems = committees
-    .filter((c) => isArchived(c) && matchComQ(c))
+    .filter((c) => isArchived(c) && matchComQ(c) && topicComOk(c))
     .sort((a, b) => (lastMeetingYear(b) ?? 0) - (lastMeetingYear(a) ?? 0))
     .map(mapCom)
 
@@ -504,6 +524,7 @@ export function PolicyDeepDiveScreen() {
       if (coverage === 'tracked' && selCom === 'all' && !qNorm && m.com && !trackedSet[m.com]) return false
     }
     if (!dateOkRecent(m.date)) return false
+    if (topicOn && !topicMeetingOk(m)) return false
     if (qNorm) {
       const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', m.com ? comOrg[m.com] : m.org || '']
         .concat(m.digest ? m.digest.map((sec) => sec.h + ' ' + sec.items.join(' ')) : [])
@@ -536,6 +557,9 @@ export function PolicyDeepDiveScreen() {
     const tori = (m as Meeting).tori
     const prevEn = (m as Meeting).prevEn ?? (m as Upcoming).prevEn
     const prevJa = (m as Meeting).prevJa ?? (m as Upcoming).prevJa
+    // A held meeting shows what it discussed; a scheduled one has no content yet, so it
+    // shows its committee's standing topics.
+    const tags = m.status === 'scheduled' ? (m.com ? comTags[m.com] : undefined) : (m as Meeting).tags
     // A meeting whose real date isn't backfilled yet carries a processing
     // timestamp — label it as the detection date rather than presenting it
     // as the meeting date.
@@ -551,6 +575,7 @@ export function PolicyDeepDiveScreen() {
       st: st.txt, stS: st.s,
       hasPrev: !!prevEn,
       preview: prevEn ? (L === 'ja' ? prevJa || '' : prevEn) : '',
+      tags,
       dot: {
         width: 7, height: 7, borderRadius: 999,
         background: m.status === 'scheduled' ? 'var(--okDot)' : (m.com && followedSet[m.com]) ? 'var(--ac)' : 'var(--fnt2)',
@@ -574,6 +599,7 @@ export function PolicyDeepDiveScreen() {
     if (!showUpcoming) return false
     if (!(selCom === 'all' || m.com === selCom)) return false
     if (fOnly && !followedSet[m.com]) return false
+    if (topicOn && !(matchesTags(topics, comTags[m.com]) || topicComs.has(m.com))) return false
     if (qNorm) {
       const hay = [m.en, m.ja, m.title, m.titleJa, m.prevEn || '', m.prevJa || '', comOrg[m.com]]
         .concat(m.agendaEn || []).concat(m.agendaJa || []).join(' ').toLowerCase()
@@ -655,7 +681,7 @@ export function PolicyDeepDiveScreen() {
     return Number.isNaN(t) ? '' : new Date(t).toISOString().slice(0, 10)
   }
   const allDone = meetings
-    .filter((m) => m.status === 'done' && !Number.isNaN(tsOf(m.updatedAt)))
+    .filter((m) => m.status === 'done' && topicMeetingOk(m) && !Number.isNaN(tsOf(m.updatedAt)))
     .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))
   const newlyDone = allDone.filter((m) => nowMs - tsOf(m.updatedAt) <= RECENT_MS)
   const newCount = newlyDone.length
@@ -698,6 +724,7 @@ export function PolicyDeepDiveScreen() {
 
   const chipCommittee = filterChipBase(selCom !== 'all')
   const chipDate = filterChipBase(dateFilter !== 'all')
+  const chipTopic = filterChipBase(topicOn)
   const chipFollowed = filterChipBase(fOnly)
   const covTS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'tracked' ? 'var(--ac)' : 'transparent', color: coverage === 'tracked' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
   const covAS: CSS = { padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 600, cursor: 'pointer', background: coverage === 'all' ? 'var(--ac)' : 'transparent', color: coverage === 'all' ? '#FFFFFF' : 'var(--mut)', whiteSpace: 'nowrap' }
@@ -866,7 +893,7 @@ export function PolicyDeepDiveScreen() {
               <span style={s('width:1px;height:22px;background:var(--dv)')}></span>
               {/* Committee filter dropdown */}
               <span style={s('position:relative')}>
-                <span style={chipCommittee} {...press(() => { setComOpen((o) => !o); setDateOpen(false) }, comOpen)}>
+                <span style={chipCommittee} {...press(() => { setComOpen((o) => !o); setDateOpen(false); setTopicOpen(false) }, comOpen)}>
                   {selCom === 'all'
                     ? (L === 'ja' ? '委員会 ▾' : 'Committee ▾')
                     : ((L === 'ja' ? selCommittee?.ja : selCommittee?.en) || selCom) + ' ▾'}
@@ -894,7 +921,7 @@ export function PolicyDeepDiveScreen() {
               </span>
               {/* Date-range filter dropdown */}
               <span style={s('position:relative')}>
-                <span style={chipDate} {...press(() => { setDateOpen((o) => !o); setComOpen(false) }, dateOpen)}>{DATE_LABELS[dateFilter]} ▾</span>
+                <span style={chipDate} {...press(() => { setDateOpen((o) => !o); setComOpen(false); setTopicOpen(false) }, dateOpen)}>{DATE_LABELS[dateFilter]} ▾</span>
                 {dateOpen && (
                   <>
                     <div onClick={() => setDateOpen(false)} style={s('position:fixed;inset:0;z-index:40')}></div>
@@ -912,6 +939,41 @@ export function PolicyDeepDiveScreen() {
                   </>
                 )}
               </span>
+              {/* Topic filter dropdown (hidden until the export carries a tag vocabulary) */}
+              {vocab.tags.length > 0 && (
+                <span style={s('position:relative')}>
+                  <span style={chipTopic} {...press(() => { setTopicOpen((o) => !o); setComOpen(false); setDateOpen(false) }, topicOpen)}>
+                    {topicOn
+                      ? (L === 'ja' ? `トピック · ${topics.length} ▾` : `Topic · ${topics.length} ▾`)
+                      : (L === 'ja' ? 'トピック ▾' : 'Topic ▾')}
+                  </span>
+                  {topicOpen && (
+                    <>
+                      <div onClick={() => setTopicOpen(false)} style={s('position:fixed;inset:0;z-index:40')}></div>
+                      <div style={s('position:absolute;top:calc(100% + 6px);right:0;z-index:50;width:300px;max-height:420px;overflow-y:auto;background:var(--bg1);border:1px solid var(--bd);border-radius:12px;box-shadow:var(--shPop);padding:6px')}>
+                        <Hoverable base={`display:block;padding:7px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;font-weight:600;color:${topicOn ? 'var(--tx)' : 'var(--acT)'}`} hover="background:var(--hov)" onClick={() => setTopics([])}>All topics · すべて</Hoverable>
+                        {tagsByGroup(vocab).map(({ group, tags }) => (
+                          <div key={group.key}>
+                            <div style={s('font-size:10px;font-weight:700;letter-spacing:.06em;color:var(--mut);margin:8px 8px 3px')}>{L === 'ja' ? group.ja : group.en}</div>
+                            {tags.map((t) => {
+                              const on = topics.includes(t.key)
+                              return (
+                                <Hoverable key={t.key} base={`display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 10px;border-radius:8px;cursor:pointer;font-size:12.5px;color:${on ? 'var(--acT)' : 'var(--tx2)'};background:${on ? 'var(--acTint)' : 'transparent'}`} hover="background:var(--hov)" onClick={() => toggleTopic(t.key)}>
+                                  <span style={s('min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap')}>{on ? '✓ ' : ''}{L === 'ja' ? t.ja : t.en}</span>
+                                  <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1;flex-shrink:0")} title={L === 'ja' ? '該当する会合数' : 'Meetings with this topic'}>{meetingTopicCounts[t.key] ?? 0}</span>
+                                </Hoverable>
+                              )
+                            })}
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </span>
+              )}
+              {topicOn && (
+                <TagPills keys={topics} vocab={vocab} lang={L} active={topics} onPick={toggleTopic} />
+              )}
               <span style={chipFollowed} {...press(toggleFollowed, fOnly)}>Followed only フォロー中のみ</span>
             </div>
 
@@ -1083,6 +1145,9 @@ export function PolicyDeepDiveScreen() {
                           <span style={f.stS}>{f.st}</span>
                         </div>
                         <div style={s("font-size:11px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{f.meta}</div>
+                        {!!f.tags?.length && (
+                          <div style={s('margin-top:4px')}><TagPills keys={f.tags} vocab={vocab} lang={L} active={topics} max={3} /></div>
+                        )}
                         {f.hasPrev && (
                           <div style={s('font-size:11.5px;color:var(--tx2);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{f.preview}</div>
                         )}
@@ -1124,6 +1189,9 @@ export function PolicyDeepDiveScreen() {
                           )}
                         </div>
                         <div style={s("font-size:12px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{L === 'ja' ? selCommittee?.en : selCommittee?.ja} · {selCommittee?.tier}</div>
+                        {!!selCommittee?.tags?.length && (
+                          <div style={s('margin-top:6px')}><TagPills keys={selCommittee.tags} vocab={vocab} lang={L} active={topics} onPick={toggleTopic} /></div>
+                        )}
                       </div>
                       <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" hover="color:var(--ac)" onClick={() => (selCommittee?.url ? openUrl(selCommittee.url) : tSource())}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`} />METI page · 元ページ</Hoverable>
                     </div>
@@ -1216,6 +1284,9 @@ export function PolicyDeepDiveScreen() {
                       {dTori && (<span style={s('font-size:10.5px;font-weight:600;background:var(--acTint);color:var(--acT);border-radius:6px;padding:1px 7px')}>とりまとめ</span>)}
                     </div>
                     <div style={s("font-size:12px;color:var(--mut);margin-top:2px;font-feature-settings:'tnum' 1")}>{dSub}</div>
+                    {!!dM.tags?.length && (
+                      <div style={s('margin-top:6px')}><TagPills keys={dM.tags} vocab={vocab} lang={L} active={topics} onPick={toggleTopic} /></div>
+                    )}
                   </div>
                   <Hoverable as="span" base="display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;color:var(--acT);cursor:pointer;flex-shrink:0;white-space:nowrap;padding-top:3px" hover="color:var(--ac)" onClick={() => (dComUrl ? openUrl(dComUrl) : tSource())}><RawSvg html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>`} />METI page · 元ページ</Hoverable>
                 </div>

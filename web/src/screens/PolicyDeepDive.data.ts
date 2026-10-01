@@ -39,6 +39,8 @@ export interface Committee {
   fetchAt?: string | null
   lastOkAt?: string | null
   fetchFailures?: number
+  /** Topic tags (keys of the exported `tagVocab`): the committee's standing mandate. Live rows. */
+  tags?: string[]
 }
 
 export interface DigestSection {
@@ -86,6 +88,8 @@ export interface Meeting {
   emptyTitle?: string
   emptySub?: string
   docs: DocRef[]
+  /** Topic tags for this meeting alone (not inherited from its committee). Live rows. */
+  tags?: string[]
 }
 
 export interface Upcoming {

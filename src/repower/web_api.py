@@ -153,6 +153,7 @@ def _run_catchup_job(db_path: str | None) -> None:
     from repower.policy.detect import backfill_dates, backfill_materials, detect
     from repower.policy.schedule import refresh_upcoming
     from repower.policy.store import pending_meetings
+    from repower.policy.tagging import retag
 
     try:
         # 1) Detect new meetings across the tracked committees ("check for updates").
@@ -225,6 +226,14 @@ def _run_catchup_job(db_path: str | None) -> None:
         _stage_finish(i, "done",
                       f"{n_disc} newly discovered" if n_disc else "no new committees",
                       f"新規{n_disc}件を発見" if n_disc else "新規なし")
+
+        # Topic tags are derived from what the steps above just wrote; refresh them so
+        # new meetings / committees show up under their topics straight away. Not a UI
+        # stage: it is DB-only and cannot fail the catch-up.
+        try:
+            retag(db_path=db_path)
+        except Exception:  # noqa: BLE001 — derived data; the daily run recomputes it
+            logger.exception("catchup: topic tagging failed")
 
         pending = len(pending_meetings(only_enabled=True, db_path=db_path))
         result = {

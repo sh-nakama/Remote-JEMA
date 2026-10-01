@@ -73,6 +73,8 @@ def stubs(monkeypatch):
         "repower.analysis.features.run_analysis": s.stub("analyze", fail=True),
         "repower.policy.detect.detect": s.stub("detect", detected),
         "repower.policy.detect.backfill_dates": s.stub("dates", [{"dated": 1}]),
+        "repower.policy.tagging.retag": s.stub(
+            "tags", {"meetings": [{}, {}], "committees": [{}], "checked": {"meetings": 9, "committees": 3}}),
         "repower.policy.schedule.refresh_upcoming": s.stub("schedule", 4),
         "repower.policy.catalog.discover_committees": s.stub("catalog", {"inserted": 0, "found": 9}),
         "repower.notify.webhook.notify": s.stub("notify", lambda day, dry_run: s.calls.append(f"dry_run={dry_run}")),
@@ -110,8 +112,9 @@ def test_run_all_runs_every_stage_and_survives_a_failing_one(stubs):
 
     assert result.exit_code == 0, result.output
     assert stubs.calls == ["areas", "jepx", "fuels", "news", "eprx", "tieline", "analyze",
-                           "detect", "dates", "schedule", "catalog", "notify", "dry_run=True"]
+                           "detect", "dates", "tags", "schedule", "catalog", "notify", "dry_run=True"]
     assert "analyze skipped: analyze down" in result.output
+    assert "policy tags: 2 meeting(s), 1 committee(s) updated" in result.output
     assert "2 new committee meeting(s) detected" in result.output
     assert result.output.rstrip().endswith("═══ DONE ═══")
 
@@ -157,6 +160,32 @@ def test_every_workflow_invocation_runs(stubs, argv):
 
     assert result.exit_code == 0, result.output
     assert stubs.calls, "exited without reaching the command's implementation"
+
+
+def test_a_failing_tagger_does_not_fail_the_scrape(stubs, monkeypatch):
+    """Tags are derived data: a bug there must not cost the day's scrape or the HF push."""
+    monkeypatch.setattr("repower.policy.tagging.retag", stubs.stub("tags", fail=True))
+
+    result = CliRunner().invoke(cli.app, ["run-all", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "policy tags skipped: tags down" in result.output
+    assert result.output.rstrip().endswith("═══ DONE ═══")
+
+
+@pytest.mark.parametrize("argv", [["policy", "detect"], ["policy", "run"], ["policy", "resume"]], ids=" ".join)
+def test_policy_commands_refresh_tags_after_writing(stubs, argv):
+    result = CliRunner().invoke(cli.app, argv)
+
+    assert result.exit_code == 0, result.output
+    assert stubs.calls[-1] == "tags"
+
+
+def test_policy_detect_dry_run_does_not_tag(stubs):
+    result = CliRunner().invoke(cli.app, ["policy", "detect", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "tags" not in stubs.calls
 
 
 def test_check_freshness_exits_1_when_a_source_is_stale(stubs, monkeypatch):
