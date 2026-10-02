@@ -377,8 +377,13 @@ offshore wind (74%) is distinguishable from one that touches it now and then (12
 ```bash
 repower policy coverage --topic wind_offshore     # committees ranked for a topic
 repower policy coverage --committee saisei_kano   # one committee's topics, strongest first
+repower policy coverage --committee saisei_kano --meetings   # per-meeting evidence: date, tags, document titles
 repower policy coverage                           # each topic's top three committees
 ```
+
+`--meetings` is the audit tool: it shows the raw evidence a coverage score summarises,
+so a curated or surprising number can be checked against what the committee's own
+documents actually say, meeting by meeting.
 
 Coverage is only as good as the meeting tags beneath it, so it becomes meaningful
 after the backlog is tagged (`repower policy tag --apply`).

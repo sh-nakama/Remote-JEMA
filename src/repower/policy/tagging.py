@@ -80,6 +80,40 @@ def committee_coverage(db_path: str | None = None, committee: str | None = None)
     return {ck: tg.coverage(r) for ck, r in rows.items()}
 
 
+def meeting_tag_rows(committee: str, db_path: str | None = None) -> list[dict]:
+    """One row per meeting of *committee*, newest first — the evidence behind its coverage.
+
+    Each row is ``{num, date, state, has_evidence, tags, tags_source, titles}``: ``date``
+    is the day coverage ages it by (real meeting date, else detection day), ``titles`` its
+    document titles joined with ' / ' (what the keyword rules actually saw), and
+    ``has_evidence`` whether this meeting counts towards coverage at all (see
+    :func:`repower.policy.tags.has_evidence`) — a row with no documents and no summary is
+    shown but does not move any score, which is what makes a thin score legible rather than
+    a mystery.
+    """
+    with session_scope(db_path, commit=False) as session:
+        titles: dict[int, list[str]] = {}
+        for num, title in session.query(
+            PolicyMaterial.meeting_num, PolicyMaterial.title
+        ).filter(PolicyMaterial.committee_key == committee):
+            if title:
+                titles.setdefault(num, []).append(title)
+        rows = []
+        mq = session.query(PolicyMeeting).filter(PolicyMeeting.committee_key == committee)
+        for m in mq.all():
+            rows.append({
+                "num": m.meeting_num,
+                "date": _meeting_day(m),
+                "state": m.state,
+                "has_evidence": tg.has_evidence(m.state, m.meeting_num in titles),
+                "tags": tg.decode(m.tags) or [],
+                "tags_source": m.tags_source,
+                "titles": " / ".join(titles.get(m.meeting_num, [])),
+            })
+    rows.sort(key=lambda r: r["num"], reverse=True)
+    return rows
+
+
 # ── Bulk rule pass ───────────────────────────────────────────────────────────
 def retag(
     db_path: str | None = None,

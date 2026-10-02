@@ -1049,6 +1049,8 @@ def policy_tag_set(
 def policy_coverage(
     topic: str | None = typer.Option(None, "--topic", help="Rank committees by how much of their work this tag is"),
     committee: str | None = typer.Option(None, "--committee", help="Show one committee's topics, strongest first"),
+    meetings: bool = typer.Option(
+        False, "--meetings", help="With --committee: list its meetings (date, tags, document titles) instead"),
     limit: int = typer.Option(15, help="Max rows (0 = all)"),
     min_score: float = typer.Option(0.05, help="Hide coverage below this score (0-1)"),
 ):
@@ -1057,26 +1059,45 @@ def policy_coverage(
     Coverage is graded 0-1: the recency-weighted share of a committee's meetings that
     carry the topic, shrunk on thin evidence — so 90% means a committee is almost
     entirely this, 20% that it comes up regularly. The same numbers drive the web's
-    topic ranking. With neither option, lists each topic's top three committees.
+    topic ranking. ``--meetings`` lists one committee's meetings instead — the raw
+    evidence a coverage score summarises, for checking a curated or surprising number
+    against what the committee's own documents actually say.
+    With neither option, lists each topic's top three committees.
     """
     from repower.policy import tags as tg
     from repower.policy.store import list_committees, sync_committees
-    from repower.policy.tagging import committee_coverage
+    from repower.policy.tagging import committee_coverage, meeting_tag_rows
 
     if topic is not None and not tg.valid(topic):
         typer.echo(f"unknown tag: {topic} (see `repower policy tags`)")
+        raise typer.Exit(code=2)
+    if meetings and committee is None:
+        typer.echo("--meetings needs --committee")
         raise typer.Exit(code=2)
     sync_committees()
     names = {c["key"]: c["name_ja"] or c["name_en"] for c in list_committees()}
     if committee is not None and committee not in names:
         typer.echo(f"unknown committee: {committee} (run `policy status` to see keys)")
         raise typer.Exit(code=1)
-    cov = committee_coverage(committee=committee)
 
     def line(key: str, label: str, c: tg.Coverage) -> str:
         last = c.last.isoformat() if c.last else "—"
         return f"  {c.score:>5.0%}  {c.n:>3}/{c.of:<3} last {last}  {label}"
 
+    if meetings:
+        assert committee is not None  # checked above
+        typer.echo(f"{committee}  {names[committee]}")
+        for r in meeting_tag_rows(committee):
+            day = r["date"].isoformat() if r["date"] else "—"
+            flag = "" if r["has_evidence"] else "  (no evidence — excluded from coverage)"
+            src = f" [{r['tags_source']}]" if r["tags_source"] else ""
+            tags = ", ".join(r["tags"]) or "(untagged)"
+            typer.echo(f"  第{r['num']}回  {day}  {r['state']:<10}{tags}{src}{flag}")
+            if r["titles"]:
+                typer.echo(f"         {r['titles'][:140]}")
+        return
+
+    cov = committee_coverage(committee=committee)
     if committee is not None:
         typer.echo(f"{committee}  {names[committee]}")
         rows = sorted(cov.get(committee, {}).items(), key=lambda kv: -kv[1].score)

@@ -733,6 +733,19 @@ fixed.
   words (太陽光, 風力) are *weak* keywords that only count when no more specific sibling tag
   matched, or an offshore-wind meeting is also filed as onshore. A single hit in a material
   *title* is enough for a meeting; the *body* needs three mentions (`tags.TAG_THRESHOLD`).
+- **A meeting's 5-tag cap must rank title evidence ahead of body evidence, not by raw
+  score.** Found auditing real data (`policy coverage --committee <key> --meetings`,
+  which shows the titles and tags behind every meeting): `saisei_kano` 第78回 had three
+  agenda items — a long, multi-subsection network-design item, a one-document offshore
+  wind item, and a one-document local-siting item. NotebookLM's own briefing spends a
+  page on the first and a paragraph on the second, so scoring the whole body by raw
+  keyword count gave `grid_connection` a body score of 34 against `wind_offshore`'s
+  title score of 3 — and a length-only sort dropped a meeting's actual offshore-wind
+  agenda item from its own tags. `tags_for_meeting` now ranks every tag that cleared
+  `TAG_THRESHOLD` from *title* text alone ahead of every tag that only cleared it with
+  body text, and fills the remaining cap slots from the body-only group; within each
+  group, total score still breaks ties. Never go back to one combined sort by total
+  score — that is exactly what silently dropped a real agenda item, and it would again.
 - **Adding a column read by an export needs both SELECTs.** `tags` was added to
   `build_policy_catalog` *and* `build_policy_snapshot` (and the meeting SELECT); the
   committee payload is shared, so missing one silently exports `tags: []` for that path. The

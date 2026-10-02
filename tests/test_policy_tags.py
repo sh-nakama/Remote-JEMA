@@ -96,6 +96,23 @@ def test_a_meeting_carries_at_most_the_cap_best_first():
     assert got == [k for k in tg.TAG_KEYS if k in got]  # vocabulary order
 
 
+def test_a_title_hit_survives_the_cap_against_a_verbose_body_elsewhere():
+    """A one-document agenda item must not lose its cap slot to a different, longer
+    section's keyword noise — title evidence is ranked ahead of body-only evidence
+    (found auditing a real meeting: saisei_kano 第78回, three agenda items, one of
+    which — offshore wind — was dropped from 5 tags purely because the network-design
+    agenda item's section was far longer)."""
+    titles = ["資料1 電力ネットワークの次世代化について", "資料2 洋上風力発電について"]
+    # Four more body-only topics, each scoring higher than the offshore-wind title hit
+    # (score 3), so a length-only ranking would push it out of a 5-tag cap.
+    body = (
+        "系統接続 " * 10 + "出力制御 " * 8 + "託送料金 " * 6 + "VPP " * 4
+    )
+    got = tg.tags_for_meeting(titles=titles, body=body)
+    assert "wind_offshore" in got
+    assert len(got) == tg.MAX_MEETING_TAGS
+
+
 D = datetime.date
 
 

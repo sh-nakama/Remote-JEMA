@@ -282,13 +282,33 @@ def tags_for_meeting(
 
     *titles* are its material titles (agenda item names), *body* its Japanese briefing
     when it has one, *extra_title* the meeting's own title. At most
-    :data:`MAX_MEETING_TAGS`, best-scoring first, returned in vocabulary order.
+    :data:`MAX_MEETING_TAGS`, returned in vocabulary order.
+
+    **Title evidence is reserved a place in the cap, ahead of body-only evidence.** A
+    multi-agenda meeting's briefing devotes very uneven space to each agenda item —
+    NotebookLM's own output can spend a page on a complex network-design item and one
+    paragraph on a one-document agenda item — so scoring the whole body by raw keyword
+    count lets a verbose section's tag crowd out a different agenda item's own dedicated
+    document purely on length, contradicting the rule that a title hit is evidence enough
+    on its own. Tags that clear :data:`TAG_THRESHOLD` from title text alone (a document
+    with that tag's own name on it, in effect an agenda item) are therefore ranked first
+    by total score; only the slots left over are filled from body-only tags. Measured on
+    a real meeting with three agenda items (saisei_kano #78): without this, a one-document
+    offshore-wind item (title score 3) lost its cap slot to body-only grid-connection
+    noise (score 34) from the meeting's longest section, even though the agenda plainly
+    included it.
     """
     title_text = "\n".join([t for t in titles if t] + ([extra_title] if extra_title else []))
+    title_scores = _scores([(title_text, TITLE_WEIGHT)])
     scores = _scores([(title_text, TITLE_WEIGHT), (body or "", BODY_WEIGHT)])
     hit = [(k, s) for k, s in scores.items() if s >= TAG_THRESHOLD]
-    hit.sort(key=lambda ks: (-ks[1], TAG_KEYS.index(ks[0])))
-    return normalize(k for k, _ in hit[:MAX_MEETING_TAGS])
+
+    def rank(ks: tuple[str, int]) -> tuple[int, int]:
+        return (-ks[1], TAG_KEYS.index(ks[0]))
+
+    titled = sorted((ks for ks in hit if title_scores.get(ks[0], 0) >= TAG_THRESHOLD), key=rank)
+    body_only = sorted((ks for ks in hit if title_scores.get(ks[0], 0) < TAG_THRESHOLD), key=rank)
+    return normalize(k for k, _ in (titled + body_only)[:MAX_MEETING_TAGS])
 
 
 @dataclass(frozen=True)
