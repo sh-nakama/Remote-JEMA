@@ -27,6 +27,7 @@ from urllib.parse import urlsplit
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
 from repower.policy import notebook as nb
+from repower.policy import tags as topic_tags
 from repower.policy.committees import Committee
 from repower.policy.scraper import list_materials
 from repower.policy.store import (
@@ -47,6 +48,7 @@ from repower.policy.store import (
     update_committee,
     update_meeting,
 )
+from repower.policy.tagging import set_meeting_llm_tags
 from repower.scrapers.http_cache import (
     circuit_cooldown,
     classify,
@@ -435,6 +437,21 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         except nb.NotebookLMError as e:
             logger.warning("english digest failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
+        # Topic tags, from the same notebook (it is deleted below). Best-effort like the
+        # digest: a meeting with no LLM answer keeps the rule-based tags the daily pass
+        # derives from its briefing, so a failure here costs precision, not coverage.
+        llm_tags: list[str] | None = None
+        try:
+            answer = nb.ask(notebook_id, topic_tags.classification_question())
+            llm_tags = topic_tags.parse_classification(
+                answer.get("answer") if isinstance(answer, dict) else None
+            )
+            if llm_tags is None:
+                logger.warning("topic classification for %s 第%d回 was not usable JSON; keeping rule tags",
+                               committee.key, meeting_num)
+        except nb.NotebookLMError as e:
+            logger.warning("topic classification failed for %s 第%d回: %s", committee.key, meeting_num, e)
+
         if quality_flag is None and len(briefing) < 400:
             quality_flag = "short_output"
 
@@ -448,6 +465,8 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             last_error=None, last_error_at=None,
         )
         regenerate_running_doc(committee.key, db_path=db_path)
+        if llm_tags is not None:
+            set_meeting_llm_tags(committee.key, meeting_num, llm_tags, db_path=db_path)
 
         # Delete the ephemeral notebook only AFTER the briefing is persisted.
         try:

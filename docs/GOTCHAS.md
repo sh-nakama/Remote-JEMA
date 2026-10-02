@@ -690,6 +690,37 @@ fixed.
   `error` counts meetings whose *summarisation* failed, `fetchStatus` says whether the
   committee's own pages could be reached. Both `build_policy_catalog` and `build_policy_snapshot`
   have their own SELECTs — adding a column to one silently omits it from the other.
+- **Topic tags: committee tags and meeting tags are different things, and they must not inherit.**
+  A committee's tags are its *standing mandate* (curated in `committees.py` where unambiguous,
+  else name rules + a rollup of its meetings' tags); a meeting's tags are what *it* discussed.
+  Copying committee tags down to meetings looks like free recall and makes the Topic filter
+  useless: a broad committee's offshore-wind-only meeting would surface under every topic the
+  committee ever covered. The rollup only goes *up* (a topic recurring in ≥2 meetings and ≥20% of
+  those with content), so the two never feed each other. `policy/tags.py` is the single
+  definition; the vocabulary reaches the web as `tagVocab`, never as a second TS copy.
+- **`tags_source` is a precedence, not a label.** `manual` > `config`/`llm` > `rule`; a write
+  lands only if its source ranks at least as high as the stored one (`tagging._write`). That is
+  what lets the daily rule pass re-run freely — material titles grow and briefings arrive after
+  the first pass — without ever undoing a NotebookLM classification or a person's `tag-set`.
+  `NULL` = never tagged, `"[]"` = tagged with nothing; a manual `[]` is a real pin. If you add a
+  writer, go through `_write`.
+- **The NotebookLM classification can only happen inside `summarize_meeting`.** The per-meeting
+  notebook is deleted as soon as the briefing is saved, so a meeting summarised before tags
+  existed can only get rule tags (from its briefing) until it is re-run
+  (`policy run --committee K --meeting N`). An *unusable* answer (`parse_classification` → `None`)
+  must stay distinct from a valid empty list — the first keeps the rule tags, the second is
+  accepted. Unknown keys from the model are dropped; never trust it to stay in the vocabulary.
+- **Tag keyword traps.** `送配電` contains `配電`, and is in nearly every grid document — the
+  distribution tag therefore matches by regex with a `(?<!送)` lookbehind, not by substring.
+  ASCII keywords (`DR`, `FIT`, `VPP`) match on word boundaries so `ADR` doesn't fire. Generic
+  words (太陽光, 風力) are *weak* keywords that only count when no more specific sibling tag
+  matched, or an offshore-wind meeting is also filed as onshore. A single hit in a material
+  *title* is enough for a meeting; the *body* needs three mentions (`tags.TAG_THRESHOLD`).
+- **Adding a column read by an export needs both SELECTs.** `tags` was added to
+  `build_policy_catalog` *and* `build_policy_snapshot` (and the meeting SELECT); the
+  committee payload is shared, so missing one silently exports `tags: []` for that path. The
+  retag step is wrapped (`cli._retag_policy`) so a tagging bug can never fail the scrape or the
+  HF push — keep it that way, it is derived data.
 
 ## Streamlit dashboard
 

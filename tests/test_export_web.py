@@ -253,7 +253,7 @@ def test_build_policy_snapshot_synthesis_rollup_and_discovered(tmp_path: Path):
     )
 
     snap = build_policy_snapshot(db)
-    assert set(snap) == {"committees", "meetings", "upcoming"}
+    assert set(snap) == {"committees", "meetings", "upcoming", "tagVocab"}
     by = {c["key"]: c for c in snap["committees"]}
 
     et = by["emissions_trading"]

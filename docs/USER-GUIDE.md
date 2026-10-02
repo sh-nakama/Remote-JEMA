@@ -75,7 +75,8 @@ Three panes under a top bar:
 2. **Meeting Feed (center).** A reverse-chronological feed of meetings as cards.
    Each card shows the committee, meeting number, date, source org, a status, and
    a one-line summary. Above the feed: a **search** box, **date filters**, a
-   **Tracked / All** coverage toggle, and a **Followed-only** toggle.
+   **Topic** filter (see [Topic tags](#topic-tags)), a **Tracked / All** coverage
+   toggle, and a **Followed-only** toggle.
 3. **Detail pane (right).** Selecting a **committee** shows its high-level
    **synthesis** (the running document). Selecting a **meeting** shows that
    session's **digest** — themed sections in English and Japanese — plus its
@@ -117,6 +118,8 @@ The top bar has the bilingual title, the ⌘K search box, the **"i" info guide**
 kind: **議事次第** (agenda), **議事録** (minutes), **資料** (handouts), and
 **とりまとめ** (torimatome / summary reports). Citations in a digest deep-link back
 to the source PDF.
+
+**Topic tags.** What a committee or meeting is *about* — see [Topic tags](#topic-tags).
 
 **Digest & briefing.** The AI output for a summarised meeting: a *briefing*
 (the raw structured markdown) rendered as a bilingual *digest* of themed sections.
@@ -314,6 +317,73 @@ deployment instead reads static `policy/committees.json` + `policy/meetings.json
 exported by `repower export-web`. The DB itself is synced to a private HF dataset
 and refreshed by the daily cron.
 
+### Topic tags
+
+Tags slice the Deep Dive by subject instead of by committee — useful because one
+committee often touches several subjects, and one subject (offshore wind) is spread
+over several committees. The first pass covers **renewable technology and grid
+infrastructure**:
+
+| Group | Tags |
+| --- | --- |
+| 発電 Generation | 事業用太陽光 · 屋根置き・住宅用太陽光 · 次世代太陽電池 · 洋上風力 · 陸上風力 · 水力・地熱 · バイオマス |
+| 蓄電・調整力 Storage & flexibility | 系統用蓄電池 · 揚水・長期貯蔵 · 分散リソース・VPP・DR |
+| 系統設備 Grid infrastructure | 広域系統整備・直流送電 · 系統接続・ノンファーム · 出力制御・混雑管理 · 託送料金・費用負担 · 配電・レジリエンス |
+| 支援制度 Support schemes | FIT/FIP・調達価格 · 長期脱炭素電源オークション |
+| その他の脱炭素電源 Other low-carbon | 水素・アンモニア · 原子力 |
+
+**Using it.** The **Topic ▾** chip in the filter bar is multi-select and matches *any*
+of the chosen topics. It narrows the meeting feed, the *newly summarised* banner,
+upcoming meetings and the committee explorer together. Tag pills appear on feed cards
+and in both detail headers; clicking one in a detail header toggles that topic. The
+dropdown's counts are meetings per topic. The chip is hidden when the export carries
+no tag vocabulary (a snapshot older than this feature).
+
+**Committee tags vs. meeting tags.** They are different things and do not inherit:
+
+- A **committee's tags** are its *standing mandate*. Where the mandate is
+  unambiguous they are curated in `policy/committees.py`; otherwise they come from
+  the committee's name plus any topic that recurs across its meetings (at least two
+  meetings and a fifth of those with content). A committee also appears under a topic
+  if any of its meetings carries it.
+- A **meeting's tags** are what *that meeting* discussed — so a broad committee's
+  offshore-wind-only meeting is filed under 洋上風力 alone, not under everything the
+  committee ever covers. An upcoming (not-yet-held) meeting shows its committee's tags,
+  since there is nothing else to go on.
+
+**How a meeting gets tagged (daily).** Two stages, both automatic:
+
+1. **Rules, the same day it is detected.** Keyword rules over the meeting's document
+   titles (a title hit is enough) and, once summarised, its Japanese briefing (a topic
+   needs repeated mention — a passing line about 太陽光 is not a topic). DB-only: no
+   NotebookLM, no network, so it runs in `run-all`, `policy detect`, `policy run` and
+   the web catch-up, and re-evaluates as documents and briefings arrive.
+2. **NotebookLM check at summarisation.** While a meeting's notebook exists, one extra
+   question classifies it against the closed vocabulary and its answer replaces the
+   rule tags. If that fails (rate limit, unusable answer) the rule tags stand.
+
+A tag set records who decided it, and a higher source is never overwritten by a lower
+one: **manual > curated config / NotebookLM > rules.**
+
+**Reviewing and correcting tags (CLI).**
+
+```bash
+repower policy tags                      # the vocabulary (keys, JA / EN labels)
+repower policy tag                       # DRY RUN: what the rules would change
+repower policy tag --apply               # write it (the daily run does this itself)
+repower policy tag --committee yojo_fuuryoku --scope meetings
+repower policy tag-set <committee> wind_offshore grid_planning   # pin a committee's tags
+repower policy tag-set <committee> --meeting 12 storage_grid     # pin one meeting's tags
+repower policy tag-set <committee> --none          # pin "no topic"
+repower policy tag-set <committee> --auto          # drop the pin; rules own it again
+```
+
+Meetings that were summarised before this feature get **rule tags only** (their
+notebooks are deleted after summarisation, so there is nothing left to ask). Re-run a
+meeting with `repower policy run --committee <key> --meeting <N>` to get a NotebookLM
+classification for it. The tags live in the DB, so a backfill reaches production through
+the Hugging Face dataset push, not git.
+
 ### CLI reference
 
 Run with the installed console script (`repower …`) from the project root:
@@ -329,6 +399,7 @@ Run with the installed console script (`repower …`) from the project root:
 | `repower policy run --committee <key> --meeting <N>` | Summarise exactly that one meeting, bypassing the queue. Works on an already-summarised meeting (re-run / repair). |
 | `repower policy run --committee <key> --max-per-run 1` | "Latest only": the newest pending meeting of one committee, then stop. |
 | `repower policy queue --committee <key> --meeting <N>` | Move one meeting to the front of the summarisation queue (`--clear` to take it off). |
+| `repower policy tags` / `tag` / `tag-set` | List the topic-tag vocabulary; apply rule-based tags (dry run unless `--apply`); pin tags by hand. See [Topic tags](#topic-tags). |
 | `repower policy doctor` | Explain why committees failed to fetch (blocked, WAF challenge, moved page …) and what to do about each. Add `--all` to include healthy ones, `--history` for recent attempts. |
 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
 | `repower web-api` | Start the local backend that powers the interactive frontend. |

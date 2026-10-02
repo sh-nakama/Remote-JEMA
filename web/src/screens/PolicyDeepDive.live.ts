@@ -11,6 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getSnapshot, useDataNonce } from '../lib/data'
+import { EMPTY_VOCAB, type TagVocab } from '../lib/policyTags'
 import type { Committee, DigestSection, DocRef, JpSection, Meeting, Upcoming } from './PolicyDeepDive.data'
 
 interface CommitteeSnap {
@@ -39,6 +40,7 @@ interface CommitteeSnap {
   fetchAt?: string | null
   lastOkAt?: string | null
   fetchFailures?: number
+  tags?: string[]
 }
 
 interface MeetingSnap {
@@ -64,6 +66,7 @@ interface MeetingSnap {
   prevJa?: string
   emptyTitle?: string
   emptySub?: string
+  tags?: string[]
 }
 
 interface UpcomingSnap {
@@ -88,12 +91,16 @@ export interface PolicyLive {
   committees: Committee[]
   meetings: Meeting[]
   upcoming: Upcoming[]
+  /** The topic-tag vocabulary the `tags` fields refer to. Empty for a snapshot that
+   * predates tags, which hides the Topic filter rather than showing raw keys. */
+  tagVocab: TagVocab
 }
 
 interface Raw {
   committees?: CommitteeSnap[]
   meetings?: MeetingSnap[]
   upcoming?: UpcomingSnap[]
+  tagVocab?: TagVocab
 }
 
 function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
@@ -127,6 +134,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
     fetchAt: x.fetchAt ?? null,
     lastOkAt: x.lastOkAt ?? null,
     fetchFailures: x.fetchFailures ?? 0,
+    tags: x.tags ?? [],
   }))
   const meetings: Meeting[] = (raw.meetings || []).map((x) => ({
     key: x.key,
@@ -151,6 +159,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
     emptyTitle: x.emptyTitle,
     emptySub: x.emptySub,
     docs: x.docs || [],
+    tags: x.tags ?? [],
   }))
   const upcoming: Upcoming[] = (raw.upcoming || []).map((u) => ({
     key: 'u_' + (u.committee_key || u.org) + '_' + (u.num ?? ''),
@@ -169,7 +178,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
     agendaJa: [],
     docs: [],
   }))
-  return { committees, meetings, upcoming }
+  return { committees, meetings, upcoming, tagVocab: raw.tagVocab ?? EMPTY_VOCAB }
 }
 
 export function usePolicyLive(interactive: boolean): PolicyLive {
@@ -179,7 +188,9 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
   // effect only ran on mount, so newly-detected meetings never appeared until a
   // full reload — the modal refreshed its own catalog but not the screen behind it.
   const nonce = useDataNonce()
-  const [state, setState] = useState<PolicyLive>({ ready: false, stale: false, failed: false, committees: [], meetings: [], upcoming: [] })
+  const [state, setState] = useState<PolicyLive>({
+    ready: false, stale: false, failed: false, committees: [], meetings: [], upcoming: [], tagVocab: EMPTY_VOCAB,
+  })
   // Once the live API has served real data this session, keep it "sticky". The
   // `/api/health` probe re-runs on window focus and flips `interactive` false the
   // moment the backend is unreachable (e.g. while `repower web-api` is restarting),
@@ -193,9 +204,9 @@ export function usePolicyLive(interactive: boolean): PolicyLive {
     let alive = true
     const loadStatic = (): Promise<Raw> =>
       Promise.all([
-        getSnapshot<{ committees: CommitteeSnap[] }>('policy/committees.json'),
+        getSnapshot<{ committees: CommitteeSnap[]; tagVocab?: TagVocab }>('policy/committees.json'),
         getSnapshot<{ meetings: MeetingSnap[]; upcoming?: UpcomingSnap[] }>('policy/meetings.json'),
-      ]).then(([c, m]) => ({ committees: c.committees, meetings: m.meetings, upcoming: m.upcoming }))
+      ]).then(([c, m]) => ({ committees: c.committees, meetings: m.meetings, upcoming: m.upcoming, tagVocab: c.tagVocab }))
     // The live endpoint can transiently fail right after the backend starts, so
     // retry before giving up — and if it still fails, fall back to the static
     // snapshot but say so (`stale`) instead of silently presenting old data as live.

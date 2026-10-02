@@ -192,6 +192,11 @@ class PolicyCommittee(Base):
     prefix: Mapped[str | None] = mapped_column(String(64))
     log_pages: Mapped[str | None] = mapped_column(Text)
     min_meeting: Mapped[int | None] = mapped_column(Integer)
+    # Topic tags (see repower.policy.tags): a JSON array of vocabulary keys, NULL until
+    # first tagged ("[]" = tagged, no topic). ``tags_source`` records who decided, which
+    # sets who may overwrite whom: manual > config/llm > rule.
+    tags: Mapped[str | None] = mapped_column(Text)
+    tags_source: Mapped[str | None] = mapped_column(String(8))  # rule | config | manual
     # Fetch observability (see repower.policy.detect). `last_checked` marks that a
     # detection pass *ran*; it says nothing about whether the committee's pages
     # were actually reachable, and historically was not written at all on the
@@ -267,6 +272,10 @@ class PolicyMeeting(Base):
     # Set when a user asks the dashboard to summarise this meeting but auth was stale
     # (or they queued it): the next `policy run` drains requested meetings first.
     gen_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # Topic tags for *this* meeting (not inherited from the committee) — same encoding
+    # as ``PolicyCommittee.tags``; source is rule | llm | manual.
+    tags: Mapped[str | None] = mapped_column(Text)
+    tags_source: Mapped[str | None] = mapped_column(String(8))
     detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     __table_args__ = (
@@ -367,6 +376,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_registry(engine)
             _migrate_add_fetch_observability(engine)
             _migrate_add_policy_meeting_error(engine)
+            _migrate_add_policy_tags(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -509,6 +519,28 @@ def _migrate_add_policy_meeting_error(engine) -> None:
     with engine.begin() as conn:
         for ddl in missing:
             conn.execute(sql_text(ddl))
+
+
+def _migrate_add_policy_tags(engine) -> None:
+    """Add ``tags`` / ``tags_source`` to ``policy_committee`` and ``policy_meeting`` (additive).
+
+    Existing rows stay NULL (= never tagged); ``repower policy tag --apply`` or the
+    next daily run fills them. The production DB is pulled from Hugging Face, so a
+    column added only to the model would be missing there until this runs.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    names = insp.get_table_names()
+    for table in ("policy_committee", "policy_meeting"):
+        if table not in names:
+            continue
+        cols = {c["name"] for c in insp.get_columns(table)}
+        with engine.begin() as conn:
+            if "tags" not in cols:
+                conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags TEXT"))
+            if "tags_source" not in cols:
+                conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags_source VARCHAR(8)"))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

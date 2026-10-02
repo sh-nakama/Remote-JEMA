@@ -41,6 +41,11 @@ class Committee:
     # EGC: historical log pages (newest first) + earliest meeting to consider.
     log_pages: tuple[str, ...] = field(default_factory=tuple)
     min_meeting: int | None = None
+    # Curated topic tags (keys of ``repower.policy.tags``): the committee's *standing
+    # mandate*. ``None`` = no curated opinion, so tags come from the name and from what
+    # its meetings turn out to discuss; ``()`` would assert "none". Only set where the
+    # mandate is unambiguous — an over-broad curated list defeats the filter.
+    tags: tuple[str, ...] | None = None
 
     @property
     def is_meti(self) -> bool:
@@ -54,6 +59,19 @@ class Committee:
     def is_egc(self) -> bool:
         return self.source == "EGC"
 
+
+# Curated topic-tag sets shared by more than one committee (keys of ``repower.policy.tags``).
+# Renewable generation + the schemes that pay for it (FIT/FIP price-setting bodies).
+_RENEWABLE_SUPPORT_TAGS = (
+    "solar_utility", "solar_rooftop", "wind_onshore", "wind_offshore",
+    "hydro_geothermal", "biomass", "support_fit_fip",
+)
+# Mass-introduction of renewables: the generation that matters most for the grid, and
+# the grid questions it raises.
+_RENEWABLE_GRID_TAGS = (
+    "solar_utility", "solar_rooftop", "wind_offshore",
+    "grid_planning", "grid_connection", "grid_curtailment", "grid_cost", "support_fit_fip",
+)
 
 COMMITTEES: list[Committee] = [
     # ── METI (経済産業省) — static HTML indexes ──────────────────────────────
@@ -93,6 +111,7 @@ COMMITTEES: list[Committee] = [
         name_en="Renewable Energy Mass Introduction Subcommittee",
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/saisei_kano/",
         source="METI",
+        tags=_RENEWABLE_GRID_TAGS,
     ),
     Committee(
         key="jisedai_kiban",
@@ -107,6 +126,7 @@ COMMITTEES: list[Committee] = [
         name_en="Offshore Wind Promotion WG",
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/saisei_kano/yojo_furyoku/index.html",
         source="METI",
+        tags=("wind_offshore",),
     ),
     Committee(
         key="santeii",
@@ -114,6 +134,7 @@ COMMITTEES: list[Committee] = [
         name_en="Procurement Price Calculation Committee (FIT/FIP)",
         url="https://www.meti.go.jp/shingikai/santeii/",
         source="METI",
+        tags=_RENEWABLE_SUPPORT_TAGS,
     ),
     Committee(
         key="doji_shijo",
@@ -128,6 +149,7 @@ COMMITTEES: list[Committee] = [
         name_en="Renewable Energy Main Power Source Subcommittee",
         url="https://www.meti.go.jp/shingikai/enecho/denryoku_gas/saiene_shuryoku/",
         source="METI",
+        tags=_RENEWABLE_SUPPORT_TAGS,
     ),
     # ── OCCTO (電力広域的運営推進機関) — JS-rendered indexes, probe by number ──
     Committee(

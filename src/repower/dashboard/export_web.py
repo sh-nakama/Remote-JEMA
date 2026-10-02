@@ -43,6 +43,7 @@ from repower.db import (  # noqa: E402
     get_session,
     init_db,
 )
+from repower.policy import tags as policy_tags  # noqa: E402
 from repower.timeutil import JST, today_jst  # noqa: E402
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
@@ -838,6 +839,9 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             "fetchAt": _iso_or_none(_opt(c, "last_fetch_at")),
             "lastOkAt": _iso_or_none(_opt(c, "last_ok_at")),
             "fetchFailures": _opt(c, "consecutive_failures") or 0,
+            # Topic tags (keys of ``tagVocab``): the committee's standing mandate. A
+            # never-tagged committee is just an empty list to the UI.
+            "tags": policy_tags.decode(_opt(c, "tags")) or [],
             # Newest meeting-level pipeline event: when, which meeting, what state
             # it landed in and (on failure) why. Drives the Manage status table's
             # ordering — a committee is "recent" by when we last did something to
@@ -859,7 +863,7 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
             "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
             "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
             "last_synth_meeting, archived, last_fetch_status, last_fetch_kind, "
-            "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures "
+            "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures, tags "
             "FROM policy_committee"
         )).mappings().all()
         meetings = con.execute(text(
@@ -992,7 +996,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
                 "SELECT committee_key, name_ja, name_en, url, source, latest_meeting, "
                 "source_count, enabled, priority, running_digest_en_md, running_summary_md, "
                 "last_synth_meeting, archived, last_fetch_status, last_fetch_kind, "
-                "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures "
+                "last_fetch_detail, last_fetch_at, last_ok_at, consecutive_failures, tags "
                 "FROM policy_committee"
             )
         ).mappings().all()
@@ -1000,7 +1004,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
                 "has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
-                "detected_at FROM policy_meeting"
+                "detected_at, tags FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(
@@ -1068,6 +1072,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             # An un-backfilled date is the detection timestamp, not the meeting date.
             + (" · " + (upd if mdate else "検出 " + upd) if upd else ""),
             "docs": docs,
+            # What *this* meeting discussed (not inherited from the committee).
+            "tags": policy_tags.decode(m["tags"]) or [],
         }
         if has_digest:
             try:
@@ -1150,7 +1156,14 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             }
         )
 
-    return {"committees": committees_data, "meetings": meetings_data, "upcoming": upcoming_data}
+    return {
+        "committees": committees_data,
+        "meetings": meetings_data,
+        "upcoming": upcoming_data,
+        # The topic-tag vocabulary the `tags` fields above refer to, so the web needs no
+        # second copy of the labels.
+        "tagVocab": policy_tags.vocabulary(),
+    }
 
 
 def _public_error(error: str | None, flag: str | None) -> str | None:
@@ -1180,7 +1193,10 @@ def export_policy(out: Path, db_path: str | None = None) -> dict:
         m["error"] = _public_error(m["error"], m["flag"])
     files = 0
     total = 0
-    total += _write_json(out / "policy" / "committees.json", {"schema": SCHEMA_VERSION, "committees": committees_data})
+    total += _write_json(
+        out / "policy" / "committees.json",
+        {"schema": SCHEMA_VERSION, "committees": committees_data, "tagVocab": snap["tagVocab"]},
+    )
     files += 1
     total += _write_json(
         out / "policy" / "meetings.json",
