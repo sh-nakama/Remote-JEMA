@@ -306,6 +306,12 @@ class Coverage:
     last: date | None
 
 
+def has_evidence(state: str | None, has_materials: bool) -> bool:
+    """Whether a meeting says anything about its committee's topics: it was summarised, or
+    at least has documents. A just-detected meeting with neither must not dilute coverage."""
+    return state == "done" or has_materials
+
+
 def coverage(rows: Iterable[tuple[date | None, Iterable[str], bool]]) -> dict[str, Coverage]:
     """Per-topic coverage of one committee from its meetings.
 

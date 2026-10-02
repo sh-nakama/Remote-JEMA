@@ -1045,6 +1045,59 @@ def policy_tag_set(
     typer.echo(f"{where}: pinned to {_fmt_tags(list(tags or []))}")
 
 
+@policy_app.command("coverage")
+def policy_coverage(
+    topic: str | None = typer.Option(None, "--topic", help="Rank committees by how much of their work this tag is"),
+    committee: str | None = typer.Option(None, "--committee", help="Show one committee's topics, strongest first"),
+    limit: int = typer.Option(15, help="Max rows (0 = all)"),
+    min_score: float = typer.Option(0.05, help="Hide coverage below this score (0-1)"),
+):
+    """How much each committee covers each topic (no network, no auth; read-only).
+
+    Coverage is graded 0-1: the recency-weighted share of a committee's meetings that
+    carry the topic, shrunk on thin evidence — so 90% means a committee is almost
+    entirely this, 20% that it comes up regularly. The same numbers drive the web's
+    topic ranking. With neither option, lists each topic's top three committees.
+    """
+    from repower.policy import tags as tg
+    from repower.policy.store import list_committees, sync_committees
+    from repower.policy.tagging import committee_coverage
+
+    if topic is not None and not tg.valid(topic):
+        typer.echo(f"unknown tag: {topic} (see `repower policy tags`)")
+        raise typer.Exit(code=2)
+    sync_committees()
+    names = {c["key"]: c["name_ja"] or c["name_en"] for c in list_committees()}
+    if committee is not None and committee not in names:
+        typer.echo(f"unknown committee: {committee} (run `policy status` to see keys)")
+        raise typer.Exit(code=1)
+    cov = committee_coverage(committee=committee)
+
+    def line(key: str, label: str, c: tg.Coverage) -> str:
+        last = c.last.isoformat() if c.last else "—"
+        return f"  {c.score:>5.0%}  {c.n:>3}/{c.of:<3} last {last}  {label}"
+
+    if committee is not None:
+        typer.echo(f"{committee}  {names[committee]}")
+        rows = sorted(cov.get(committee, {}).items(), key=lambda kv: -kv[1].score)
+        rows = [(k, c) for k, c in rows if c.score >= min_score]
+        for k, c in rows[: limit or None]:
+            typer.echo(line(k, f"{k}  {tg.tag_by_key(k).ja}", c))
+        if not rows:
+            typer.echo("  (no topic coverage — run `repower policy tag --apply` first?)")
+        return
+    for t in ([topic] if topic else list(tg.TAG_KEYS)):
+        ranked = sorted(((ck, m[t]) for ck, m in cov.items() if t in m and m[t].score >= min_score),
+                        key=lambda kc: -kc[1].score)
+        if not ranked and not topic:
+            continue
+        typer.echo(f"\n{t}  {tg.tag_by_key(t).ja} / {tg.tag_by_key(t).en}")
+        for ck, c in ranked[: (limit or None) if topic else 3]:
+            typer.echo(line(ck, f"{ck}  {names.get(ck, '')}", c))
+        if not ranked:
+            typer.echo("  (no committee covers this yet)")
+
+
 @policy_app.command("add")
 def policy_add(
     key: str = typer.Option(..., help="Unique committee key (ascii id, e.g. ccs_jigyo)"),

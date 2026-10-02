@@ -61,12 +61,6 @@ def _meeting_day(m: Any) -> date | None:
     return m.detected_at.date() if m.detected_at else None
 
 
-def has_evidence(state: str | None, has_materials: bool) -> bool:
-    """Whether a meeting says anything about its committee's topics: it was summarised, or
-    at least has documents. A just-detected meeting with neither must not dilute coverage."""
-    return state == "done" or has_materials
-
-
 def committee_coverage(db_path: str | None = None, committee: str | None = None) -> dict[str, dict[str, tg.Coverage]]:
     """Topic coverage per committee, from the tags currently stored (read-only).
 
@@ -81,7 +75,7 @@ def committee_coverage(db_path: str | None = None, committee: str | None = None)
         if committee:
             mq = mq.filter(PolicyMeeting.committee_key == committee)
         for m in mq.all():
-            ok = has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
+            ok = tg.has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
             rows.setdefault(m.committee_key, []).append((_meeting_day(m), tg.decode(m.tags) or [], ok))
     return {ck: tg.coverage(r) for ck, r in rows.items()}
 
@@ -141,7 +135,7 @@ def retag(
                     if apply:
                         _write(m, new, "rule")
             n_meetings += 1
-            ok = has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
+            ok = tg.has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
             evidence.setdefault(m.committee_key, []).append((_meeting_day(m), final, ok))
 
         if committees:

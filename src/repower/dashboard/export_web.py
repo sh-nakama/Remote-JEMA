@@ -726,6 +726,27 @@ def _committee_tier(c: dict) -> str:
     return "Tier 1" if (c["source_count"] or 0) >= 8 else "Tier 2"
 
 
+# Whether a meeting has any documents, for the coverage evidence test.
+_HAS_MATERIALS = (
+    "EXISTS (SELECT 1 FROM policy_material pm WHERE pm.committee_key = policy_meeting.committee_key "
+    "AND pm.meeting_num = policy_meeting.meeting_num) AS has_materials"
+)
+
+
+def _coverage_day(meeting_date, detected_at) -> date | None:
+    """A meeting's day for coverage ageing: its real date, else when we detected it.
+
+    Raw ``text()`` SELECTs hand dates back as strings, so parse rather than assume.
+    """
+    for v in (meeting_date, detected_at):
+        if v:
+            try:
+                return date.fromisoformat(str(v)[:10])
+            except ValueError:
+                continue
+    return None
+
+
 def build_committees_payload(committees, meetings, material_counts=None) -> list[dict]:
     """Build the ``committees.json`` payload from raw committee + meeting rows.
 
@@ -754,8 +775,18 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
     # `latest_meeting` (highest number summarised): what a reader needs to answer
     # "when did the pipeline last do anything here, and how did it go?".
     last_update_by_com: dict[str, tuple[tuple[str, int], dict]] = {}
+    # (day, tags, has_evidence) per meeting, for each committee's topic coverage.
+    cov_rows: dict[str, list[tuple[date | None, list[str], bool]]] = {}
     for m in meetings:
         k = m["committee_key"]
+        mk = m.keys()
+        cov_rows.setdefault(k, []).append((
+            _coverage_day(m["meeting_date"] if "meeting_date" in mk else None,
+                          m["detected_at"] if "detected_at" in mk else None),
+            policy_tags.decode(m["tags"] if "tags" in mk else None) or [],
+            policy_tags.has_evidence(m["state"] if "state" in mk else None,
+                                     bool(m["has_materials"]) if "has_materials" in mk else False),
+        ))
         n_meetings_by_com[k] = n_meetings_by_com.get(k, 0) + 1
         st = m["state"] if "state" in m.keys() else None
         if st is not None:
@@ -774,6 +805,14 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             rank = (upd, m["meeting_num"] if "meeting_num" in m.keys() and m["meeting_num"] else 0)
             if k not in last_update_by_com or rank > last_update_by_com[k][0]:
                 last_update_by_com[k] = (rank, dict(m))
+
+    def _coverage(key: str) -> list[dict]:
+        """Topic coverage for *key*, strongest first (see ``policy.tags.coverage``)."""
+        cov = policy_tags.coverage(cov_rows.get(key, []))
+        return [
+            {"tag": t, "score": round(c.score, 3), "n": c.n, "of": c.of, "last": c.last.isoformat() if c.last else None}
+            for t, c in sorted(cov.items(), key=lambda kv: -kv[1].score)
+        ]
 
     def _opt(c, col):
         """Read a column that may be absent from the caller's SELECT."""
@@ -842,6 +881,9 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
             # Topic tags (keys of ``tagVocab``): the committee's standing mandate. A
             # never-tagged committee is just an empty list to the UI.
             "tags": policy_tags.decode(_opt(c, "tags")) or [],
+            # How much of the committee's recent work each topic is: graded 0-1, with
+            # the meeting counts behind it. `tags` says *whether*, this says *how much*.
+            "tagCoverage": _coverage(c["committee_key"]),
             # Newest meeting-level pipeline event: when, which meeting, what state
             # it landed in and (on failure) why. Drives the Manage status table's
             # ordering — a committee is "recent" by when we last did something to
@@ -868,7 +910,7 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
         )).mappings().all()
         meetings = con.execute(text(
             "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
-            "last_error, updated_at FROM policy_meeting"
+            "last_error, updated_at, detected_at, tags, " + _HAS_MATERIALS + " FROM policy_meeting"
         )).mappings().all()
         mat_counts = {
             r["committee_key"]: r["n"]
@@ -1004,7 +1046,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
                 "has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
-                "detected_at, tags FROM policy_meeting"
+                "detected_at, tags, " + _HAS_MATERIALS + " FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(

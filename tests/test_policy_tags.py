@@ -468,6 +468,25 @@ def test_snapshot_and_catalog_carry_tags_and_the_vocabulary(policy_db):
     assert {c["key"]: c["tags"] for c in build_policy_catalog(policy_db)}["yojo_fuuryoku"] == ["wind_offshore"]
 
 
+def test_export_carries_graded_coverage_on_both_payload_paths(policy_db):
+    for n in (1, 2, 3):
+        _meeting(policy_db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(policy_db, "yojo_fuuryoku", 4, "資料1 託送料金")
+    for n in range(5, 12):
+        _meeting(policy_db, "yojo_fuuryoku", n)          # no documents: must not dilute
+    tagging.retag(policy_db)
+
+    for payload in (build_policy_snapshot(policy_db)["committees"], build_policy_catalog(policy_db)):
+        cov = {c["key"]: c for c in payload}["yojo_fuuryoku"]["tagCoverage"]
+        assert [c["tag"] for c in cov] == ["wind_offshore", "grid_cost"]       # strongest first
+        top = cov[0]
+        assert (top["n"], top["of"]) == (3, 4)
+        assert 0 < cov[1]["score"] < top["score"] < 1
+        assert top["last"] is not None
+    other = {c["key"]: c for c in build_policy_snapshot(policy_db)["committees"]}
+    assert other["doji_shijo"]["tagCoverage"] == []
+
+
 def test_static_export_writes_the_vocabulary_beside_the_committees(policy_db, tmp_path):
     export_policy(tmp_path, policy_db)
 
@@ -529,3 +548,25 @@ def test_policy_tags_lists_the_vocabulary():
     out = CliRunner().invoke(cli.app, ["policy", "tags"]).output
     for t in tg.TAGS:
         assert t.key in out
+
+
+def test_policy_coverage_ranks_committees_for_a_topic(monkeypatch, tmp_path):
+    db = _cli_db(monkeypatch, tmp_path)
+    for n in (1, 2, 3):
+        _meeting(db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(db, "saisei_kano", 1, "資料1 洋上風力の促進区域")
+    for n in (2, 3, 4):
+        _meeting(db, "saisei_kano", n, "資料1 託送料金")
+    tagging.retag(db)
+
+    out = CliRunner().invoke(cli.app, ["policy", "coverage", "--topic", "wind_offshore"]).output
+    assert out.index("yojo_fuuryoku") < out.index("saisei_kano")        # the dedicated body ranks first
+
+    one = CliRunner().invoke(cli.app, ["policy", "coverage", "--committee", "saisei_kano"]).output
+    assert one.index("grid_cost") < one.index("wind_offshore")
+
+
+def test_policy_coverage_rejects_unknown_names(monkeypatch, tmp_path):
+    _cli_db(monkeypatch, tmp_path)
+    assert CliRunner().invoke(cli.app, ["policy", "coverage", "--topic", "made_up"]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["policy", "coverage", "--committee", "no_such"]).exit_code == 1
