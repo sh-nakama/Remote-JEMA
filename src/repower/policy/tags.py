@@ -29,6 +29,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 
 
 @dataclass(frozen=True)
@@ -155,10 +156,17 @@ MAX_MEETING_TAGS = 5
 TITLE_WEIGHT = 3
 BODY_WEIGHT = 1
 TAG_THRESHOLD = 3
-# A committee gains a tag from its meetings when at least this many carry it, and at
-# least this share of its tagged meetings do.
-ROLLUP_MIN_MEETINGS = 2
-ROLLUP_MIN_SHARE = 0.2
+# Coverage: how much of a committee's recent work a topic accounts for (see `coverage`).
+# Meetings count for less the older they are, measured back from the committee's own
+# newest meeting — so a concluded committee keeps its topics rather than fading out.
+COVERAGE_HALF_LIFE_DAYS = 365.0
+# Shrinkage: this many imaginary meetings with no topic are added to every denominator,
+# so one tagged meeting out of one is not "100% of the committee".
+COVERAGE_PRIOR = 2.0
+# A topic becomes one of a committee's standing tags when its coverage reaches this and
+# at least COVERAGE_MIN_MEETINGS meetings carry it (a recurring topic, not a one-off).
+COVERAGE_MIN = 0.2
+COVERAGE_MIN_MEETINGS = 2
 
 
 def valid(key: str) -> bool:
@@ -283,21 +291,61 @@ def tags_for_meeting(
     return normalize(k for k, _ in hit[:MAX_MEETING_TAGS])
 
 
-def rollup_committee_tags(meeting_tags: Iterable[list[str]]) -> list[str]:
-    """Committee tags implied by its meetings' tags.
+@dataclass(frozen=True)
+class Coverage:
+    """How much one topic accounts for a committee's meetings.
 
-    *meeting_tags* has one list per **tagged** meeting. A tag is rolled up when enough
-    meetings carry it that it is a recurring topic, not a one-off agenda item.
+    ``score`` is in [0, 1) and graded: recency-weighted, shrunk towards zero on thin
+    evidence. ``n`` of ``of`` are the plain meeting counts behind it (the evidence a
+    reader can check), ``last`` the day of the newest meeting carrying the topic.
     """
-    rows = [m for m in meeting_tags]
-    if not rows:
-        return []
-    counts: dict[str, int] = {}
-    for tags in rows:
-        for k in set(tags):
-            counts[k] = counts.get(k, 0) + 1
-    need_share = ROLLUP_MIN_SHARE * len(rows)
-    return normalize(k for k, n in counts.items() if n >= ROLLUP_MIN_MEETINGS and n >= need_share)
+
+    score: float
+    n: int
+    of: int
+    last: date | None
+
+
+def coverage(rows: Iterable[tuple[date | None, Iterable[str], bool]]) -> dict[str, Coverage]:
+    """Per-topic coverage of one committee from its meetings.
+
+    *rows* is one ``(day, tags, has_evidence)`` per meeting. A meeting with no evidence
+    (nothing downloaded or summarised yet) says nothing about the committee and is
+    skipped entirely, so a backlog of just-detected meetings cannot dilute a score.
+
+    ``score = Σ w·[topic ∈ meeting] / (Σ w + COVERAGE_PRIOR)`` with
+    ``w = ½^(age / COVERAGE_HALF_LIFE_DAYS)``, age counted back from the committee's
+    newest dated meeting. Only topics at least one meeting carries appear.
+    """
+    evidenced = [(d, frozenset(normalize(t))) for d, t, ok in rows if ok]
+    if not evidenced:
+        return {}
+    dated = [d for d, _ in evidenced if d is not None]
+    anchor = max(dated) if dated else None
+    weights = [
+        0.5 ** (max(0, (anchor - d).days) / COVERAGE_HALF_LIFE_DAYS) if anchor and d else 1.0
+        for d, _ in evidenced
+    ]
+    total = sum(weights)
+    hit_w: dict[str, float] = {}
+    hit_n: dict[str, int] = {}
+    last: dict[str, date] = {}
+    for (d, tags), w in zip(evidenced, weights, strict=True):
+        for k in tags:
+            hit_w[k] = hit_w.get(k, 0.0) + w
+            hit_n[k] = hit_n.get(k, 0) + 1
+            if d is not None and (k not in last or d > last[k]):
+                last[k] = d
+    return {
+        k: Coverage(hit_w[k] / (total + COVERAGE_PRIOR), hit_n[k], len(evidenced), last.get(k))
+        for k in TAG_KEYS
+        if k in hit_w
+    }
+
+
+def tags_from_coverage(cov: dict[str, Coverage]) -> list[str]:
+    """The committee's standing tags implied by its coverage: recurring, not one-off."""
+    return normalize(k for k, c in cov.items() if c.score >= COVERAGE_MIN and c.n >= COVERAGE_MIN_MEETINGS)
 
 
 # ── LLM classification ───────────────────────────────────────────────────────

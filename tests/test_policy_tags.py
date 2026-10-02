@@ -3,6 +3,7 @@ and the export. All hermetic — DB-only, NotebookLM faked at the lowest primiti
 
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 
@@ -95,11 +96,59 @@ def test_a_meeting_carries_at_most_the_cap_best_first():
     assert got == [k for k in tg.TAG_KEYS if k in got]  # vocabulary order
 
 
-def test_rollup_needs_recurrence_not_a_one_off():
-    meetings = [["wind_offshore"], ["wind_offshore", "grid_cost"], [], [], []]
-    assert tg.rollup_committee_tags(meetings) == ["wind_offshore"]  # 2 of 5; grid_cost only once
-    assert tg.rollup_committee_tags([["grid_cost"]]) == []
-    assert tg.rollup_committee_tags([]) == []
+D = datetime.date
+
+
+def test_coverage_is_graded_by_how_much_of_the_committee_a_topic_is():
+    rows = [(D(2026, 9, i), ["wind_offshore"], True) for i in range(1, 9)]       # 8 of 10
+    rows += [(D(2026, 9, 10 + i), ["grid_cost"], True) for i in range(2)]        # 2 of 10
+    cov = tg.coverage(rows)
+
+    assert cov["wind_offshore"].score > cov["grid_cost"].score > 0
+    assert (cov["wind_offshore"].n, cov["wind_offshore"].of) == (8, 10)
+    assert cov["wind_offshore"].last == D(2026, 9, 8)
+    assert "nuclear" not in cov
+
+
+def test_coverage_shrinks_thin_evidence():
+    """One tagged meeting out of one is a hint, not '100% of the committee'."""
+    one = tg.coverage([(D(2026, 9, 1), ["wind_offshore"], True)])["wind_offshore"].score
+    many = tg.coverage([(D(2026, 9, i), ["wind_offshore"], True) for i in range(1, 21)])["wind_offshore"].score
+    assert one < 0.4 < 0.85 < many < 1
+
+
+def test_coverage_skips_meetings_with_no_evidence():
+    rows = [(D(2026, 9, 1), ["wind_offshore"], True), (D(2026, 9, 2), ["wind_offshore"], True)]
+    backlog = [(D(2026, 9, 3), [], False)] * 50   # detected, nothing downloaded or summarised
+    assert tg.coverage(rows + backlog) == tg.coverage(rows)
+    assert tg.coverage(backlog) == {}
+
+
+def test_coverage_favours_recent_meetings():
+    old = [(D(2022, 1, 1) + datetime.timedelta(days=30 * i), ["biomass"], True) for i in range(5)]
+    new = [(D(2026, 1, 1) + datetime.timedelta(days=30 * i), ["wind_offshore"], True) for i in range(5)]
+    cov = tg.coverage(old + new)
+    assert cov["wind_offshore"].score > 3 * cov["biomass"].score
+
+
+def test_coverage_ages_from_the_committees_own_newest_meeting():
+    """A concluded committee keeps its topics; only meetings *within* it fade."""
+    rows = [(D(2019, 1, 1) + datetime.timedelta(days=30 * i), ["wind_offshore"], True) for i in range(6)]
+    assert tg.coverage(rows)["wind_offshore"].score == pytest.approx(
+        tg.coverage([(d + datetime.timedelta(days=2500), t, ok) for d, t, ok in rows])["wind_offshore"].score)
+    assert tg.coverage(rows)["wind_offshore"].score > 0.5
+
+
+def test_undated_meetings_count_in_full():
+    assert tg.coverage([(None, ["nuclear"], True), (None, [], True)])["nuclear"].score == pytest.approx(1 / 4)
+
+
+def test_standing_tags_need_recurrence_not_a_one_off():
+    meetings = [(D(2026, 9, i), t, True) for i, t in enumerate(
+        [["wind_offshore"], ["wind_offshore", "grid_cost"], [], [], []], start=1)]
+    assert tg.tags_from_coverage(tg.coverage(meetings)) == ["wind_offshore"]   # 2 of 5; grid_cost only once
+    assert tg.tags_from_coverage(tg.coverage([(D(2026, 9, 1), ["grid_cost"], True)])) == []
+    assert tg.tags_from_coverage({}) == []
 
 
 @pytest.mark.parametrize(("answer", "expected"), [
@@ -275,6 +324,21 @@ def test_committee_scope_limits_the_pass(policy_db):
 def test_decode_drops_keys_that_left_the_vocabulary():
     assert tg.decode('["wind_offshore", "retired_tag"]') == ["wind_offshore"]
     assert tg.decode(None) is None and tg.decode("not json") is None and tg.decode('{"a": 1}') is None
+
+
+def test_committee_coverage_reads_the_stored_tags(policy_db):
+    for n in (1, 2, 3):
+        _meeting(policy_db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(policy_db, "yojo_fuuryoku", 4, "資料1 託送料金")
+    for n in range(5, 15):
+        _meeting(policy_db, "yojo_fuuryoku", n)                 # no documents: no evidence
+    tagging.retag(policy_db)
+
+    cov = tagging.committee_coverage(policy_db)["yojo_fuuryoku"]
+
+    assert (cov["wind_offshore"].n, cov["wind_offshore"].of) == (3, 4)
+    assert cov["grid_cost"].n == 1 and cov["grid_cost"].score < cov["wind_offshore"].score
+    assert tagging.committee_coverage(policy_db, committee="doji_shijo") == {}
 
 
 # ── Migration ────────────────────────────────────────────────────────────────
