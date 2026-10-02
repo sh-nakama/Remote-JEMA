@@ -12,7 +12,7 @@ Two separate questions are answered separately:
 
 - **Committee tags** are its *standing mandate*. Curated in
   :mod:`repower.policy.committees` where we are sure, otherwise derived from the
-  committee's name and rolled up from the tags of its own meetings.
+  committee's name plus the topics its own meetings give enough *coverage* (see `coverage`).
 - **Meeting tags** are what *that meeting* discussed. They deliberately do **not**
   inherit from the committee: a broad committee holding an offshore-wind-only meeting
   should surface under 洋上風力 alone, not under every topic it ever touches.

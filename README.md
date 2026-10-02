@@ -100,6 +100,7 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `policy add` | Add/update a tracked committee. Options: `--key`, `--name-ja`, `--url`, `--source` (METI/OCCTO/EGC), `--name-en`, `--priority`. |
 | `policy enable` / `policy disable` | Start/stop tracking a committee (kept in the DB; disabled committees are skipped by detect/run). |
 | `policy tags` / `policy tag` / `policy tag-set` | Topic tags (renewable technology + grid infrastructure) for committees and meetings. `tags` lists the vocabulary; `tag` applies the keyword rules (**dry run unless `--apply`**, no auth); `tag-set` pins a committee's or one meeting's tags by hand. The daily run keeps them current. |
+| `policy coverage` | How much each committee covers each topic, 0-100% (recency-weighted share of its meetings, shrunk on thin evidence). Options: `--topic <tag>` (rank committees), `--committee <key>` (rank its topics). Read-only, no auth. |
 | `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--dry-run`. |
 
 Examples:

@@ -692,12 +692,29 @@ fixed.
   have their own SELECTs — adding a column to one silently omits it from the other.
 - **Topic tags: committee tags and meeting tags are different things, and they must not inherit.**
   A committee's tags are its *standing mandate* (curated in `committees.py` where unambiguous,
-  else name rules + a rollup of its meetings' tags); a meeting's tags are what *it* discussed.
+  else name rules + the topics its meetings give enough *coverage*); a meeting's tags are what
+  *it* discussed.
   Copying committee tags down to meetings looks like free recall and makes the Topic filter
   useless: a broad committee's offshore-wind-only meeting would surface under every topic the
-  committee ever covered. The rollup only goes *up* (a topic recurring in ≥2 meetings and ≥20% of
-  those with content), so the two never feed each other. `policy/tags.py` is the single
+  committee ever covered. Coverage only goes *up* (see below), so the two never feed each other. `policy/tags.py` is the single
   definition; the vocabulary reaches the web as `tagVocab`, never as a second TS copy.
+- **Topic coverage is graded, shrunk, and aged from the committee's *own* newest meeting.**
+  `tags.coverage` = `Σ w·hit / (Σ w + COVERAGE_PRIOR)`, `w = ½^(age/365d)`. Three choices that look
+  like quirks are deliberate: *(a)* the prior (2 imaginary topic-less meetings) means 1 of 1 reads
+  ~33%, so **small or new committees score low** — don't "fix" it by dropping the prior, it is what
+  stops a single passing agenda item from claiming a whole committee; *(b)* age is counted back
+  from the committee's newest *dated* meeting, not from today — measured from today a concluded
+  committee decays to ~0 and drops out of the topic view entirely (its `last` date is what shows
+  it is dormant); *(c)* meetings with no documents and not summarised are skipped
+  (`tags.has_evidence`), because a just-detected backlog would otherwise dilute every score. A
+  dateless meeting uses its detection day, so a backfill of dateless history can look "recent".
+- **Coverage is computed in `build_committees_payload`, from the *meeting rows it is handed*.**
+  Both the static export and the live catalog route through it, so both meeting SELECTs carry
+  `tags`, `detected_at` and `has_materials`; a caller whose SELECT lacks them silently exports an
+  empty `tagCoverage` (columns are read tolerantly), not an error. `retag` and
+  `tagging.committee_coverage` use the same `has_evidence` rule, so the standing tags written by
+  the daily run and the coverage displayed cannot disagree. Raw `text()` SELECTs return dates as
+  strings — `_coverage_day` parses them.
 - **`tags_source` is a precedence, not a label.** `manual` > `config`/`llm` > `rule`; a write
   lands only if its source ranks at least as high as the stored one (`tagging._write`). That is
   what lets the daily rule pass re-run freely — material titles grow and briefings arrive after

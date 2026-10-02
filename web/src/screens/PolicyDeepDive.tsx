@@ -12,7 +12,7 @@ import { POLICY_RECENT_DAYS as RECENT_DAYS, POLICY_RECENT_MS as RECENT_MS } from
 import { IconRail, TopBar, PageHeader } from '../lib/chrome'
 import { downloadIcs } from '../lib/download'
 import {
-  committeesWithTopicMeetings, matchesTags, tagCounts, tagLabel, tagsByGroup, toggleTag,
+  bestTopic, committeesWithTopicMeetings, matchesTags, pct, rankByFit, tagCounts, tagLabel, tagsByGroup, toggleTag, topicFit,
 } from '../lib/policyTags'
 import { TagPills } from '../lib/TagPills'
 
@@ -31,6 +31,10 @@ const EMPTY_MEETING: Meeting = {
 // snapshot carries every detected meeting (thousands), so the list is capped and
 // scrolls rather than rendering the whole archive into the column.
 const FEED_PAGE = 50
+
+// Committee-detail coverage bars hide topics below this score: a few percent is noise
+// from one passing agenda item, not something the committee covers.
+const COVERAGE_SHOW_MIN = 0.05
 
 // dUntil: days between a date string and the given "today" anchor (real today).
 function dUntil(ds: string, anchor: Date): number {
@@ -401,8 +405,21 @@ export function PolicyDeepDiveScreen() {
         ? '次回 第' + c.nextNo + '回 · ' + mo + '月' + dy + '日 · あと' + dd + '日'
         : 'Next No. ' + c.nextNo + ' · ' + MONTHS[mo - 1] + ' ' + dy + ' · in ' + dd + 'd'
     }
+    // With a Topic selected, how much of this committee that topic is (its strongest
+    // selected one) — the reason the explorer is ordered the way it is.
+    const best = topicOn ? bestTopic(topics, c.coverage) : undefined
+    const fit = best
+      ? {
+          txt: tagLabel(vocab, best.tag, L) + ' ' + pct(best.score),
+          title: (L === 'ja'
+            ? `${best.of}回中${best.n}回の会合で扱った（直近の会合ほど重視）`
+            : `Covered in ${best.n} of ${best.of} meetings (recent ones count more)`)
+            + (best.last ? (L === 'ja' ? ` · 最新 ${best.last}` : ` · latest ${best.last}`) : ''),
+        }
+      : undefined
     return {
       key: c.key,
+      fit,
       n1: L === 'ja' ? c.ja : c.en, n2: L === 'ja' ? c.en : c.ja, tier: c.tier, last: c.last,
       next: nx, hasNext: !!c.nextDate,
       following, tracked: c.tracked !== false, isRecent: isRecentCom(c.key),
@@ -439,9 +456,11 @@ export function PolicyDeepDiveScreen() {
           : []
       })()
     : orgs.map((org) => {
-        const items = committees
-          .filter((c) => c.org === org && !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c) && topicComOk(c))
-          .map(mapCom)
+        // Best topic fit first when a Topic is selected; otherwise the incoming order.
+        const items = rankByFit(
+          committees.filter((c) => c.org === org && !isArchived(c) && (!fOnly || isFol(c)) && matchComQ(c) && topicComOk(c)),
+          (c) => topicFit(topics, c.coverage),
+        ).map(mapCom)
         const total = committees.filter((c) => c.org === org && !isArchived(c)).length
         return {
           // With an active search, show how many of the group's committees match
@@ -754,6 +773,9 @@ export function PolicyDeepDiveScreen() {
           )}
         </span>
         <span style={s('display:flex;align-items:center;gap:7px;flex-shrink:0')}>
+          {c.fit && (
+            <span style={s("font-size:9.5px;font-weight:700;background:var(--acTint);color:var(--acT);border-radius:999px;padding:0 7px;white-space:nowrap;font-feature-settings:'tnum' 1")} title={c.fit.title}>{c.fit.txt}</span>
+          )}
           <span style={s("font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.last}</span>
           <span
             role="checkbox"
@@ -1206,6 +1228,31 @@ export function PolicyDeepDiveScreen() {
                         <span style={s("font-size:11px;font-weight:600;border-radius:999px;padding:2px 10px;border:1px solid var(--bd2);color:var(--tx2);font-feature-settings:'tnum' 1")}>{L === 'ja' ? `第${selCommittee?.lastSynth}回まで統合` : `synthesised thru No. ${selCommittee?.lastSynth}`}</span>
                       )}
                     </div>
+                    {!!selCommittee?.coverage?.filter((c) => c.score >= COVERAGE_SHOW_MIN).length && (
+                      <div style={s('margin-top:14px')}>
+                        <div style={s('font-size:11.5px;font-weight:700;letter-spacing:.06em;color:var(--mut)')}>TOPIC COVERAGE · トピックの網羅度</div>
+                        <div style={s('margin-top:6px;display:flex;flex-direction:column;gap:5px')}>
+                          {selCommittee.coverage.filter((c) => c.score >= COVERAGE_SHOW_MIN).slice(0, 8).map((c) => {
+                            const on = topics.includes(c.tag)
+                            return (
+                              <div
+                                key={c.tag}
+                                style={s('display:flex;align-items:center;gap:10px;cursor:pointer;border-radius:8px;padding:2px 4px')}
+                                title={(L === 'ja' ? `${c.of}回中${c.n}回の会合で扱った` : `Covered in ${c.n} of ${c.of} meetings`) + (c.last ? (L === 'ja' ? ` · 最新 ${c.last}` : ` · latest ${c.last}`) : '')}
+                                {...press(() => toggleTopic(c.tag), on)}
+                              >
+                                <span style={s(`flex:0 0 200px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${on ? 'var(--acT)' : 'var(--tx2)'};font-weight:${on ? 700 : 500}`)}>{tagLabel(vocab, c.tag, L)}</span>
+                                <span style={s('flex:1;height:6px;border-radius:999px;background:var(--bg2);overflow:hidden')}>
+                                  <span style={{ display: 'block', height: '100%', width: pct(c.score), background: on ? 'var(--ac)' : 'var(--acBadge)', borderRadius: 999 }}></span>
+                                </span>
+                                <span style={s("flex:0 0 38px;text-align:right;font-size:11.5px;font-weight:600;font-feature-settings:'tnum' 1")}>{pct(c.score)}</span>
+                                <span style={s("flex:0 0 88px;font-size:10.5px;color:var(--mut);font-feature-settings:'tnum' 1")}>{c.n}/{c.of}{L === 'ja' ? '回' : ' mtgs'}</span>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )}
                     {selCommittee && selCommittee.fetchStatus === 'error' && (() => {
                       const iss = fetchIssue(selCommittee)
                       return (

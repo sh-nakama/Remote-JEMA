@@ -67,3 +67,42 @@ export function committeesWithTopicMeetings(
   for (const m of meetings) if (m.com && matchesTags(selected, m.tags)) out.add(m.com)
   return out
 }
+
+/** How much of a committee's recent work one topic is (see `tagCoverage` in the export):
+ * `score` is graded 0-1 (recency-weighted, shrunk on thin evidence); `n` of `of` are the
+ * plain meeting counts behind it and `last` the newest meeting carrying the topic. */
+export interface TagCoverage {
+  tag: string
+  score: number
+  n: number
+  of: number
+  last: string | null
+}
+
+/** The selected topic a committee covers most, or undefined when it covers none of them. */
+export function bestTopic(selected: readonly string[], coverage: readonly TagCoverage[] | undefined): TagCoverage | undefined {
+  let best: TagCoverage | undefined
+  for (const c of coverage ?? []) {
+    if (selected.includes(c.tag) && c.score > 0 && (!best || c.score > best.score)) best = c
+  }
+  return best
+}
+
+/** How well a committee fits the selected topics: its strongest coverage among them (0 if none). */
+export function topicFit(selected: readonly string[], coverage: readonly TagCoverage[] | undefined): number {
+  return bestTopic(selected, coverage)?.score ?? 0
+}
+
+/** `items` best fit first. Stable, so equal fits (and everything, when nothing is selected)
+ * keep their incoming order. */
+export function rankByFit<T>(items: readonly T[], fit: (item: T) => number): T[] {
+  return items
+    .map((item, i) => ({ item, i, f: fit(item) }))
+    .sort((a, b) => b.f - a.f || a.i - b.i)
+    .map((x) => x.item)
+}
+
+/** A score as a whole percent, e.g. 0.824 -> "82%". */
+export function pct(score: number): string {
+  return Math.round(score * 100) + '%'
+}
