@@ -1,5 +1,6 @@
 import { AppProvider, useApp } from './lib/app'
 import { useManifest } from './lib/data'
+import { CommandsPane } from './lib/CommandsPane'
 import { Overlays, ProgressPanel, SidebarExpander } from './lib/menus'
 import { s } from './lib/style'
 import { MarketOverviewScreen } from './screens/MarketOverview'
@@ -63,6 +64,8 @@ function Root() {
       style={s(ROOT)}
     >
       <CurrentScreen />
+      {/* The right-hand mirror of each screen's left nav pane; local backend only (renders nothing otherwise). */}
+      <CommandsPane />
       <SidebarExpander />
       <DataUnavailable />
       <Overlays />

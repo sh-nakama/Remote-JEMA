@@ -263,6 +263,25 @@ fixed.
   visitor — it used to key the pull on `st.session_state`, so every new browser session
   re-downloaded the dataset under the sessions already reading it.
 
+- **The Commands pane's pull/push warnings are only as good as `command_log`.** `pull-hf` and
+  `push-hf` each replace a whole database, so the pane confirms them and quotes what the server
+  recorded (`command_log.guards`): the successful local writes since the last pull/push (what a
+  pull would discard) and how old the last pull is (what a stale push would overwrite). It only
+  sees commands run *from the app* — anything typed in a terminal leaves no trace — and the 12 h
+  freshness window is a heuristic, so these are warnings, not locks. Two traps:
+  - **A pull launched from `web-api` replaces the DB under `web-api` itself.** The job runner
+    calls `dispose_engines()` before and after a `pull-hf` subprocess; without it the server's
+    pooled connections keep the old file open (Windows then overwrites in place, Linux keeps
+    reading the old inode). Any new command that replaces the DB file needs the same.
+  - **The command registry is checked against the real CLI, not trusted.** `repower/commands.py`
+    feeds the allowlist, the pane and the guide; `tests/test_commands.py` parses every generated
+    argv with Click. Typer vendors its own Click, so don't `isinstance`-check `click.Group`
+    against it — walk `.commands` by duck-typing, as the test does.
+  - `policy login` wraps `notebooklm login` (no terminal input; waits up to 5 min) and holds the
+    single-flight job slot while it waits, so every other command 409s until it finishes. It
+    refreshes the *local* session only — the cron reads the `NOTEBOOKLM_AUTH_JSON` secret — and
+    `notebooklm` refuses to log in while that env var is set.
+
 ## GitHub Actions semantics (learned the hard way)
 
 - `steps.<id>.outcome` = result **before** `continue-on-error` masking; `conclusion` = after.
@@ -639,6 +658,14 @@ fixed.
 - NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
   a human `notebooklm login` can refresh; `policy.yml` alerts on staleness and must never
   fabricate summaries.
+- **"NotebookLM is not logged in" can really mean "the `notebooklm` program wasn't found".** It
+  used to be looked up by bare name on PATH, so `repower web-api` started without its virtualenv
+  activated (e.g. running `.venv/Scripts/repower.exe` directly) couldn't find it — and
+  `auth_ok()` turned that into "auth is missing/stale", sending people to `notebooklm login`,
+  which couldn't work either. `notebook.find_binary()` now tries `NOTEBOOKLM_BIN`, then PATH, then
+  the folder beside the running Python (where pip puts console scripts), and `binary_problem()`
+  gives the accurate message. A missing program and a stale login need opposite fixes; keep them
+  separate in any new check. (`web-api` is long-running: restart it after upgrading.)
 - `energy_board.py`'s module-level feed cache (`_feed_cache`/`_feed_ts`) is unlocked — fine
   under today's single-flight usage, unsafe if you add threads.
 - EGC index tables list **non-public meetings** (`※非公開開催` / `※書面開催`) with an *empty
@@ -870,3 +897,10 @@ fixed.
   cron's install. When pip's `ResolutionImpossible` lists requirements that don't actually clash
   (`yfinance` needs `platformdirs>=2.0.0`, the lock pins `==4.11.15`) and the pinned release is
   only hours old, the runner saw a stale PyPI index: re-run the job before debugging.
+- **Three places describe the workflows; a test keeps them honest.** The "What runs automatically"
+  table in `docs/USER-GUIDE.md`, `AUTOMATED_RUNS` in `web/src/lib/guideContent.ts` (the in-app
+  guide) and the README's "CI workflows" list all restate `.github/workflows/`. Nothing generates
+  them, so `tests/test_workflow_docs.py` compares each to the workflow files: every workflow needs
+  a row, its cron and JST time must match, and every `repower` command it runs must be named in
+  its row. Merging a workflow change (a new step, a new cron) without touching the three fails
+  CI by design — that is the reminder, not a flaky test.

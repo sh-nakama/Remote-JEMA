@@ -172,20 +172,20 @@ export function IconRail({ active }: { active: Screen }) {
   )
 }
 
-/** Breadcrumb, search, theme / guide / notification buttons, language and profile. `children` is the notifications popover. */
-export function TopBar({ screen, unread, onToggleNotif, guide, children }: {
+/** Breadcrumb, search, theme / guide / notification buttons, language and profile. `children` is the notifications popover.
+ * The guide button opens the tab for the current screen. */
+export function TopBar({ screen, unread, onToggleNotif, children }: {
   screen: Screen
   unread: number
   onToggleNotif: () => void
-  guide?: boolean
   children: ReactNode
 }) {
-  const { lang, setLang, theme, toggleTheme, openOverlay } = useApp()
+  const { lang, setLang, theme, toggleTheme, openOverlay, setGuideTab } = useApp()
   const [title, titleJa] = TITLES[screen]
   return (
     <div style={s('height:72px;flex-shrink:0;background:var(--bg1);border-bottom:1px solid var(--bd);display:flex;align-items:center;gap:18px;padding:0 28px;position:relative;z-index:30')}>
-      <div style={s('font-size:13px;color:var(--mut);flex-shrink:0')}>{title} <span style={s('color:var(--fnt3)')}>·</span> {titleJa}</div>
-      <div {...press(() => openOverlay('search'))} style={s('flex:1;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
+      <div style={s('font-size:13px;color:var(--mut);min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis')}>{title} <span style={s('color:var(--fnt3)')}>·</span> {titleJa}</div>
+      <div {...press(() => openOverlay('search'))} style={s('flex:1;min-width:0;max-width:520px;display:flex;align-items:center;gap:9px;background:var(--bg0);border:1px solid var(--bd);border-radius:12px;padding:8px 14px;color:var(--mut);cursor:text')}>
         <RawSvg html={svg(P.search, 'width:16px;height:16px;flex-shrink:0')} />
         <input readOnly onFocus={() => openOverlay('search')} placeholder="Search markets, areas, committees… 市場・エリア・委員会を検索…" style={s('border:none;outline:none;flex:1;font-family:inherit;font-size:13px;background:transparent;color:var(--tx);min-width:0;cursor:text')} />
         <span style={s('border:1px solid var(--bd2);background:var(--bg1);border-radius:6px;padding:1px 7px;font-size:11px;color:var(--mut);flex-shrink:0')}>⌘K</span>
@@ -194,11 +194,9 @@ export function TopBar({ screen, unread, onToggleNotif, guide, children }: {
       <Hoverable base={ROUND_BTN} hover="background:var(--bg2)" onClick={toggleTheme} title="Toggle theme · テーマ切替" aria-label="Toggle theme">
         {theme === 'dark' ? <RawSvg html={svg(P.sun, 'width:19px;height:19px')} /> : <RawSvg html={svg(P.moon, 'width:18px;height:18px')} />}
       </Hoverable>
-      {guide && (
-        <Hoverable base={ROUND_BTN} hover="background:var(--bg2)" onClick={() => openOverlay('guide')} title="User guide · 使い方" aria-label="User guide">
-          <RawSvg html={svg(P.info, 'width:19px;height:19px')} />
-        </Hoverable>
-      )}
+      <Hoverable base={ROUND_BTN} hover="background:var(--bg2)" onClick={() => { setGuideTab(screen === 'policy' ? 'policy' : 'screens'); openOverlay('guide') }} title="User guide · 使い方" aria-label="User guide">
+        <RawSvg html={svg(P.info, 'width:19px;height:19px')} />
+      </Hoverable>
       <Hoverable base="width:40px;height:40px;border-radius:999px;display:flex;align-items:center;justify-content:center;color:var(--tx2);cursor:pointer;position:relative;flex-shrink:0" hover="background:var(--bg2)" onClick={onToggleNotif} aria-label="Notifications">
         <RawSvg html={svg(P.bell, 'width:19px;height:19px')} />
         {unread > 0 && (

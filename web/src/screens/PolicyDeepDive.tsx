@@ -243,7 +243,7 @@ export function PolicyDeepDiveScreen() {
   }
   const queueMeeting = (key: string) => {
     setQueued((s2) => ({ ...s2, [key]: true }))
-    toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (daily 06:10 JST) · 追跡し、要約キューに登録しました')
+    toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (daily, about 06:30 JST) · 追跡し、要約キューに登録しました')
   }
 
   // Run catch-up (interactive/local only): kick the auth-free refresh on the local
@@ -671,7 +671,7 @@ export function PolicyDeepDiveScreen() {
   const dEmptySub = dIsUn
     ? 'Track this committee to add its meetings to the NotebookLM summarisation queue · 追跡するとNotebookLM要約キューに追加されます'
     : (dQueued && dM.untracked)
-      ? 'NotebookLM picks this up on the next catch-up run (daily 06:10 JST) · 次回の差分取得で要約されます'
+      ? 'NotebookLM picks this up on the next catch-up run (daily, about 06:30 JST) · 次回の差分取得で要約されます'
       : dM.emptySub || ''
   const dSections = hasDigest && dM.digest ? dM.digest : []
   const dJp = hasDigest && dM.jp ? dM.jp : []
@@ -873,7 +873,7 @@ export function PolicyDeepDiveScreen() {
       {/* ============ MAIN COLUMN ============ */}
       <div style={s('flex:1;min-width:0;display:flex;flex-direction:column;position:relative')}>
 
-        <TopBar screen="policy" unread={notifCount} onToggleNotif={toggleNotif} guide>
+        <TopBar screen="policy" unread={notifCount} onToggleNotif={toggleNotif}>
           {/* Notifications popover — live recent policy activity from the snapshot */}
           {showNotif && (
             <div style={s('position:absolute;right:24px;top:66px;width:360px;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);padding:16px;z-index:60')}>

@@ -67,8 +67,9 @@ select = ["E", "F", "I", "B", "UP"]
 "src/repower/cli.py" = ["B008"]
 # Embedded HTML/CSS/JS chart templates: long template-literal lines, not reflowable code.
 "src/repower/dashboard/components/*_chart.py" = ["E501"]
-# Long Japanese UI translation strings; splitting them harms grep-ability.
+# Long Japanese UI translation strings (and the bilingual command copy); splitting them harms grep-ability.
 "src/repower/dashboard/i18n.py" = ["E501"]
+"src/repower/commands.py" = ["E501"]
 # Scraped-HTML fixtures with long real-world lines.
 "tests/test_energy_board.py" = ["E501"]
 "tests/test_policy_catalog.py" = ["E501"]

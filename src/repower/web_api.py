@@ -9,14 +9,15 @@ is the "local is master, GitHub Pages is read-only" link.
 
 Endpoints (all JSON):
   GET  /api/health          -> {ok, mode}
+  GET  /api/commands        -> {schema, commands, recipes, guards, committees}  the command registry
   GET  /api/policy/catalog  -> {schema, committees:[…]}   (live committees.json shape)
   POST /api/policy/track    -> {ok, key, enabled}         body: {key, enabled}
   POST /api/policy/priority -> {ok, key, priority}        body: {key, priority}
   POST /api/policy/request  -> {ok, key, meeting_num, queued}  body: {key, meeting_num, queued}
   POST /api/policy/add      -> {ok, key, name_ja, existing} body: {url} (METI /shingikai/ page; auto-tracks)
   POST /api/policy/catchup  -> 202, starts the auth-free refresh job
-  POST /api/policy/job      -> 202/400/409, runs one `repower policy <cmd>` (subprocess)
-                               body: {cmd, committee?, since_meeting?, max_per_run?, since_days?}
+  POST /api/policy/job      -> 202/400/409, runs one allowlisted CLI command (subprocess)
+                               body: {cmd, ...params} — see repower.commands for the cmd ids and params
   GET  /api/policy/catchup  -> current job status (alias: /api/policy/job)
   GET  /api/policy/job      -> current job status + output tail / result
   GET  /api/policy/status   -> {schema, meetings:[…], truncated}  per-meeting pipeline status
@@ -56,6 +57,8 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, urlsplit
 
+from repower import command_log, commands
+from repower.db import dispose_engines
 from repower.scrapers import browser_clearance
 
 logger = logging.getLogger(__name__)
@@ -94,7 +97,7 @@ _REFRESH_TIMEOUT_S = 1800  # data refresh scrapes every source + re-exports; giv
 # daily generation quota, not wall-clock, so the 10-min command cap would kill it
 # mid-report and surface as a spurious "error" even with valid auth. Give it a wide
 # cap; the pipeline is crash-safe (Resume drains anything left mid-flight).
-_NOTEBOOKLM_TIMEOUT_S = 3600
+# (The per-command caps now live in repower.commands: Command.timeout_s, 3600 for these.)
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'
@@ -285,62 +288,26 @@ def start_catchup(db_path: str | None) -> dict:
 
 # ── Policy CLI command jobs (subprocess) ─────────────────────────────────────
 def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]:
-    """Validate a UI request into a safe ``policy`` CLI argv (allowlist; no shell).
+    """Validate a UI request into a safe CLI argv (allowlist; no shell).
 
-    Committee keys are checked against the catalog and numeric args are clamped, so
-    the request can't inject arbitrary arguments.
+    The allowlist, each argument's range and the committee check all live in
+    :mod:`repower.commands`, so the button, the guide text and this boundary cannot drift
+    apart. Despite the name it also builds the non-``policy`` commands (``pull-hf``…).
     """
-    def _committee(*, required: bool = False) -> str:
-        c = (params.get("committee") or "").strip()
-        if not c or c == "all":
-            if required:
-                raise ValueError("committee is required")
-            return "all"
+    def known() -> set[str]:
         from repower.policy.store import list_committees
-        if c not in {r["key"] for r in list_committees(db_path=db_path)}:
-            raise ValueError(f"unknown committee: {c}")
-        return c
+        return {r["key"] for r in list_committees(db_path=db_path)}
 
-    def _int(name: str, default, lo: int, hi: int, *, required: bool = False) -> int:
-        raw = params.get(name, default)
-        if raw is None or raw == "":
-            if required:
-                raise ValueError(f"{name} is required")
-            raw = default
-        try:
-            return max(lo, min(hi, int(raw)))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{name} must be an integer") from exc
-
-    if cmd in ("detect", "dates"):
-        return ["policy", cmd, "--committee", _committee()]
-    if cmd in ("schedule", "discover", "crosscheck", "resume", "status"):
-        return ["policy", cmd]
-    if cmd == "run":
-        # A targeted single-meeting run ("Run now" in the status table): needs a real
-        # committee, and the CLI forces max-per-run to 1 for it.
-        if params.get("meeting") not in (None, ""):
-            return ["policy", "run",
-                    "--committee", _committee(required=True),
-                    "--meeting", str(_int("meeting", None, 1, 100000, required=True))]
-        argv = ["policy", "run", "--committee", _committee(),
-                "--max-per-run", str(_int("max_per_run", 5, 1, 20))]
-        if params.get("breadth"):
-            argv.append("--breadth")  # spread a small quota across committees (newest of each first)
-        return argv
-    if cmd == "backfill":
-        return ["policy", "backfill",
-                "--committee", _committee(required=True),
-                "--since-meeting", str(_int("since_meeting", None, 1, 100000, required=True)),
-                "--max-per-run", str(_int("max_per_run", 10, 1, 30))]
-    if cmd == "digest":  # --dry-run: never post to the webhook from a UI click
-        return ["policy", "digest", "--since-days", str(_int("since_days", 7, 1, 90)), "--dry-run"]
-    raise ValueError(f"unsupported command: {cmd}")
+    return commands.build_argv(cmd, params, known)
 
 
-def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S) -> None:
+def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S, cmd_id: str | None = None) -> None:
     tail: deque[str] = deque(maxlen=_OUTPUT_MAX)
     timed_out = threading.Event()
+    if cmd_id == "pull-hf":
+        # A pull replaces the DB file under every connection this server has pooled; drop them
+        # first so nothing holds the old file (Windows would otherwise write over it in place).
+        dispose_engines()
     try:
         proc = subprocess.Popen(
             [sys.executable, "-m", "repower.cli", *argv],
@@ -382,6 +349,13 @@ def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S) -> None:
         logger.exception("command job failed")
         with _job_lock:
             _job.update(state="error", finished_at=_now(), error=str(e), output=list(tail))
+    finally:
+        if cmd_id == "pull-hf":
+            dispose_engines()  # reopen on the replaced file
+        if cmd_id:
+            with _job_lock:
+                ok = _job.get("state") == "done"
+            command_log.record(cmd_id, ok)
 
 
 def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dict]:
@@ -401,10 +375,10 @@ def start_command(cmd: str, params: dict, db_path: str | None) -> tuple[int, dic
                     result=None, stages=[], output=[], error=None)
         snap = dict(_job)
     # Long-running NotebookLM commands need a much wider cap than the default so the
-    # killer timer doesn't abort them mid-report (see _NOTEBOOKLM_TIMEOUT_S).
-    timeout = _NOTEBOOKLM_TIMEOUT_S if cmd in ("run", "backfill", "resume") else _JOB_TIMEOUT_S
+    # killer timer doesn't abort them mid-report (see Command.timeout_s).
+    timeout = commands.timeout_for(cmd, _JOB_TIMEOUT_S)
     threading.Thread(target=_run_command_job, args=(argv,),
-                     kwargs={"timeout": timeout}, daemon=True).start()
+                     kwargs={"timeout": timeout, "cmd_id": cmd}, daemon=True).start()
     return 202, snap
 
 
@@ -425,7 +399,7 @@ def start_refresh(db_path: str | None) -> tuple[int, dict]:
         snap = dict(_job)
     threading.Thread(
         target=_run_command_job, args=(argv,),
-        kwargs={"timeout": _REFRESH_TIMEOUT_S}, daemon=True,
+        kwargs={"timeout": _REFRESH_TIMEOUT_S, "cmd_id": "refresh-web"}, daemon=True,
     ).start()
     return 202, snap
 
@@ -542,6 +516,16 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/health":
             return self._send(200, {"ok": True, "mode": "local"})
+        if path == "/api/commands":
+            # The command registry for the Commands pane + guide, with the pull/push order
+            # guards (what a pull would discard, how stale the last pull is) and the
+            # committee choices for the forms. Local-only, like everything on this server.
+            from repower.policy.store import list_committees
+            return self._send(200, {
+                "schema": 1, **commands.catalog(), "guards": command_log.guards(),
+                "committees": [{"key": r["key"], "en": r["name_en"], "ja": r["name_ja"]}
+                               for r in list_committees(db_path=self.db_path)],
+            })
         if path == "/api/policy/catalog":
             from repower.dashboard.export_web import build_policy_catalog
             return self._send(200, {"schema": 1, "committees": build_policy_catalog(self.db_path)})

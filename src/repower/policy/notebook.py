@@ -14,14 +14,52 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-NOTEBOOKLM_BIN = os.getenv("NOTEBOOKLM_BIN", "notebooklm")
+
+
+def find_binary() -> str | None:
+    """Where the ``notebooklm`` executable is, or None.
+
+    In order: ``NOTEBOOKLM_BIN`` if set (a bare name is looked up on PATH), then PATH, then the
+    folder holding the running Python — which is where pip puts a console script. That last step
+    is what makes it work when repower is started without its virtualenv activated (for instance
+    ``.venv/Scripts/repower.exe web-api``, whose PATH lacks ``Scripts``), the one case where
+    the executable exists and the bare name still fails.
+    """
+    configured = os.getenv("NOTEBOOKLM_BIN")
+    if configured:
+        return shutil.which(configured) or (configured if Path(configured).is_file() else None)
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    here = Path(sys.executable).parent
+    for name in ("notebooklm.exe", "notebooklm"):
+        if (here / name).is_file():
+            return str(here / name)
+    return None
+
+
+def binary_problem() -> str | None:
+    """A plain-words explanation if ``notebooklm`` cannot be found, else None.
+
+    Kept apart from the auth check on purpose: "the program is not there" and "you are not
+    logged in" need opposite fixes, and telling someone to run ``notebooklm login`` when the
+    program is missing sends them in circles.
+    """
+    if find_binary():
+        return None
+    where = os.getenv("NOTEBOOKLM_BIN") or "notebooklm"
+    return (f"The `{where}` program was not found (looked on PATH and in {Path(sys.executable).parent}). "
+            "Run repower from the environment where notebooklm-py is installed "
+            "(`pip install -e \".[policy]\"`), or set NOTEBOOKLM_BIN to its full path.")
 
 # Exit codes (per the skill's documented contract).
 EXIT_OK = 0
@@ -57,14 +95,14 @@ _AUTH_MARKERS = ("authentication expired", "token fetch failed", "not authentica
 
 def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXIT_OK,)) -> str:
     """Run ``notebooklm <args>`` and return stdout. Raise on disallowed exit codes."""
-    cmd = [NOTEBOOKLM_BIN, *args]
+    cmd = [find_binary() or os.getenv("NOTEBOOKLM_BIN") or "notebooklm", *args]
     logger.debug("notebooklm %s", " ".join(args))
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8"
         )
     except FileNotFoundError as e:
-        raise NotebookLMError(f"`{NOTEBOOKLM_BIN}` not found on PATH — is notebooklm-py installed?") from e
+        raise NotebookLMError(binary_problem() or f"`{cmd[0]}` could not be run") from e
     except subprocess.TimeoutExpired as e:
         raise NotebookLMTimeout(f"timeout after {timeout}s: notebooklm {' '.join(args)}") from e
     stderr = proc.stderr.strip()
@@ -103,6 +141,9 @@ def auth_ok(*, timeout: float = 60.0) -> bool:
 
 
 def require_auth(*, timeout: float = 60.0) -> None:
+    problem = binary_problem()
+    if problem:
+        raise NotebookLMAuthError(problem)  # not a lapsed login — `notebooklm login` cannot fix this
     if not auth_ok(timeout=timeout):
         raise NotebookLMAuthError(
             "NotebookLM auth missing/stale — run `notebooklm login` (or refresh the "

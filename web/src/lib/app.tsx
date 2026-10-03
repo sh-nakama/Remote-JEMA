@@ -28,6 +28,8 @@ export type Lang = 'en' | 'ja'
 export type Theme = 'light' | 'dark'
 export type Screen = 'overview' | 'market' | 'policy' | 'capacity'
 export type Overlay = 'search' | 'settings' | 'watchlist' | 'committees' | 'guide'
+/** Tabs of the "i" guide. `commands` is only offered when the local backend is reachable. */
+export type GuideTab = 'screens' | 'policy' | 'commands'
 
 /** A single starred entity. `id` is the stable key (e.g. `area:tepco`). */
 export interface WatchEntry {
@@ -112,6 +114,9 @@ export interface AppState {
   overlay: Overlay | null
   openOverlay: (o: Overlay) => void
   closeOverlay: () => void
+  /** Which tab of the guide overlay is showing (set it, then `openOverlay('guide')`). */
+  guideTab: GuideTab
+  setGuideTab: (t: GuideTab) => void
 
   /** Sidebar collapsed to a hidden rail (persisted). */
   collapsed: boolean
@@ -231,6 +236,7 @@ export function AppProvider({
   const tRef = useRef<number | null>(null)
 
   const [overlay, setOverlay] = useState<Overlay | null>(null)
+  const [guideTab, setGuideTab] = useState<GuideTab>('policy')
   const [collapsed, setCollapsed] = useState<boolean>(read('jema-collapse') === '1')
   const [watch, setWatch] = useState<WatchEntry[]>(() => readJson<WatchEntry[]>('jema-watch', []))
   const [followed, setFollowed] = useState<string[]>(() => {
@@ -531,6 +537,8 @@ export function AppProvider({
       overlay,
       openOverlay,
       closeOverlay,
+      guideTab,
+      setGuideTab,
       collapsed,
       toggleCollapsed,
       watch,
@@ -575,6 +583,8 @@ export function AppProvider({
       overlay,
       openOverlay,
       closeOverlay,
+      guideTab,
+      setGuideTab,
       collapsed,
       toggleCollapsed,
       watch,
