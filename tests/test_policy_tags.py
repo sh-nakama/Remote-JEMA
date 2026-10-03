@@ -3,6 +3,7 @@ and the export. All hermetic — DB-only, NotebookLM faked at the lowest primiti
 
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 
@@ -95,11 +96,76 @@ def test_a_meeting_carries_at_most_the_cap_best_first():
     assert got == [k for k in tg.TAG_KEYS if k in got]  # vocabulary order
 
 
-def test_rollup_needs_recurrence_not_a_one_off():
-    meetings = [["wind_offshore"], ["wind_offshore", "grid_cost"], [], [], []]
-    assert tg.rollup_committee_tags(meetings) == ["wind_offshore"]  # 2 of 5; grid_cost only once
-    assert tg.rollup_committee_tags([["grid_cost"]]) == []
-    assert tg.rollup_committee_tags([]) == []
+def test_a_title_hit_survives_the_cap_against_a_verbose_body_elsewhere():
+    """A one-document agenda item must not lose its cap slot to a different, longer
+    section's keyword noise — title evidence is ranked ahead of body-only evidence
+    (found auditing a real meeting: saisei_kano 第78回, three agenda items, one of
+    which — offshore wind — was dropped from 5 tags purely because the network-design
+    agenda item's section was far longer)."""
+    titles = ["資料1 電力ネットワークの次世代化について", "資料2 洋上風力発電について"]
+    # Four more body-only topics, each scoring higher than the offshore-wind title hit
+    # (score 3), so a length-only ranking would push it out of a 5-tag cap.
+    body = (
+        "系統接続 " * 10 + "出力制御 " * 8 + "託送料金 " * 6 + "VPP " * 4
+    )
+    got = tg.tags_for_meeting(titles=titles, body=body)
+    assert "wind_offshore" in got
+    assert len(got) == tg.MAX_MEETING_TAGS
+
+
+D = datetime.date
+
+
+def test_coverage_is_graded_by_how_much_of_the_committee_a_topic_is():
+    rows = [(D(2026, 9, i), ["wind_offshore"], True) for i in range(1, 9)]       # 8 of 10
+    rows += [(D(2026, 9, 10 + i), ["grid_cost"], True) for i in range(2)]        # 2 of 10
+    cov = tg.coverage(rows)
+
+    assert cov["wind_offshore"].score > cov["grid_cost"].score > 0
+    assert (cov["wind_offshore"].n, cov["wind_offshore"].of) == (8, 10)
+    assert cov["wind_offshore"].last == D(2026, 9, 8)
+    assert "nuclear" not in cov
+
+
+def test_coverage_shrinks_thin_evidence():
+    """One tagged meeting out of one is a hint, not '100% of the committee'."""
+    one = tg.coverage([(D(2026, 9, 1), ["wind_offshore"], True)])["wind_offshore"].score
+    many = tg.coverage([(D(2026, 9, i), ["wind_offshore"], True) for i in range(1, 21)])["wind_offshore"].score
+    assert one < 0.4 < 0.85 < many < 1
+
+
+def test_coverage_skips_meetings_with_no_evidence():
+    rows = [(D(2026, 9, 1), ["wind_offshore"], True), (D(2026, 9, 2), ["wind_offshore"], True)]
+    backlog = [(D(2026, 9, 3), [], False)] * 50   # detected, nothing downloaded or summarised
+    assert tg.coverage(rows + backlog) == tg.coverage(rows)
+    assert tg.coverage(backlog) == {}
+
+
+def test_coverage_favours_recent_meetings():
+    old = [(D(2022, 1, 1) + datetime.timedelta(days=30 * i), ["biomass"], True) for i in range(5)]
+    new = [(D(2026, 1, 1) + datetime.timedelta(days=30 * i), ["wind_offshore"], True) for i in range(5)]
+    cov = tg.coverage(old + new)
+    assert cov["wind_offshore"].score > 3 * cov["biomass"].score
+
+
+def test_coverage_ages_from_the_committees_own_newest_meeting():
+    """A concluded committee keeps its topics; only meetings *within* it fade."""
+    rows = [(D(2019, 1, 1) + datetime.timedelta(days=30 * i), ["wind_offshore"], True) for i in range(6)]
+    assert tg.coverage(rows)["wind_offshore"].score == pytest.approx(
+        tg.coverage([(d + datetime.timedelta(days=2500), t, ok) for d, t, ok in rows])["wind_offshore"].score)
+    assert tg.coverage(rows)["wind_offshore"].score > 0.5
+
+
+def test_undated_meetings_count_in_full():
+    assert tg.coverage([(None, ["nuclear"], True), (None, [], True)])["nuclear"].score == pytest.approx(1 / 4)
+
+
+def test_standing_tags_need_recurrence_not_a_one_off():
+    meetings = [(D(2026, 9, i), t, True) for i, t in enumerate(
+        [["wind_offshore"], ["wind_offshore", "grid_cost"], [], [], []], start=1)]
+    assert tg.tags_from_coverage(tg.coverage(meetings)) == ["wind_offshore"]   # 2 of 5; grid_cost only once
+    assert tg.tags_from_coverage(tg.coverage([(D(2026, 9, 1), ["grid_cost"], True)])) == []
+    assert tg.tags_from_coverage({}) == []
 
 
 @pytest.mark.parametrize(("answer", "expected"), [
@@ -277,6 +343,21 @@ def test_decode_drops_keys_that_left_the_vocabulary():
     assert tg.decode(None) is None and tg.decode("not json") is None and tg.decode('{"a": 1}') is None
 
 
+def test_committee_coverage_reads_the_stored_tags(policy_db):
+    for n in (1, 2, 3):
+        _meeting(policy_db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(policy_db, "yojo_fuuryoku", 4, "資料1 託送料金")
+    for n in range(5, 15):
+        _meeting(policy_db, "yojo_fuuryoku", n)                 # no documents: no evidence
+    tagging.retag(policy_db)
+
+    cov = tagging.committee_coverage(policy_db)["yojo_fuuryoku"]
+
+    assert (cov["wind_offshore"].n, cov["wind_offshore"].of) == (3, 4)
+    assert cov["grid_cost"].n == 1 and cov["grid_cost"].score < cov["wind_offshore"].score
+    assert tagging.committee_coverage(policy_db, committee="doji_shijo") == {}
+
+
 # ── Migration ────────────────────────────────────────────────────────────────
 
 
@@ -404,6 +485,25 @@ def test_snapshot_and_catalog_carry_tags_and_the_vocabulary(policy_db):
     assert {c["key"]: c["tags"] for c in build_policy_catalog(policy_db)}["yojo_fuuryoku"] == ["wind_offshore"]
 
 
+def test_export_carries_graded_coverage_on_both_payload_paths(policy_db):
+    for n in (1, 2, 3):
+        _meeting(policy_db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(policy_db, "yojo_fuuryoku", 4, "資料1 託送料金")
+    for n in range(5, 12):
+        _meeting(policy_db, "yojo_fuuryoku", n)          # no documents: must not dilute
+    tagging.retag(policy_db)
+
+    for payload in (build_policy_snapshot(policy_db)["committees"], build_policy_catalog(policy_db)):
+        cov = {c["key"]: c for c in payload}["yojo_fuuryoku"]["tagCoverage"]
+        assert [c["tag"] for c in cov] == ["wind_offshore", "grid_cost"]       # strongest first
+        top = cov[0]
+        assert (top["n"], top["of"]) == (3, 4)
+        assert 0 < cov[1]["score"] < top["score"] < 1
+        assert top["last"] is not None
+    other = {c["key"]: c for c in build_policy_snapshot(policy_db)["committees"]}
+    assert other["doji_shijo"]["tagCoverage"] == []
+
+
 def test_static_export_writes_the_vocabulary_beside_the_committees(policy_db, tmp_path):
     export_policy(tmp_path, policy_db)
 
@@ -465,3 +565,25 @@ def test_policy_tags_lists_the_vocabulary():
     out = CliRunner().invoke(cli.app, ["policy", "tags"]).output
     for t in tg.TAGS:
         assert t.key in out
+
+
+def test_policy_coverage_ranks_committees_for_a_topic(monkeypatch, tmp_path):
+    db = _cli_db(monkeypatch, tmp_path)
+    for n in (1, 2, 3):
+        _meeting(db, "yojo_fuuryoku", n, "資料1 洋上風力の促進区域")
+    _meeting(db, "saisei_kano", 1, "資料1 洋上風力の促進区域")
+    for n in (2, 3, 4):
+        _meeting(db, "saisei_kano", n, "資料1 託送料金")
+    tagging.retag(db)
+
+    out = CliRunner().invoke(cli.app, ["policy", "coverage", "--topic", "wind_offshore"]).output
+    assert out.index("yojo_fuuryoku") < out.index("saisei_kano")        # the dedicated body ranks first
+
+    one = CliRunner().invoke(cli.app, ["policy", "coverage", "--committee", "saisei_kano"]).output
+    assert one.index("grid_cost") < one.index("wind_offshore")
+
+
+def test_policy_coverage_rejects_unknown_names(monkeypatch, tmp_path):
+    _cli_db(monkeypatch, tmp_path)
+    assert CliRunner().invoke(cli.app, ["policy", "coverage", "--topic", "made_up"]).exit_code == 2
+    assert CliRunner().invoke(cli.app, ["policy", "coverage", "--committee", "no_such"]).exit_code == 1

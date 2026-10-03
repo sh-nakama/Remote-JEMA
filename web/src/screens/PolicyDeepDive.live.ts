@@ -11,7 +11,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getSnapshot, useDataNonce } from '../lib/data'
-import { EMPTY_VOCAB, type TagVocab } from '../lib/policyTags'
+import { EMPTY_VOCAB, type TagCoverage, type TagVocab } from '../lib/policyTags'
 import type { Committee, DigestSection, DocRef, JpSection, Meeting, Upcoming } from './PolicyDeepDive.data'
 
 interface CommitteeSnap {
@@ -41,6 +41,7 @@ interface CommitteeSnap {
   lastOkAt?: string | null
   fetchFailures?: number
   tags?: string[]
+  tagCoverage?: TagCoverage[]
 }
 
 interface MeetingSnap {
@@ -135,6 +136,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
     lastOkAt: x.lastOkAt ?? null,
     fetchFailures: x.fetchFailures ?? 0,
     tags: x.tags ?? [],
+    coverage: x.tagCoverage ?? [],
   }))
   const meetings: Meeting[] = (raw.meetings || []).map((x) => ({
     key: x.key,

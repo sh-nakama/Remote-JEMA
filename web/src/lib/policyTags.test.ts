@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import {
+  bestTopic,
   committeesWithTopicMeetings,
   matchesTags,
+  pct,
+  rankByFit,
   tagCounts,
   tagLabel,
   tagsByGroup,
   toggleTag,
+  topicFit,
+  type TagCoverage,
   type TagVocab,
 } from './policyTags'
 
@@ -80,5 +85,48 @@ describe('committeesWithTopicMeetings', () => {
   })
   it('is empty with no selection', () => {
     expect(committeesWithTopicMeetings([], meetings).size).toBe(0)
+  })
+})
+
+describe('topic fit', () => {
+  const cov: TagCoverage[] = [
+    { tag: 'wind_offshore', score: 0.8, n: 8, of: 10, last: '2026-09-27' },
+    { tag: 'grid_cost', score: 0.3, n: 3, of: 10, last: '2026-08-01' },
+  ]
+  it('is the strongest coverage among the selected topics', () => {
+    expect(topicFit(['grid_cost'], cov)).toBe(0.3)
+    expect(topicFit(['grid_cost', 'wind_offshore'], cov)).toBe(0.8)
+    expect(bestTopic(['grid_cost', 'wind_offshore'], cov)?.tag).toBe('wind_offshore')
+  })
+  it('is 0 / undefined when the committee covers none of them, or has no coverage data', () => {
+    expect(topicFit(['nuclear'], cov)).toBe(0)
+    expect(bestTopic(['nuclear'], cov)).toBeUndefined()
+    expect(topicFit(['nuclear'], undefined)).toBe(0)
+    expect(topicFit([], cov)).toBe(0)
+  })
+})
+
+describe('rankByFit', () => {
+  it('orders best first and keeps the incoming order for ties', () => {
+    const items = [
+      { k: 'a', f: 0 },
+      { k: 'b', f: 0.5 },
+      { k: 'c', f: 0 },
+      { k: 'd', f: 0.9 },
+    ]
+    expect(rankByFit(items, (x) => x.f).map((x) => x.k)).toEqual(['d', 'b', 'a', 'c'])
+  })
+  it('is a no-op when everything ties (nothing selected) and does not mutate', () => {
+    const items = ['x', 'y', 'z']
+    expect(rankByFit(items, () => 0)).toEqual(['x', 'y', 'z'])
+    expect(items).toEqual(['x', 'y', 'z'])
+  })
+})
+
+describe('pct', () => {
+  it('rounds to a whole percent', () => {
+    expect(pct(0.824)).toBe('82%')
+    expect(pct(0.005)).toBe('1%')
+    expect(pct(0)).toBe('0%')
   })
 })

@@ -429,6 +429,8 @@ const GUIDE: GuideSection[] = [
         ja: 'フィルタバーの「トピック ▾」で、洋上風力・系統用蓄電池・系統接続などの話題に絞り込めます（複数選択可、いずれかに一致）。' },
       { en: 'A committee’s tags are its standing mandate; a meeting’s tags are what that meeting actually discussed — they are not inherited.',
         ja: '委員会のタグはその恒常的な所掌、会合のタグはその回の議題そのもの。委員会から引き継ぐことはありません。' },
+      { en: 'With a topic selected, committees are ranked by how much of their recent work it is (e.g. “Offshore wind 74%”). A committee’s detail shows a coverage bar per topic.',
+        ja: 'トピックを選ぶと、その話題が各委員会の直近の活動に占める割合（例:「洋上風力 74%」）の高い順に並びます。委員会の詳細にはトピックごとの網羅度バーが表示されます。' },
     ],
   },
   {

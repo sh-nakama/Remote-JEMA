@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import date
 from typing import Any
 
 from repower.db import PolicyCommittee, PolicyMaterial, PolicyMeeting
@@ -53,6 +54,66 @@ def _write(row: Any, new: list[str], source: str) -> bool:
     return True
 
 
+def _meeting_day(m: Any) -> date | None:
+    """The day a meeting counts as having happened: its real date, else when we detected it."""
+    if m.meeting_date:
+        return m.meeting_date
+    return m.detected_at.date() if m.detected_at else None
+
+
+def committee_coverage(db_path: str | None = None, committee: str | None = None) -> dict[str, dict[str, tg.Coverage]]:
+    """Topic coverage per committee, from the tags currently stored (read-only).
+
+    The same numbers the web shows: ``{committee_key: {tag: Coverage}}``.
+    """
+    rows: dict[str, list[tuple[date | None, list[str], bool]]] = {}
+    with session_scope(db_path, commit=False) as session:
+        with_materials = {
+            (ck, num) for ck, num in session.query(PolicyMaterial.committee_key, PolicyMaterial.meeting_num).distinct()
+        }
+        mq = session.query(PolicyMeeting)
+        if committee:
+            mq = mq.filter(PolicyMeeting.committee_key == committee)
+        for m in mq.all():
+            ok = tg.has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
+            rows.setdefault(m.committee_key, []).append((_meeting_day(m), tg.decode(m.tags) or [], ok))
+    return {ck: tg.coverage(r) for ck, r in rows.items()}
+
+
+def meeting_tag_rows(committee: str, db_path: str | None = None) -> list[dict]:
+    """One row per meeting of *committee*, newest first — the evidence behind its coverage.
+
+    Each row is ``{num, date, state, has_evidence, tags, tags_source, titles}``: ``date``
+    is the day coverage ages it by (real meeting date, else detection day), ``titles`` its
+    document titles joined with ' / ' (what the keyword rules actually saw), and
+    ``has_evidence`` whether this meeting counts towards coverage at all (see
+    :func:`repower.policy.tags.has_evidence`) — a row with no documents and no summary is
+    shown but does not move any score, which is what makes a thin score legible rather than
+    a mystery.
+    """
+    with session_scope(db_path, commit=False) as session:
+        titles: dict[int, list[str]] = {}
+        for num, title in session.query(
+            PolicyMaterial.meeting_num, PolicyMaterial.title
+        ).filter(PolicyMaterial.committee_key == committee):
+            if title:
+                titles.setdefault(num, []).append(title)
+        rows = []
+        mq = session.query(PolicyMeeting).filter(PolicyMeeting.committee_key == committee)
+        for m in mq.all():
+            rows.append({
+                "num": m.meeting_num,
+                "date": _meeting_day(m),
+                "state": m.state,
+                "has_evidence": tg.has_evidence(m.state, m.meeting_num in titles),
+                "tags": tg.decode(m.tags) or [],
+                "tags_source": m.tags_source,
+                "titles": " / ".join(titles.get(m.meeting_num, [])),
+            })
+    rows.sort(key=lambda r: r["num"], reverse=True)
+    return rows
+
+
 # ── Bulk rule pass ───────────────────────────────────────────────────────────
 def retag(
     db_path: str | None = None,
@@ -79,17 +140,19 @@ def retag(
 
     with session_scope(db_path, commit=apply) as session:
         titles: dict[tuple[str, int], list[str]] = {}
+        with_materials: set[tuple[str, int]] = set()
         for ck, num, title in session.query(
             PolicyMaterial.committee_key, PolicyMaterial.meeting_num, PolicyMaterial.title
         ):
+            with_materials.add((ck, num))
             if title:
                 titles.setdefault((ck, num), []).append(title)
 
         mq = session.query(PolicyMeeting)
         if committee:
             mq = mq.filter(PolicyMeeting.committee_key == committee)
-        # Tag sets per committee that carry evidence, feeding the committee rollup.
-        evidence: dict[str, list[list[str]]] = {}
+        # (day, tags, has_evidence) per meeting, feeding each committee's coverage.
+        evidence: dict[str, list[tuple[date | None, list[str], bool]]] = {}
         for m in mq.all():
             t = titles.get((m.committee_key, m.meeting_num), [])
             body = m.briefing_md if m.state == "done" else None
@@ -106,8 +169,8 @@ def retag(
                     if apply:
                         _write(m, new, "rule")
             n_meetings += 1
-            if t or body:
-                evidence.setdefault(m.committee_key, []).append(final)
+            ok = tg.has_evidence(m.state, (m.committee_key, m.meeting_num) in with_materials)
+            evidence.setdefault(m.committee_key, []).append((_meeting_day(m), final, ok))
 
         if committees:
             cq = session.query(PolicyCommittee)
@@ -119,11 +182,11 @@ def retag(
                 if curated is not None:
                     new, source = tg.normalize(curated), "config"
                 else:
-                    # Name rules say what the committee is for; the rollup adds what its
-                    # meetings actually keep coming back to.
+                    # Name rules say what the committee is for; its coverage adds what
+                    # its meetings actually keep coming back to.
                     new = tg.normalize(
                         tg.tags_from_name(c.name_ja)
-                        + tg.rollup_committee_tags(evidence.get(c.committee_key, []))
+                        + tg.tags_from_coverage(tg.coverage(evidence.get(c.committee_key, [])))
                     )
                     source = "rule"
                 if _rank(source) < _rank(c.tags_source):

@@ -12,7 +12,7 @@ Two separate questions are answered separately:
 
 - **Committee tags** are its *standing mandate*. Curated in
   :mod:`repower.policy.committees` where we are sure, otherwise derived from the
-  committee's name and rolled up from the tags of its own meetings.
+  committee's name plus the topics its own meetings give enough *coverage* (see `coverage`).
 - **Meeting tags** are what *that meeting* discussed. They deliberately do **not**
   inherit from the committee: a broad committee holding an offshore-wind-only meeting
   should surface under 洋上風力 alone, not under every topic it ever touches.
@@ -29,6 +29,7 @@ import json
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import date
 
 
 @dataclass(frozen=True)
@@ -155,10 +156,17 @@ MAX_MEETING_TAGS = 5
 TITLE_WEIGHT = 3
 BODY_WEIGHT = 1
 TAG_THRESHOLD = 3
-# A committee gains a tag from its meetings when at least this many carry it, and at
-# least this share of its tagged meetings do.
-ROLLUP_MIN_MEETINGS = 2
-ROLLUP_MIN_SHARE = 0.2
+# Coverage: how much of a committee's recent work a topic accounts for (see `coverage`).
+# Meetings count for less the older they are, measured back from the committee's own
+# newest meeting — so a concluded committee keeps its topics rather than fading out.
+COVERAGE_HALF_LIFE_DAYS = 365.0
+# Shrinkage: this many imaginary meetings with no topic are added to every denominator,
+# so one tagged meeting out of one is not "100% of the committee".
+COVERAGE_PRIOR = 2.0
+# A topic becomes one of a committee's standing tags when its coverage reaches this and
+# at least COVERAGE_MIN_MEETINGS meetings carry it (a recurring topic, not a one-off).
+COVERAGE_MIN = 0.2
+COVERAGE_MIN_MEETINGS = 2
 
 
 def valid(key: str) -> bool:
@@ -274,30 +282,96 @@ def tags_for_meeting(
 
     *titles* are its material titles (agenda item names), *body* its Japanese briefing
     when it has one, *extra_title* the meeting's own title. At most
-    :data:`MAX_MEETING_TAGS`, best-scoring first, returned in vocabulary order.
+    :data:`MAX_MEETING_TAGS`, returned in vocabulary order.
+
+    **Title evidence is reserved a place in the cap, ahead of body-only evidence.** A
+    multi-agenda meeting's briefing devotes very uneven space to each agenda item —
+    NotebookLM's own output can spend a page on a complex network-design item and one
+    paragraph on a one-document agenda item — so scoring the whole body by raw keyword
+    count lets a verbose section's tag crowd out a different agenda item's own dedicated
+    document purely on length, contradicting the rule that a title hit is evidence enough
+    on its own. Tags that clear :data:`TAG_THRESHOLD` from title text alone (a document
+    with that tag's own name on it, in effect an agenda item) are therefore ranked first
+    by total score; only the slots left over are filled from body-only tags. Measured on
+    a real meeting with three agenda items (saisei_kano #78): without this, a one-document
+    offshore-wind item (title score 3) lost its cap slot to body-only grid-connection
+    noise (score 34) from the meeting's longest section, even though the agenda plainly
+    included it.
     """
     title_text = "\n".join([t for t in titles if t] + ([extra_title] if extra_title else []))
+    title_scores = _scores([(title_text, TITLE_WEIGHT)])
     scores = _scores([(title_text, TITLE_WEIGHT), (body or "", BODY_WEIGHT)])
     hit = [(k, s) for k, s in scores.items() if s >= TAG_THRESHOLD]
-    hit.sort(key=lambda ks: (-ks[1], TAG_KEYS.index(ks[0])))
-    return normalize(k for k, _ in hit[:MAX_MEETING_TAGS])
+
+    def rank(ks: tuple[str, int]) -> tuple[int, int]:
+        return (-ks[1], TAG_KEYS.index(ks[0]))
+
+    titled = sorted((ks for ks in hit if title_scores.get(ks[0], 0) >= TAG_THRESHOLD), key=rank)
+    body_only = sorted((ks for ks in hit if title_scores.get(ks[0], 0) < TAG_THRESHOLD), key=rank)
+    return normalize(k for k, _ in (titled + body_only)[:MAX_MEETING_TAGS])
 
 
-def rollup_committee_tags(meeting_tags: Iterable[list[str]]) -> list[str]:
-    """Committee tags implied by its meetings' tags.
+@dataclass(frozen=True)
+class Coverage:
+    """How much one topic accounts for a committee's meetings.
 
-    *meeting_tags* has one list per **tagged** meeting. A tag is rolled up when enough
-    meetings carry it that it is a recurring topic, not a one-off agenda item.
+    ``score`` is in [0, 1) and graded: recency-weighted, shrunk towards zero on thin
+    evidence. ``n`` of ``of`` are the plain meeting counts behind it (the evidence a
+    reader can check), ``last`` the day of the newest meeting carrying the topic.
     """
-    rows = [m for m in meeting_tags]
-    if not rows:
-        return []
-    counts: dict[str, int] = {}
-    for tags in rows:
-        for k in set(tags):
-            counts[k] = counts.get(k, 0) + 1
-    need_share = ROLLUP_MIN_SHARE * len(rows)
-    return normalize(k for k, n in counts.items() if n >= ROLLUP_MIN_MEETINGS and n >= need_share)
+
+    score: float
+    n: int
+    of: int
+    last: date | None
+
+
+def has_evidence(state: str | None, has_materials: bool) -> bool:
+    """Whether a meeting says anything about its committee's topics: it was summarised, or
+    at least has documents. A just-detected meeting with neither must not dilute coverage."""
+    return state == "done" or has_materials
+
+
+def coverage(rows: Iterable[tuple[date | None, Iterable[str], bool]]) -> dict[str, Coverage]:
+    """Per-topic coverage of one committee from its meetings.
+
+    *rows* is one ``(day, tags, has_evidence)`` per meeting. A meeting with no evidence
+    (nothing downloaded or summarised yet) says nothing about the committee and is
+    skipped entirely, so a backlog of just-detected meetings cannot dilute a score.
+
+    ``score = Σ w·[topic ∈ meeting] / (Σ w + COVERAGE_PRIOR)`` with
+    ``w = ½^(age / COVERAGE_HALF_LIFE_DAYS)``, age counted back from the committee's
+    newest dated meeting. Only topics at least one meeting carries appear.
+    """
+    evidenced = [(d, frozenset(normalize(t))) for d, t, ok in rows if ok]
+    if not evidenced:
+        return {}
+    dated = [d for d, _ in evidenced if d is not None]
+    anchor = max(dated) if dated else None
+    weights = [
+        0.5 ** (max(0, (anchor - d).days) / COVERAGE_HALF_LIFE_DAYS) if anchor and d else 1.0
+        for d, _ in evidenced
+    ]
+    total = sum(weights)
+    hit_w: dict[str, float] = {}
+    hit_n: dict[str, int] = {}
+    last: dict[str, date] = {}
+    for (d, tags), w in zip(evidenced, weights, strict=True):
+        for k in tags:
+            hit_w[k] = hit_w.get(k, 0.0) + w
+            hit_n[k] = hit_n.get(k, 0) + 1
+            if d is not None and (k not in last or d > last[k]):
+                last[k] = d
+    return {
+        k: Coverage(hit_w[k] / (total + COVERAGE_PRIOR), hit_n[k], len(evidenced), last.get(k))
+        for k in TAG_KEYS
+        if k in hit_w
+    }
+
+
+def tags_from_coverage(cov: dict[str, Coverage]) -> list[str]:
+    """The committee's standing tags implied by its coverage: recurring, not one-off."""
+    return normalize(k for k, c in cov.items() if c.score >= COVERAGE_MIN and c.n >= COVERAGE_MIN_MEETINGS)
 
 
 # ── LLM classification ───────────────────────────────────────────────────────

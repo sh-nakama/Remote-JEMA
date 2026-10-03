@@ -343,13 +343,50 @@ no tag vocabulary (a snapshot older than this feature).
 
 - A **committee's tags** are its *standing mandate*. Where the mandate is
   unambiguous they are curated in `policy/committees.py`; otherwise they come from
-  the committee's name plus any topic that recurs across its meetings (at least two
-  meetings and a fifth of those with content). A committee also appears under a topic
-  if any of its meetings carries it.
+  the committee's name plus any topic with enough [coverage](#topic-coverage) (see
+  below). A committee also appears under a topic if any of its meetings carries it.
 - A **meeting's tags** are what *that meeting* discussed — so a broad committee's
   offshore-wind-only meeting is filed under 洋上風力 alone, not under everything the
   committee ever covers. An upcoming (not-yet-held) meeting shows its committee's tags,
   since there is nothing else to go on.
+
+#### Topic coverage
+
+A tag says *whether* a committee covers a topic; **coverage** says *how much*. It is
+a score from 0 to 100% per committee and topic, so a body that is almost entirely
+offshore wind (74%) is distinguishable from one that touches it now and then (12%).
+
+- **What it is:** the share of the committee's meetings that carry the topic, with
+  recent meetings counting for more (a half-life of a year, measured back from the
+  committee's *own* newest meeting — so a concluded committee keeps its topics rather
+  than fading out; its **latest** date shows how current it is).
+- **Thin evidence is shrunk.** Two imaginary topic-less meetings are added to every
+  denominator, so a single tagged meeting out of one reads about 33%, not 100%. Scores
+  climb as the evidence does (20 of 20 ≈ 91%), and **small or new committees score low
+  on purpose.**
+- **Meetings with no documents and no summary are ignored**, so a freshly detected
+  backlog cannot dilute a committee's score.
+- **Standing tags follow from it:** a rule-tagged committee gains a topic once its
+  coverage reaches 20% over at least two meetings. Curated and pinned tags are not
+  changed by it.
+- **Where you see it:** with a Topic selected, the committee explorer is **ordered by
+  fit** and each row shows the committee's strongest selected topic and its percentage
+  (hover for "n of m meetings · latest"). A committee's detail pane has a **Topic
+  coverage** section with a bar per topic; click a bar to toggle that topic's filter.
+
+```bash
+repower policy coverage --topic wind_offshore     # committees ranked for a topic
+repower policy coverage --committee saisei_kano   # one committee's topics, strongest first
+repower policy coverage --committee saisei_kano --meetings   # per-meeting evidence: date, tags, document titles
+repower policy coverage                           # each topic's top three committees
+```
+
+`--meetings` is the audit tool: it shows the raw evidence a coverage score summarises,
+so a curated or surprising number can be checked against what the committee's own
+documents actually say, meeting by meeting.
+
+Coverage is only as good as the meeting tags beneath it, so it becomes meaningful
+after the backlog is tagged (`repower policy tag --apply`).
 
 **How a meeting gets tagged (daily).** Two stages, both automatic:
 
@@ -400,6 +437,7 @@ Run with the installed console script (`repower …`) from the project root:
 | `repower policy run --committee <key> --max-per-run 1` | "Latest only": the newest pending meeting of one committee, then stop. |
 | `repower policy queue --committee <key> --meeting <N>` | Move one meeting to the front of the summarisation queue (`--clear` to take it off). |
 | `repower policy tags` / `tag` / `tag-set` | List the topic-tag vocabulary; apply rule-based tags (dry run unless `--apply`); pin tags by hand. See [Topic tags](#topic-tags). |
+| `repower policy coverage [--topic T \| --committee K]` | How much each committee covers each topic (0-100%, read-only). See [Topic coverage](#topic-coverage). |
 | `repower policy doctor` | Explain why committees failed to fetch (blocked, WAF challenge, moved page …) and what to do about each. Add `--all` to include healthy ones, `--history` for recent attempts. |
 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
 | `repower web-api` | Start the local backend that powers the interactive frontend. |

@@ -1,5 +1,7 @@
 // Fixture data ported from screens/policy-deep-dive.html (DCLogic constructor).
 
+import type { TagCoverage } from '../lib/policyTags'
+
 export interface Committee {
   key: string
   org: 'METI' | 'OCCTO' | 'EGC'
@@ -41,6 +43,8 @@ export interface Committee {
   fetchFailures?: number
   /** Topic tags (keys of the exported `tagVocab`): the committee's standing mandate. Live rows. */
   tags?: string[]
+  /** How much of its recent work each topic is, strongest first (live rows). */
+  coverage?: TagCoverage[]
 }
 
 export interface DigestSection {
