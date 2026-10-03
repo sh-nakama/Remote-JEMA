@@ -443,9 +443,13 @@ def _require_auth_or_exit() -> None:
     """Clean pre-check for NotebookLM auth: print a plain message and exit (no
     traceback) when the session is missing/stale, so operators and the catch-up
     loop get an actionable line instead of a stack trace."""
-    from repower.policy.notebook import auth_ok
+    from repower.policy.notebook import auth_ok, binary_problem
 
     if not auth_ok():
+        problem = binary_problem()
+        if problem:  # a missing program is not a lapsed login; `notebooklm login` would not help
+            typer.echo(problem, err=True)
+            raise typer.Exit(code=2)
         typer.echo("NotebookLM auth is missing/stale.", err=True)
         typer.echo("Run `notebooklm login` locally (or refresh the NOTEBOOKLM_AUTH_JSON "
                    "secret), then retry.", err=True)
@@ -707,6 +711,62 @@ def policy_resolve_citations(
     }.get(summary["stopped_early"] or "")
     if why:
         typer.echo(f"stopped early: {why}", err=True)
+
+
+@policy_app.command("auth")
+def policy_auth():
+    """Check that the NotebookLM session is valid (a live test, not just a file check)."""
+    _require_auth_or_exit()
+    typer.echo("NotebookLM session is valid.")
+
+
+@policy_app.command("login")
+def policy_login(
+    browser: str = typer.Option("chromium", help="chromium | chrome | msedge"),
+    timeout: int = typer.Option(300, help="Seconds to wait for you to finish signing in"),
+):
+    """Sign in to NotebookLM — opens a browser window on this machine — then verify the session.
+
+    Wraps ``notebooklm login``, which saves the session by itself once sign-in is detected (no
+    terminal input), so it can run from the web app's button as well as from a terminal. This
+    refreshes the LOCAL session; the daily GitHub Action reads the NOTEBOOKLM_AUTH_JSON secret,
+    which is updated separately."""
+    import os
+    import subprocess
+
+    from repower.policy.notebook import auth_ok, binary_problem, find_binary
+
+    if browser not in ("chromium", "chrome", "msedge"):
+        typer.echo("--browser must be chromium, chrome or msedge.", err=True)
+        raise typer.Exit(code=2)
+    if os.environ.get("NOTEBOOKLM_AUTH_JSON"):
+        typer.echo("NOTEBOOKLM_AUTH_JSON is set, and notebooklm refuses to log in while it is. "
+                   "Unset it for this session (file-based auth is what a local login produces).", err=True)
+        raise typer.Exit(code=2)
+    exe = find_binary()
+    if exe is None:
+        typer.echo(binary_problem(), err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"Opening {browser} — sign in to Google in the window that appears (waiting up to {timeout}s)…")
+    try:
+        proc = subprocess.run(
+            [exe, "login", "--browser", browser, "--browser-timeout", str(timeout)],
+            stdin=subprocess.DEVNULL, timeout=timeout + 60,
+        )
+    except FileNotFoundError:
+        typer.echo(binary_problem() or f"`{exe}` could not be run", err=True)
+        raise typer.Exit(code=1) from None
+    except subprocess.TimeoutExpired:
+        typer.echo("Login did not finish in time.", err=True)
+        raise typer.Exit(code=1) from None
+    if proc.returncode != 0:
+        typer.echo(f"notebooklm login exited with {proc.returncode}.", err=True)
+        raise typer.Exit(code=1)
+    if not auth_ok():
+        typer.echo("Signed in, but the session did not validate — try again.", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("NotebookLM session is valid. (The daily GitHub Action uses the NOTEBOOKLM_AUTH_JSON "
+               "secret — update that separately if the cron needs the new session.)")
 
 
 @policy_app.command("resume")

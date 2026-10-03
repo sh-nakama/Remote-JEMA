@@ -94,6 +94,9 @@ def stubs(monkeypatch):
         "repower.policy.digest.build_digest": s.stub("digest", "# Weekly digest"),
         "repower.policy.digest.post_digest": s.stub("post", True),
         "repower.policy.energy_board.cross_check": s.stub("crosscheck", CROSSCHECK),
+        "repower.policy.citation_resolver.backfill": s.stub("resolve_citations", {
+            "resolved": 0, "attempted": 0, "pages": 0, "refs": 0, "pending": 0,
+            "errors": [], "stopped_early": None}),
     }
     for target, fn in patches.items():
         monkeypatch.setattr(target, fn)
@@ -201,6 +204,8 @@ def test_check_freshness_exits_1_when_a_source_is_stale(stubs, monkeypatch):
 @pytest.mark.parametrize("argv", [["policy", "run"], ["policy", "resume"]], ids=" ".join)
 def test_summarising_commands_stop_without_notebooklm_auth(stubs, monkeypatch, argv):
     monkeypatch.setattr("repower.policy.notebook.auth_ok", lambda: False)
+    # CI has no notebooklm program at all; this test is about a program that is there but logged out.
+    monkeypatch.setattr("repower.policy.notebook.binary_problem", lambda: None)
 
     result = CliRunner().invoke(cli.app, argv)
 

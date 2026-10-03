@@ -238,26 +238,44 @@ everything else.
 
 ## CI workflows
 
-- **`daily.yml`** — scheduled run of the full pipeline (scrape → analyze →
-  notify) at 05:30 JST (20:30 UTC). Pulls the DB from Hugging Face, runs
-  `run-all --months-back 1` (current + previous month only), then pushes back.
-- **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
-  over a wider window (last ~6 months of TSO, ~2 years of JEPX, all EPRX years)
-  to pick up late upstream revisions the daily window misses.
-- **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
-  `since` and `area` inputs.
+The schedule at a glance, with the commands each one runs, is the table in the user guide:
+[What runs automatically](docs/USER-GUIDE.md#what-runs-automatically-github-actions)
+(also shown in the app's **i** guide). A test fails if that table and these workflow files
+disagree. Times below are JST, from the UTC cron; GitHub can start a scheduled job hours late.
+
+The five workflows that write the Hugging Face dataset (`daily`, `policy`, `weekly-backfill`,
+`backfill`, `policy-crosscheck`) share one concurrency group (`hf-dataset`), so they queue
+behind one another instead of racing. A push from your own machine is not in that queue.
+
+- **`daily.yml`** — scheduled run of the full pipeline at 05:30 JST (20:30 UTC). Pulls the
+  DB from Hugging Face, runs `run-all --months-back 1` (current + previous month only:
+  scrape → analyze → policy detect, dates, topic tags, upcoming schedule and committee
+  discovery → notify), prunes the HTTP cache, pushes back, then runs `check-freshness`
+  so a silently stale source fails the run.
 - **`policy.yml`** — daily (06:30 JST) + `workflow_dispatch` authenticated
   NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
-  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, push DB.
+  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, then resolve
+  the source page behind citations for up to 5 earlier meetings (`resolve-citations`;
+  needs no login and never fails the run), push DB.
   Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the
   operator runbook above).
+- **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
+  over a wider window (last ~6 months of TSO, JEPX from last year, EPRX from FY2025)
+  to pick up late upstream revisions the daily window misses.
+- **`policy-crosscheck.yml`** — monthly (07:00 JST on the 2nd) + `workflow_dispatch`.
+  Cross-checks the committees the energy-board aggregator lists against our catalog,
+  adds any energy committees we lack as discovered / untracked rows, posts the report
+  to the webhook and pushes the DB. No NotebookLM login needed.
+- **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
+  `since` and `area` inputs.
+- **`web-deploy.yml`** — rebuilds the JEMA site (`export-web` from a freshly pulled DB)
+  and deploys it to GitHub Pages: after any of the five dataset workflows finishes
+  (skipped when the DB is unchanged), on a 06:30 JST backstop cron for dataset pushes
+  made outside Actions, on pushes to `web/` or the exporter, and manually.
 - **`sync-space.yml`** — on push to `main` (code/config paths), uploads the
   Space deployment (`space/`, `src/`, `Dockerfile`, `pyproject.toml`,
   `constraints.txt`) to the Hugging Face Space, then waits for the rebuild and
   fails if the Space doesn't come up.
-- **`web-deploy.yml`** — rebuilds the JEMA site and deploys it to GitHub Pages
-  whenever a dataset workflow finishes (skipped when the DB is unchanged), on
-  pushes to `web/`, and on a daily backstop cron.
 - **`ci.yml`** — on pull requests and `main`: brand check, ruff, mypy and pytest,
   plus the web app's lint, build and unit tests. Both jobs are required to merge.
 

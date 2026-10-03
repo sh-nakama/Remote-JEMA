@@ -1,6 +1,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { useApp } from './app'
-import type { JobRun, JobStage, Screen, WatchEntry } from './app'
+import type { GuideTab, JobRun, JobStage, Screen, WatchEntry } from './app'
+import { inGroup, pickBi, useCommands } from './commands'
+import { AUTOMATED_RUNS, COMMANDS_GUIDE, POLICY_GUIDE, SCREENS_GUIDE, type GuideSection } from './guideContent'
+import { BADGE, LevelBadge } from './LevelBadge'
 import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import { parseDbTs } from './policyActivity'
 import type { AreaKey, Level, PolicyJob } from './types'
@@ -56,7 +59,7 @@ interface Cmd {
 const BACKDROP =
   'position:fixed;inset:0;background:rgba(13,20,32,.42);z-index:200;display:flex;flex-direction:column;align-items:center;padding:11vh 16px 16px'
 
-function Modal({ children, onClose, top }: { children: React.ReactNode; onClose: () => void; top?: boolean }) {
+export function Modal({ children, onClose, top }: { children: React.ReactNode; onClose: () => void; top?: boolean }) {
   return (
     <div
       style={{ ...s(BACKDROP), justifyContent: top ? 'flex-start' : 'center' }}
@@ -74,7 +77,7 @@ const PANEL =
 const CHIP =
   'font-size:10px;font-weight:600;color:var(--mut);border:1px solid var(--bd2);border-radius:6px;padding:1px 7px;flex-shrink:0'
 
-function icon(html: string, size = 16, color = 'var(--mut)') {
+export function icon(html: string, size = 16, color = 'var(--mut)') {
   return (
     <RawSvg
       html={`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:${size}px;height:${size}px;color:${color};flex-shrink:0">${html}</svg>`}
@@ -393,138 +396,155 @@ function SettingsPanel() {
 // ---------------------------------------------------------------------------
 // Guide panel — the in-app "i" user guide
 // ---------------------------------------------------------------------------
-// A SIMPLIFIED mirror of the "Policy Deep Dive" section of docs/USER-GUIDE.md.
-// Keep the two in sync: update the doc first, then mirror the short copy here.
+// Three tabs: Screens, Policy Deep Dive and — only with the local backend — Commands. The copy lives
+// in guideContent.ts, a simplified mirror of docs/USER-GUIDE.md (update the doc first). The Commands
+// tab also renders the live command registry, so the per-command text cannot go stale.
 const I_INFO =
   '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line>'
 const GUIDE_PANEL =
-  'width:760px;max-width:94vw;max-height:80vh;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden;display:flex;flex-direction:column'
+  'width:760px;max-width:94vw;height:80vh;background:var(--bg1);border:1px solid var(--bd);border-radius:16px;box-shadow:var(--shPop);overflow:hidden;display:flex;flex-direction:column'
 
-interface GuideItem { en: string; ja: string }
-interface GuideSection { hEn: string; hJa: string; items: GuideItem[] }
+function GuideSections({ sections }: { sections: GuideSection[] }) {
+  const { lang } = useApp()
+  const pick = (en: string, ja: string) => (lang === 'ja' ? ja : en)
+  return (
+    <>
+      {sections.map((sec) => (
+        <div key={sec.hEn} style={s('padding:12px 0;border-bottom:1px solid var(--bd)')}>
+          <div style={s('font-size:13px;font-weight:700;color:var(--tx);margin-bottom:7px')}>{pick(sec.hEn, sec.hJa)}</div>
+          <div style={s('display:flex;flex-direction:column;gap:6px')}>
+            {sec.items.map((it, i) => (
+              <div key={i} style={s('font-size:12.5px;color:var(--tx2);line-height:1.55')}>{pick(it.en, it.ja)}</div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
+  )
+}
 
-const GUIDE: GuideSection[] = [
-  {
-    hEn: 'What this screen is', hJa: 'この画面について',
-    items: [
-      { en: 'Tracks Japanese energy-policy committees (METI/OCCTO/EGC): their meetings, the documents published for each, and AI briefings & bilingual digests of what was discussed.',
-        ja: '日本のエネルギー政策委員会（METI/OCCTO/EGC）の会合、公開資料、AIによる要約・バイリンガルのダイジェストを追跡します。' },
-    ],
-  },
-  {
-    hEn: 'The three panes', hJa: '3つのペイン',
-    items: [
-      { en: 'Explorer (left): the full committee catalog — tracked ones and ones the tool discovered (tagged UNTRACKED). Search and follow committees here.',
-        ja: 'エクスプローラー（左）: 委員会カタログ全体。追跡中と、発見済みで未追跡（UNTRACKED）の委員会。検索・フォローができます。' },
-      { en: 'Feed (center): meetings as cards, newest first, with a search box, date filters, and a Tracked/All toggle.',
-        ja: 'フィード（中央）: 会合をカード表示（新しい順）。検索、日付フィルタ、追跡/全体トグルがあります。' },
-      { en: 'Detail (right): pick a committee to see its rolling synthesis, or a meeting to see that session’s digest and source PDFs.',
-        ja: '詳細（右）: 委員会を選ぶと総括、会合を選ぶとその回のダイジェストと元資料PDFを表示します。' },
-    ],
-  },
-  {
-    hEn: 'Topic filter', hJa: 'トピックフィルタ',
-    items: [
-      { en: 'Topic ▾ in the filter bar narrows everything to subjects such as offshore wind, grid-scale batteries or grid connection (pick several: it matches any of them).',
-        ja: 'フィルタバーの「トピック ▾」で、洋上風力・系統用蓄電池・系統接続などの話題に絞り込めます（複数選択可、いずれかに一致）。' },
-      { en: 'A committee’s tags are its standing mandate; a meeting’s tags are what that meeting actually discussed — they are not inherited.',
-        ja: '委員会のタグはその恒常的な所掌、会合のタグはその回の議題そのもの。委員会から引き継ぐことはありません。' },
-      { en: 'With a topic selected, committees are ranked by how much of their recent work it is (e.g. “Offshore wind 74%”). A committee’s detail shows a coverage bar per topic.',
-        ja: 'トピックを選ぶと、その話題が各委員会の直近の活動に占める割合（例:「洋上風力 74%」）の高い順に並びます。委員会の詳細にはトピックごとの網羅度バーが表示されます。' },
-    ],
-  },
-  {
-    hEn: 'Follow vs. Track (they differ)', hJa: 'フォローと追跡の違い',
-    items: [
-      { en: 'Follow is a personal filter saved in your browser — it highlights committees and drives the Followed filter only.',
-        ja: 'フォローはブラウザに保存される個人設定。ハイライトと「フォロー中」フィルタにのみ影響します。' },
-      { en: 'Track is a backend setting (in Manage committees). Only tracked committees get AI summaries generated.',
-        ja: '追跡はバックエンド設定（「委員会の管理」内）。追跡中の委員会のみがAI要約されます。' },
-    ],
-  },
-  {
-    hEn: 'Meeting status', hJa: '会合のステータス',
-    items: [
-      { en: 'Pending: known and has materials, waiting for its AI digest.',
-        ja: 'ペンディング: 資料あり、AIダイジェスト待ち。' },
-      { en: 'Done: summarised — has a digest and feeds the committee synthesis.',
-        ja: '完了: 要約済み。ダイジェストがあり、委員会の総括に反映されます。' },
-      { en: 'Error: summarisation failed; retried a few times, then dropped.',
-        ja: 'エラー: 要約に失敗。数回再試行後に除外されます。' },
-      { en: 'A meeting with no materials yet is hidden — materials are what make it appear.',
-        ja: '資料がまだ無い会合は非表示です。資料が揃うと表示されます。' },
-      { en: 'Manage → Status: one row per committee (tracked first, most recently updated first) — what the pipeline last did, how long ago, and whether the pages could be fetched. Expand a row for each meeting’s state and the error it failed with.',
-        ja: '「管理」→「状態」: 委員会ごとに1行（追跡中が先頭、更新の新しい順）。直近の処理内容・経過時間・ページ取得の可否を表示。行を展開すると会合ごとの状態と失敗理由が見られます。' },
-      { en: 'One meeting at a time: LATEST summarises a committee’s newest pending meeting and stops; ▶ on a single meeting runs just that one (and can re-run a summarised one); ↑ moves it to the front of the queue.',
-        ja: '1件ずつ処理: 「最新」は最新の未要約会合のみを要約。会合行の▶はその1件だけを実行（要約済みの再実行も可）、↑はキューの先頭へ移動します。' },
-      { en: 'A meeting is only summarised when every one of its documents was fetched — the DOCS IN column shows how many reached the AI. A summarised meeting showing 3/12 saw only part of the papers; re-run it with ▶.',
-        ja: '全ての資料を取得できた場合のみ要約します。「取込資料」列はAIに渡された件数です。要約済みで3/12などの場合は一部しか参照していないため、▶で再実行してください。' },
-    ],
-  },
-  {
-    hEn: 'Check for updates (catch-up)', hJa: '更新の確認（差分取得）',
-    items: [
-      { en: 'Runs five stages, shown live in the progress panel (bottom-left):',
-        ja: '5つのステージを実行し、進捗パネル（左下）にライブ表示します:' },
-      { en: '1. detect — find new meetings across every committee.',
-        ja: '1. detect — 全委員会の新規会合を検出。' },
-      { en: '2. materials — fetch documents for meetings that had none yet (self-heal).',
-        ja: '2. materials — 資料が無かった会合の資料を取得（自動修復）。' },
-      { en: '3. dates — fill in missing meeting dates.',
-        ja: '3. dates — 欠けている会合日を補完。' },
-      { en: '4. schedule — refresh upcoming meetings (skipped if the METI feed is down).',
-        ja: '4. schedule — 今後の会合を更新（METIのフィード停止時はスキップ）。' },
-      { en: '5. discover — find new committees you don’t track yet.',
-        ja: '5. discover — 未追跡の新しい委員会を発見。' },
-      { en: 'The button needs a local backend running; the public site is read-only.',
-        ja: 'このボタンはローカルのバックエンドが必要です。公開サイトは閲覧専用です。' },
-    ],
-  },
-  {
-    hEn: 'Summaries', hJa: '要約',
-    items: [
-      { en: 'For tracked committees, pending meetings are summarised into a bilingual digest, then folded into the committee synthesis.',
-        ja: '追跡中の委員会では、ペンディングの会合がバイリンガルのダイジェストに要約され、委員会の総括に統合されます。' },
-      { en: 'Use Generate summary on a meeting to push it to the front of the queue.',
-        ja: '会合の「要約を生成」で、その会合をキューの先頭に移動できます。' },
-      { en: 'Summarise all ⚿: starts new work — summarises pending meetings breadth-first (the newest of each tracked committee, in priority order), up to 8 per run, then refreshes each committee synthesis.',
-        ja: '全件要約 ⚿: 新規分を開始 — ペンディングの会合を幅優先（各追跡委員会の最新会合を優先順に）で最大8件/回まで要約し、各委員会の総括を更新します。' },
-      { en: 'Resume ⚿: only drains meetings left mid-flight (stuck after an interrupted or rate-limited run) — it continues where it left off, and does nothing if none are stuck.',
-        ja: '再開 ⚿: 途中で止まった会合のみを処理（中断・レート制限後に残ったもの）。中断地点から再開し、対象が無ければ何もしません。' },
-      { en: 'Both Summarise buttons need `notebooklm login`.',
-        ja: 'いずれの要約ボタンも `notebooklm login` が必要です。' },
-    ],
-  },
-  {
-    hEn: 'Search & filters', hJa: '検索とフィルタ',
-    items: [
-      { en: 'Feed search covers titles, committees, and digests — including untracked committees.',
-        ja: 'フィード検索は、未追跡の委員会を含め、タイトル・委員会・ダイジェストを対象とします。' },
-      { en: 'Combine the Tracked/All toggle, the date filter, and Followed-only to narrow the feed.',
-        ja: '追跡/全体トグル、日付フィルタ、フォロー中のみを組み合わせて絞り込めます。' },
-    ],
-  },
-  {
-    hEn: 'Good to know', hJa: '補足',
-    items: [
-      { en: 'The Upcoming list is empty whenever the METI calendar feed is unavailable.',
-        ja: 'METIのカレンダーフィードが利用できない間、「今後の会合」は空になります。' },
-      { en: 'The source site throttles bursts, so material backfill heals gradually over several runs.',
-        ja: '配信元はアクセス集中を制限するため、資料の補完は複数回の実行で徐々に進みます。' },
-    ],
-  },
-]
+/** What the GitHub Actions run on their own: when, what, and whether they write the shared dataset. */
+function AutomatedRuns() {
+  const { lang } = useApp()
+  const pick = (en: string, ja: string) => (lang === 'ja' ? ja : en)
+  return (
+    <div style={s('padding:12px 0;border-bottom:1px solid var(--bd)')}>
+      <div style={s('font-size:13px;font-weight:700;color:var(--tx);margin-bottom:4px')}>
+        {pick('What runs automatically', '自動で実行されるもの')}
+      </div>
+      <div style={s('font-size:12px;color:var(--mut);line-height:1.55;margin-bottom:8px')}>
+        {pick('GitHub Actions. Scheduled jobs can start hours late, so read a time as “no earlier than”.',
+          'GitHub Actionsです。定期ジョブは数時間遅れて始まることがあるため、時刻は「それ以降」と読んでください。')}
+      </div>
+      <div style={s('display:flex;flex-direction:column')}>
+        {AUTOMATED_RUNS.map((r) => (
+          <div key={r.file} style={s('padding:8px 0;border-top:1px solid var(--dv)')}>
+            <div style={s('display:flex;align-items:center;gap:8px;flex-wrap:wrap')}>
+              <span style={s('font-size:12.5px;font-weight:600;color:var(--tx)')}>{pick(r.nameEn, r.nameJa)}</span>
+              <span style={s(`${BADGE};background:var(--bg2);color:var(--tx2)`)}>{pick(r.whenEn, r.whenJa)}</span>
+              {r.writes && (
+                <span style={s(`${BADGE};background:var(--acTint);color:var(--acT)`)}>{pick('writes dataset', 'データセット更新')}</span>
+              )}
+              <span style={s('font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;color:var(--mut)')}>
+                {r.file}{r.cron ? ` · ${r.cron} UTC` : ''}
+              </span>
+            </div>
+            <div style={s('font-size:12px;color:var(--tx2);line-height:1.55;margin-top:3px')}>{pick(r.doesEn, r.doesJa)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={s('font-size:11.5px;color:var(--mut);line-height:1.55;margin-top:6px')}>
+        {pick('Runs that write the dataset queue behind one another, but a push from your machine does not: pull again if one of these has run since your last pull.',
+          'データセットを更新する実行は順番待ちになりますが、お手元からのpushは対象外です。前回のpull以降にこれらが実行されていたら、再度pullしてください。')}
+      </div>
+    </div>
+  )
+}
+
+/** The Commands tab: the fixed explanation, then the live registry — the ordered flows and every command. */
+function CommandsGuide() {
+  const { lang, interactive } = useApp()
+  const pick = (en: string, ja: string) => (lang === 'ja' ? ja : en)
+  const { data, error } = useCommands(interactive)
+  const byId = new Map((data?.commands ?? []).map((c) => [c.id, c]))
+  const H = 'font-size:13px;font-weight:700;color:var(--tx);margin-bottom:7px'
+  return (
+    <>
+      <GuideSections sections={COMMANDS_GUIDE} />
+      <AutomatedRuns />
+      {error && !data && (
+        <div style={s('font-size:12.5px;color:var(--warnTx);padding:12px 0')}>
+          {pick('Could not load the command list — restart `repower web-api` if it predates this update.',
+            'コマンド一覧を取得できません。更新前に起動した `repower web-api` の場合は再起動してください。')}
+        </div>
+      )}
+      {data && (
+        <>
+          {data.recipes.map((r) => (
+            <div key={r.id} style={s('padding:12px 0;border-bottom:1px solid var(--bd)')}>
+              <div style={s(H)}>{pick('Flow: ', 'フロー: ')}{pickBi(r.title, lang)}</div>
+              <div style={s('font-size:12.5px;color:var(--tx2);line-height:1.55;margin-bottom:8px')}>{pickBi(r.summary, lang)}</div>
+              <div style={s('display:flex;flex-direction:column;gap:5px')}>
+                {r.steps.map((id, i) => {
+                  const c = byId.get(id)
+                  if (!c) return null
+                  return (
+                    <div key={id} style={s('display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--tx2)')}>
+                      <span style={s('width:20px;height:20px;border-radius:999px;background:var(--acTint);color:var(--acT);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0')}>{i + 1}</span>
+                      <span style={s('font-weight:600;color:var(--tx)')}>{pickBi(c.title, lang)}</span>
+                      <LevelBadge level={c.level} lang={lang} />
+                      {r.optional.includes(id) && <span style={s('font-size:10.5px;color:var(--mut)')}>{pick('optional', '任意')}</span>}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+          <div style={s('padding:12px 0')}>
+            <div style={s(H)}>{pick('Every command', '全コマンド')}</div>
+            {(['backflow', 'inspect', 'automated'] as const).map((g) => (
+              <div key={g} style={s('margin-top:10px')}>
+                <div style={s('font-size:10.5px;font-weight:700;letter-spacing:.09em;color:var(--mut);margin-bottom:6px')}>
+                  {g === 'backflow' ? pick('BACKFLOW · 遡及フロー', 'BACKFLOW · 遡及フロー') : g === 'inspect' ? pick('INSPECT · 確認', 'INSPECT · 確認') : pick('AUTOMATED DAILY · 自動実行', 'AUTOMATED DAILY · 自動実行')}
+                </div>
+                {inGroup(data.commands, g).map((c) => (
+                  <div key={c.id} style={s('padding:8px 0;border-top:1px solid var(--dv)')}>
+                    <div style={s('display:flex;align-items:center;gap:8px;flex-wrap:wrap')}>
+                      <span style={s('font-size:12.5px;font-weight:600;color:var(--tx)')}>{pickBi(c.title, lang)}</span>
+                      <LevelBadge level={c.level} lang={lang} />
+                      {c.needsNotebooklm && <span style={s(`${BADGE};background:var(--bg2);color:var(--tx2)`)}>NotebookLM</span>}
+                      <span style={s('font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;color:var(--mut)')}>{c.cli}</span>
+                    </div>
+                    <div style={s('font-size:12px;color:var(--tx2);line-height:1.55;margin-top:3px')}>{pickBi(c.summary, lang)}</div>
+                    <div style={s('font-size:11.5px;color:var(--mut);line-height:1.55;margin-top:2px')}>{pickBi(c.when, lang)}</div>
+                  </div>
+                ))}
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </>
+  )
+}
 
 function GuidePanel() {
   const app = useApp()
   const L = app.lang
   const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
+  // The Commands tab only exists with the local backend; fall back if it was asked for without one.
+  const tab: GuideTab = app.guideTab === 'commands' && !app.interactive ? 'policy' : app.guideTab
+  const tabs: { key: GuideTab; en: string; ja: string }[] = [
+    { key: 'screens', en: 'Screens', ja: '画面' },
+    { key: 'policy', en: 'Policy Deep Dive', ja: '政策ディープダイブ' },
+    ...(app.interactive ? [{ key: 'commands' as GuideTab, en: 'Commands', ja: 'コマンド' }] : []),
+  ]
   return (
     <Modal onClose={app.closeOverlay} top>
       <div style={s(GUIDE_PANEL)}>
-        <div style={s('display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--bd);flex-shrink:0')}>
+        <div style={s('display:flex;align-items:center;gap:10px;padding:16px 20px 12px;flex-shrink:0')}>
           {icon(I_INFO, 18, 'var(--ac)')}
-          <span style={s('font-size:16px;font-weight:700;color:var(--tx)')}>{pick('Policy Deep Dive — Guide', '政策ディープダイブ — ガイド')}</span>
+          <span style={s('font-size:16px;font-weight:700;color:var(--tx)')}>{pick('Guide', 'ガイド')}</span>
           <span style={s('font-size:12px;color:var(--mut)')}>· {pick('how it works', '使い方')}</span>
           <Hoverable
             base="margin-left:auto;width:30px;height:30px;border-radius:999px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--mut)"
@@ -535,17 +555,28 @@ function GuidePanel() {
             {icon(I_X, 16)}
           </Hoverable>
         </div>
-        <div style={s('padding:4px 20px 18px;overflow-y:auto')}>
-          {GUIDE.map((sec) => (
-            <div key={sec.hEn} style={s('padding:12px 0;border-bottom:1px solid var(--bd)')}>
-              <div style={s('font-size:13px;font-weight:700;color:var(--tx);margin-bottom:7px')}>{pick(sec.hEn, sec.hJa)}</div>
-              <div style={s('display:flex;flex-direction:column;gap:6px')}>
-                {sec.items.map((it, i) => (
-                  <div key={i} style={s('font-size:12.5px;color:var(--tx2);line-height:1.55')}>{pick(it.en, it.ja)}</div>
-                ))}
-              </div>
-            </div>
+        <div role="tablist" style={s('display:flex;gap:6px;padding:0 20px 12px;border-bottom:1px solid var(--bd);flex-shrink:0')}>
+          {tabs.map((t) => (
+            <Hoverable
+              key={t.key}
+              as="span"
+              base={`font-size:12.5px;font-weight:600;border-radius:999px;padding:5px 14px;cursor:pointer;${t.key === tab ? 'background:var(--acTint);color:var(--acT);border:1px solid var(--ac)' : 'color:var(--tx2);border:1px solid var(--bd2)'}`}
+              hover="border-color:var(--ac)"
+              {...press(() => app.setGuideTab(t.key), t.key === tab)}
+              role="tab"
+              aria-selected={t.key === tab}
+            >{pick(t.en, t.ja)}</Hoverable>
           ))}
+        </div>
+        <div style={s('padding:0 20px 18px;overflow-y:auto;flex:1')}>
+          {tab === 'screens' && (
+            <>
+              <GuideSections sections={SCREENS_GUIDE} />
+              <AutomatedRuns />
+            </>
+          )}
+          {tab === 'policy' && <GuideSections sections={POLICY_GUIDE} />}
+          {tab === 'commands' && <CommandsGuide />}
           <div style={s('font-size:11px;color:var(--mut);margin-top:14px;line-height:1.5')}>
             {pick('Full reference for developers:', '開発者向けの詳細:')}{' '}
             <span style={s('font-weight:600;color:var(--tx2)')}>docs/USER-GUIDE.md</span>

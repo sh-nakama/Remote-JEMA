@@ -4,12 +4,15 @@
 > screen and workflow by workflow. It is written so that (a) a new user can learn
 > the tool, and (b) the in-app **"i" info guide** can be kept accurate and simple.
 >
-> **Relationship to the in-app guide.** The "i" icon on the Policy Deep Dive top
-> bar opens a *simplified* version of the "Policy Deep Dive" section below. That
-> panel is authored in [`web/src/lib/menus.tsx`](../web/src/lib/menus.tsx) as the
-> `GuidePanel` component (a bilingual `GUIDE` data array). **When a policy workflow
-> changes, update this document first, then mirror the short version into
-> `GuidePanel`.**
+> **Relationship to the in-app guide.** The **"i"** icon on every screen's top bar opens a
+> *simplified* version of this document, in three tabs: **Screens**, **Policy Deep Dive**
+> and — only with the local backend running — **Commands**. The first two are authored in
+> [`web/src/lib/guideContent.ts`](../web/src/lib/guideContent.ts) (bilingual data arrays),
+> rendered by the `GuidePanel` component in
+> [`web/src/lib/menus.tsx`](../web/src/lib/menus.tsx). The Commands tab's per-command text
+> is *not* copied: it is rendered live from the command registry
+> ([`src/repower/commands.py`](../src/repower/commands.py)). **When a workflow changes,
+> update this document first, then mirror the short version into `guideContent.ts`.**
 
 ---
 
@@ -22,6 +25,7 @@
   - [Core concepts](#core-concepts)
   - [Everyday workflows](#everyday-workflows)
   - [Behind the scenes: the data pipeline](#behind-the-scenes-the-data-pipeline)
+  - [What runs automatically](#what-runs-automatically-github-actions)
   - [CLI reference](#cli-reference)
   - [Known constraints & troubleshooting](#known-constraints--troubleshooting)
 - [Other screens (brief)](#other-screens-brief)
@@ -49,7 +53,9 @@ There are four screens, switched from the left nav rail:
 
 Shared chrome on every screen: a **⌘K search** palette, a **theme** toggle
 (light/dark), a **language** toggle (English / 日本語), a **Watchlist**, and a
-**Settings** panel. Preferences are saved in the browser (localStorage).
+**Settings** panel. Preferences are saved in the browser (localStorage). With the local
+backend running there is also a **Commands pane** on the right, mirroring the left nav
+pane — see the [CLI reference](#cli-reference).
 
 ---
 
@@ -314,7 +320,8 @@ worklist of **pending, tracked** meetings:
 3. Render the bilingual **digest** sections and mark the meeting **done**.
 4. Fold the new briefing into the committee-level **synthesis** (running doc).
 
-On the hosted setup this runs on the **daily 06:10 JST** cron; locally you can run
+On the hosted setup this runs in the daily policy job (cron 06:30 JST — GitHub can start
+scheduled jobs hours late); locally you can run
 it on demand.
 
 #### Data source & sync
@@ -429,26 +436,113 @@ meeting with `repower policy run --committee <key> --meeting <N>` to get a Noteb
 classification for it. The tags live in the DB, so a backfill reaches production through
 the Hugging Face dataset push, not git.
 
+### What runs automatically (GitHub Actions)
+
+Eight workflows in [`.github/workflows/`](../.github/workflows/) run without you. Times are
+the cron in UTC and the same moment in JST; **GitHub can start a scheduled job hours late**,
+so treat a time as "no earlier than". `tests/test_workflow_docs.py` checks this table (and
+the in-app copy) against the workflow files, so it cannot quietly go stale.
+
+| Workflow | When (UTC cron → JST) | What it runs | Writes the dataset |
+| --- | --- | --- | --- |
+| `daily.yml` — Daily Scrape & Analyze | `30 20 * * *` → 05:30 JST, every day | `repower pull-hf`, then `repower run-all` (scrape every TSO area, JEPX, fuels, news and EPRX; analyse; policy detect, dates, topic tags, upcoming schedule and committee discovery; post the webhook), `repower cache prune`, `repower push-hf`, then `repower check-freshness` as the outage alarm. | Yes |
+| `policy.yml` — Daily Policy Summaries | `30 21 * * *` → 06:30 JST, every day | `repower pull-hf`, `repower policy detect`; then, only if the NotebookLM login is valid, `repower policy resume`, `repower policy run` (up to 8 meetings) and `repower policy digest`; then, with or without a login, `repower policy resolve-citations --max-meetings 5` (finds the source page behind older digests' citations, a few meetings a day; a failure never fails the run); `repower push-hf`. A stale login skips the summaries and raises an alert. | Yes |
+| `weekly-backfill.yml` — Weekly Deep Re-validation | `30 19 * * 0` → 04:30 JST, Mondays | `repower pull-hf`, `repower backfill` over a deeper window (about 6 months of TSO data, JEPX from last year, EPRX from FY2025) to catch late upstream revisions, `repower push-hf`. | Yes |
+| `policy-crosscheck.yml` — Monthly Committee Cross-check | `0 22 1 * *` → 07:00 JST on the 2nd of each month | `repower pull-hf`, `repower policy crosscheck` (adds energy committees the energy-board feed has and we lack, as untracked), `repower push-hf`. | Yes |
+| `backfill.yml` — Historical Backfill | Manual only (`since` and `area` inputs) | `repower pull-hf`, `repower backfill`, `repower push-hf`. | Yes |
+| `web-deploy.yml` — Deploy Web (JEMA) | After any of the five dataset workflows above finishes; backstop `30 21 * * *` → 06:30 JST; pushes to `main` touching `web/` or the exporter; manual | `repower pull-hf`, `repower export-web`, then builds and publishes the public site to GitHub Pages. Skipped when the pulled database is unchanged. | No (read only) |
+| `sync-space.yml` — Sync to HF Space | Pushes to `main` touching code or Space config; manual | Uploads the Streamlit Space and waits for it to rebuild. Runs no `repower` command. | No |
+| `ci.yml` — CI | Every pull request and push to `main`; manual | Brand check, lint, type check and tests for Python and the web app. Runs no `repower` command. | No |
+
+**What this means for you.**
+
+- The five dataset workflows share one queue (`hf-dataset`), so they never overlap *each
+  other*. Your own `repower push-hf` is not in that queue — it can overwrite a run that
+  finished after your last pull.
+- So the safe rhythm is the one the Commands pane enforces: pull, work, push, and pull again
+  if a 05:30 or 06:30 JST run has happened in between.
+- Because the daily runs already do detect, dates, tags, schedule and discovery, you only run
+  those by hand after an outage or to heal the back catalogue. The daily summaries stop at 8
+  meetings and need a valid `NOTEBOOKLM_AUTH_JSON` secret — the back catalogue is why the
+  Backflow flow exists.
+
 ### CLI reference
 
-Run with the installed console script (`repower …`) from the project root:
+Every command below can be run two ways: typed in a terminal (`repower …`, from the
+project root), or — with the local backend running (`repower web-api`) — from the
+**Commands pane** on the right of the app, which shows the same text beside each button.
+Both run the same code. The list is defined once, in
+[`src/repower/commands.py`](../src/repower/commands.py); the pane, the guide's Commands
+tab and the backend's allowlist all read it, and a test checks every entry against the
+real CLI.
+
+**Safety labels.** *Safe* commands only read (or sign you in). *Writes local data*
+commands change the database or files on this machine; they are safe to repeat, but the
+change stays local until you push it. *Dangerous* commands replace a whole database:
+`repower pull-hf` replaces the local copy with Hugging Face's, `repower push-hf` replaces
+the shared dataset with the local copy. Only those two are dangerous.
+
+**Order matters: pull → work → push.** Pull and push are last-write-wins with no merging,
+and the daily GitHub Actions write to the same dataset. Pulling while you hold un-pushed
+work discards that work; pushing from a copy older than the daily runs' latest write
+erases their update. The Commands pane remembers the pulls and pushes made from it and
+says so in the confirmation (what a pull would discard; how old your last pull is). It
+cannot see commands typed in a terminal. The *Citations only* flow below may skip the pull
+only if this copy was pulled recently.
+
+#### Backflow — the back-catalogue workflow, in order
+
+| # | Command | What it does |
+| --- | --- | --- |
+| 1 | `repower pull-hf` | **Dangerous.** Replace the local database and Parquet files with the shared dataset's. Start every session here; push first if you have local work to keep. |
+| 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates). Auth-free. |
+| 3 | `repower policy dates` | Repair meetings that have no meeting date yet. |
+| 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
+| 5 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 7–9. |
+| 6 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
+| 7 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
+| 8 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
+| 9 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |
+| 10 | `repower policy resolve-citations` | Find the document and page behind each digest citation for meetings summarised before pages were tracked. Auth-free and resumable; needs PyMuPDF (`pip install -e ".[pdf]"`). |
+| 11 | `repower policy tag` | Apply rule-based topic tags (a dry run unless `--apply`). Hand-set and NotebookLM tags are never overwritten. |
+| 12 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
+| 13 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
+
+Two flows are offered in the pane: **Backflow — full** (all of the above; steps 5, 6, 8, 9, 11
+and 12 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
+
+#### Inspect — read-only
 
 | Command | What it does |
 | --- | --- |
-| `repower policy detect` | Detect new meetings across all committees. |
-| `repower policy discover` | Discover new committees (incl. energy-board backup). |
+| `repower policy status` | Per-committee state: tracked flag, priority, latest meeting, pending counts. |
+| `repower policy doctor` | Explain why committees failed to fetch (blocked, WAF challenge, moved page …) and what to do. `--all` includes healthy ones, `--history` shows recent attempts. |
+| `repower policy coverage [--topic T \| --committee K]` | How much each committee covers each topic (0–100%). See [Topic coverage](#topic-coverage). |
+| `repower policy tags` | List the topic-tag vocabulary. See [Topic tags](#topic-tags). |
+| `repower policy notebooks` | Compare the NotebookLM account with the database and list notebooks nothing refers to. Never deletes. Needs a login. |
+| `repower check-freshness` | Fail if any market-data source has fallen behind its limit (the daily run's outage alarm). |
+| `repower cache status` | Per-host HTTP-cache entries, last success and failures — which hosts are still answering. |
+
+#### Automated — the daily runs already do these
+
+| Command | What it does |
+| --- | --- |
+| `repower scrape` | Re-fetch recent TSO area data, JEPX spot, fuels, news and EPRX. Only to catch up after an outage. |
+| `repower policy schedule` | Refresh upcoming meetings from the METI calendar (safe if the feed is down). |
+| `repower policy discover` | Discover new committees (incl. the energy-board backup feed). |
 | `repower policy crosscheck` | Show committees the energy-board feed has that we don't. |
-| `repower policy schedule` | Refresh upcoming meetings from the METI calendar (safe if feed is down). |
-| `repower policy materials --committee <key\|all> --limit <n>` | Backfill materials for meetings detected without any. `--limit 0` = unbounded (full heal); omit/`all` = every committee. |
-| `repower policy run` | Run the summarisation pipeline over pending tracked meetings. |
-| `repower policy run --committee <key> --meeting <N>` | Summarise exactly that one meeting, bypassing the queue. Works on an already-summarised meeting (re-run / repair). |
-| `repower policy run --committee <key> --max-per-run 1` | "Latest only": the newest pending meeting of one committee, then stop. |
-| `repower policy queue --committee <key> --meeting <N>` | Move one meeting to the front of the summarisation queue (`--clear` to take it off). |
-| `repower policy tags` / `tag` / `tag-set` | List the topic-tag vocabulary; apply rule-based tags (dry run unless `--apply`); pin tags by hand. See [Topic tags](#topic-tags). |
-| `repower policy coverage [--topic T \| --committee K]` | How much each committee covers each topic (0-100%, read-only). See [Topic coverage](#topic-coverage). |
-| `repower policy doctor` | Explain why committees failed to fetch (blocked, WAF challenge, moved page …) and what to do about each. Add `--all` to include healthy ones, `--history` for recent attempts. |
-| `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
-| `repower web-api` | Start the local backend that powers the interactive frontend. |
+| `repower policy digest` | Assemble the digest of recently summarised meetings (a dry run from the pane — it never posts). |
+| `repower cache prune` | Evict stale HTTP-cache entries so the synced database stops growing (a dry run by default in the pane). |
+
+#### Other commands
+
+Not exposed in the pane, deliberately: `repower notify` and `repower run-all` (they post to
+the webhook), `repower init-db-cmd`, the top-level market `repower backfill`, the
+per-committee admin commands (`repower policy enable` / `disable` / `track` / `untrack` /
+`archive` / `unarchive` / `priority` / `add` / `list` — the **Manage committees** modal
+covers those), `repower policy queue --committee <key> --meeting <N>` (the ↑ button on a
+meeting; `--clear` removes it), `repower policy tag-set` (pin tags by hand), `repower
+refresh-web` (the sidebar's Refresh button) and `repower web-api` (starts the local backend).
 
 ### Known constraints & troubleshooting
 
@@ -497,11 +591,20 @@ Settings) and read from the same synced dataset.
 
 ## Maintaining this guide
 
-- **This document is the reference.** The in-app "i" guide is a *simplified* mirror
-  of the [Policy Deep Dive](#policy-deep-dive) section, authored as the `GuidePanel`
-  component's `GUIDE` array in
-  [`web/src/lib/menus.tsx`](../web/src/lib/menus.tsx).
-- **When a policy workflow changes:** update this document first, then update the
-  short bilingual copy in `GuidePanel` so the two stay in sync.
+- **This document is the reference.** The in-app "i" guide is a *simplified* mirror of it,
+  authored as the `SCREENS_GUIDE` / `POLICY_GUIDE` / `COMMANDS_GUIDE` / `AUTOMATED_RUNS` arrays in
+  [`web/src/lib/guideContent.ts`](../web/src/lib/guideContent.ts).
+- **When a workflow changes:** update this document first, then update the short bilingual
+  copy in `guideContent.ts` so the two stay in sync.
+- **Commands live in one place.** Add or change a command in
+  [`src/repower/commands.py`](../src/repower/commands.py) — its title, summary, safety level,
+  order and parameters. The Commands pane, the guide's Commands tab and the `web-api` allowlist
+  follow automatically; `tests/test_commands.py` fails if a command is missing from the real
+  CLI or from the [CLI reference](#cli-reference) above.
+- **Workflows live in `.github/workflows/`.** The [What runs automatically](#what-runs-automatically-github-actions)
+  table here, the `AUTOMATED_RUNS` list in `guideContent.ts` (shown in the app's Screens and
+  Commands tabs) and the README's "CI workflows" section each describe them.
+  `tests/test_workflow_docs.py` fails when a workflow is added or removed, rescheduled, runs a
+  command its row does not list, or is missing from the README — update all three together.
 - **Terminology must match the UI.** Use the same labels the buttons use (Follow,
   Track, Check for updates, Generate summary) so users can map guide → screen.
