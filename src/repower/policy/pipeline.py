@@ -21,11 +21,13 @@ import os
 import shutil
 import tempfile
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
 from repower.config import NOTEBOOKLM_SOURCE_CAP
+from repower.policy import citations
 from repower.policy import notebook as nb
 from repower.policy import tags as topic_tags
 from repower.policy.committees import Committee
@@ -206,6 +208,28 @@ def _download_pdf(url: str, dest: Path, *, db_path: str | None = None,
     return "ok"
 
 
+def _resolve_citations_json(digest_json: str | None, docs: list[citations.Doc]) -> str | None:
+    """The ``citations_json`` for a fresh digest, or None to leave it for the backfill.
+
+    Best-effort by design: a citation that cannot be placed costs a deep-link, never a
+    meeting. Anything that goes wrong here (PyMuPDF missing, a malformed PDF, an
+    unreadable digest) is logged and reported as "not resolved" — NULL, not an empty
+    result — so ``policy resolve-citations`` picks the meeting up later.
+    """
+    if not digest_json:
+        return None
+    try:
+        refs = (json.loads(digest_json) or {}).get("references") or []
+        items = citations.resolve_refs(refs, docs)
+    except citations.CitationsUnavailable as e:
+        logger.warning("citation pages not resolved: %s", e)
+        return None
+    except Exception:  # noqa: BLE001 — see docstring
+        logger.warning("citation pages not resolved", exc_info=True)
+        return None
+    return citations.dump(items, datetime.now(UTC).isoformat(timespec="seconds"))
+
+
 def _fail_meeting(meeting_row: int, db_path: str | None, *, flag: str | None,
                   message: str, **fields) -> None:
     """Mark a meeting errored *and say why*, in words.
@@ -215,8 +239,6 @@ def _fail_meeting(meeting_row: int, db_path: str | None, *, flag: str | None,
     The message is what the Manage status table shows; it is capped because it can
     carry an upstream response body, and it rides the Hugging Face sync.
     """
-    from datetime import UTC, datetime
-
     update_meeting(
         meeting_row, db_path=db_path, state="error", quality_flag=flag,
         last_error=" ".join(str(message).split())[:500],
@@ -381,6 +403,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         update_meeting(meeting_row, db_path=db_path, state="ingesting", notebook_id=notebook_id)
 
         source_ids = []
+        cite_docs: list[citations.Doc] = []  # what a citation in this digest can point at
         not_ingested: list[str] = []
         for m, path in staged:
             try:
@@ -397,6 +420,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
                 not_ingested.append(f"{m['pdf_id']} ({type(e).__name__})")
                 continue
             source_ids.append(sid)
+            cite_docs.append(citations.Doc(url=m["url"] or "", title=m["title"] or "", path=path, source_id=sid))
             set_material_state(committee.key, m["pdf_id"], db_path=db_path,
                                status="ingested", nblm_source_id=sid)
         if not_ingested:
@@ -437,6 +461,11 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         except nb.NotebookLMError as e:
             logger.warning("english digest failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
+        # Where each citation lives (document + page). The staged PDFs are still on disk
+        # and every source id is known exactly, so this costs no request — resolving the
+        # same digest later means re-downloading the meeting from a WAF-guarded host.
+        citations_json = _resolve_citations_json(digest_json, cite_docs)
+
         # Topic tags, from the same notebook (it is deleted below). Best-effort like the
         # digest: a meeting with no LLM answer keeps the rule-based tags the daily pass
         # derives from its briefing, so a failure here costs precision, not coverage.
@@ -457,7 +486,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
 
         update_meeting(
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
-            digest_en_json=digest_json, quality_flag=quality_flag,
+            digest_en_json=digest_json, citations_json=citations_json, quality_flag=quality_flag,
             gen_seconds=round(time.monotonic() - started, 1),
             # This attempt succeeded, so any message from an earlier failed one no
             # longer describes the meeting — clear it rather than leave the status

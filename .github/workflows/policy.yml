@@ -54,7 +54,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[browser]" -c constraints.txt
+          pip install -e ".[browser,pdf]" -c constraints.txt
           pip install "notebooklm-py[browser]" -c constraints.txt
           # meti.go.jp answers every tokenless client with an AWS WAF challenge,
           # and only a real browser can mint the aws-waf-token that clears it.

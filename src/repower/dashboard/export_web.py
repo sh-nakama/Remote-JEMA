@@ -43,6 +43,7 @@ from repower.db import (  # noqa: E402
     get_session,
     init_db,
 )
+from repower.policy import citations as policy_citations  # noqa: E402
 from repower.policy import tags as policy_tags  # noqa: E402
 from repower.timeutil import JST, today_jst  # noqa: E402
 
@@ -707,6 +708,57 @@ def _web_url(url: str | None) -> str:
     return url if url and re.match(r"https?://[^/]", url, re.IGNORECASE) else ""
 
 
+_CITE_TEXT_MAX = 240   # tooltip length; the chip itself shows the document and page, not the text
+_CITE_MAX = 16         # chips per digest
+
+
+def _doc_label(title: str | None) -> str:
+    """Short chip label for a material: ``資料3　再エネ…（PDF形式：1,272KB）`` → ``資料3``."""
+    name = _doc_name(title or "")
+    head = re.split(r"[\s　]", name, maxsplit=1)[0]
+    return head if 0 < len(head) <= 14 else (name[:12] + "…" if len(name) > 12 else name)
+
+
+def build_cites(references: list | None, citations_json: str | None) -> list[dict]:
+    """Structured citation chips for a digest: what was cited, and — when it has been
+    resolved — which document and page it is on.
+
+    Empty cited texts are skipped (a bare "[9]" tells the reader nothing). ``url`` is only ever
+    an http(s) link, since the web hands it to ``window.open``.
+    """
+    resolved = policy_citations.load_items(citations_json)
+    out: list[dict] = []
+    for r in (references or [])[:_CITE_MAX]:
+        n = r.get("citation_number")
+        text = " ".join((r.get("cited_text") or "").split())
+        if n is None or not text:
+            continue
+        cite: dict = {"n": n, "text": text[:_CITE_TEXT_MAX] + ("…" if len(text) > _CITE_TEXT_MAX else "")}
+        hit = resolved.get(n)
+        if hit and (url := _web_url(hit.get("url"))):
+            cite["url"] = url
+            cite["doc"] = _doc_label(hit.get("doc"))
+            if hit.get("page"):
+                cite["page"] = hit["page"]
+                if hit.get("pageEnd"):
+                    cite["pageEnd"] = hit["pageEnd"]
+        out.append(cite)
+    return out
+
+
+def meeting_cites(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
+    """:func:`build_cites` for one stored meeting (what the local API returns after resolving)."""
+    from repower.policy.store import meeting_digest  # local: keeps the export's import graph unchanged
+
+    digest = meeting_digest(key, meeting_num, db_path=db_path) or {}
+    with get_engine(db_path).connect() as con:
+        raw = con.execute(
+            text("SELECT citations_json FROM policy_meeting WHERE committee_key = :k AND meeting_num = :n"),
+            {"k": key, "n": meeting_num},
+        ).scalar()
+    return build_cites(digest.get("references"), raw)
+
+
 # Acronyms/initialisms that should stay upper-case when a committee key is
 # humanised into a display name (discovered committees have no curated name_en).
 _KEY_ACRONYMS = {"wg", "egc", "occto", "meti", "jepx", "eprx", "dr", "vpp", "lng"}
@@ -1045,7 +1097,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         meetings = con.execute(
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
-                "has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
+                "citations_json, has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
                 "detected_at, tags, " + _HAS_MATERIALS + " FROM policy_meeting"
             )
         ).mappings().all()
@@ -1138,6 +1190,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             out_m["digest"] = secs
             out_m["jp"] = jp_secs
             out_m["refs"] = refs
+            # Same citations as `refs`, structured: carries the document + page once resolved.
+            out_m["cites"] = build_cites(digest.get("references"), m["citations_json"])
             out_m["prevEn"] = lead_en[:180]
             out_m["prevJa"] = lead_ja[:110]
         elif is_error:

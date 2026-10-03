@@ -931,6 +931,47 @@ def update_meeting(meeting_id: int, db_path: str | None = None, **fields) -> Non
         m.updated_at = _now()
 
 
+def meeting_digest(key: str, meeting_num: int, db_path: str | None = None) -> dict | None:
+    """The stored English digest of one meeting as a dict (``answer``, ``references``…), or
+    None if the meeting is unknown, has no digest, or the digest is unreadable."""
+    with session_scope(db_path, commit=False) as session:
+        raw = (
+            session.query(PolicyMeeting.digest_en_json)
+            .filter_by(committee_key=key, meeting_num=meeting_num)
+            .scalar()
+        )
+    try:
+        data = json.loads(raw) if raw else None
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def set_meeting_citations(key: str, meeting_num: int, citations_json: str, db_path: str | None = None) -> bool:
+    """Store a meeting's resolved citations. Deliberately leaves ``updated_at`` alone:
+    the UI reads that as "when it was summarised", and resolving the citations of an old
+    meeting must not make it look newly summarised."""
+    with session_scope(db_path) as session:
+        m = session.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=meeting_num).one_or_none()
+        if m is None:
+            return False
+        m.citations_json = citations_json
+        return True
+
+
+def meetings_missing_citations(db_path: str | None = None, committee_key: str | None = None) -> list[tuple[str, int]]:
+    """``(committee_key, meeting_num)`` of summarised meetings whose citations have never
+    been resolved, newest first (highest id) — the recent ones are the ones being read."""
+    with session_scope(db_path, commit=False) as session:
+        q = (
+            session.query(PolicyMeeting.committee_key, PolicyMeeting.meeting_num)
+            .filter(PolicyMeeting.digest_en_json.isnot(None), PolicyMeeting.citations_json.is_(None))
+        )
+        if committee_key:
+            q = q.filter(PolicyMeeting.committee_key == committee_key)
+        return [(r[0], r[1]) for r in q.order_by(PolicyMeeting.id.desc()).all()]
+
+
 def meetings_missing_date(key: str, db_path: str | None = None) -> list[int]:
     """Meeting numbers for *key* that have no ``meeting_date`` yet (newest first)."""
     with session_scope(db_path, commit=False) as session:
