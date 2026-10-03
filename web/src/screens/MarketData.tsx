@@ -10,7 +10,8 @@ import { Sidebar, TopBar, PageHeader, ExportButton, useReload } from '../lib/chr
 import { ChartFrame } from '../lib/chart'
 import { downloadCsv } from '../lib/download'
 import { areas } from './MarketData.data'
-import { useWholesaleLive, useDriversLive, useBalancingLive, useTielineLive, useAreaDayLive } from './MarketData.live'
+import { BalancingAreaGrid } from './BalancingAreaGrid'
+import { FUELS, useWholesaleLive, useDriversLive, useBalancingLive, useTielineLive, useAreaDayLive } from './MarketData.live'
 import { buildMarketView, fmtDT, fmtEpoch } from './MarketData.view'
 import type { Domain, DrRange, Gran, Range, View } from './MarketData.view'
 
@@ -22,7 +23,7 @@ export function MarketDataScreen() {
   const [view, setView] = useState<View>('wholesale')
   const [range, setRange] = useState<Range>('60D')
   const [gran, setGran] = useState<Gran>(defaultGran)
-  const [sel, setSel] = useState<Record<string, boolean>>({ hokkaido: true, tohoku: true, tepco: true })
+  const [sel, setSel] = useState<Record<string, boolean>>(Object.fromEntries(areas.map((a) => [a.key, true])))
   const [closed, setClosed] = useState<Record<string, boolean>>({})
   // Per-area expanded view: adds a full-width combined generation-mix + price chart
   // underneath the side-by-side pair.
@@ -59,7 +60,7 @@ export function MarketDataScreen() {
   const resetAll = () => {
     setRange('60D')
     setGran('Daily')
-    setSel({ hokkaido: true, tohoku: true, tepco: true })
+    setSel(Object.fromEntries(areas.map((a) => [a.key, true])))
     setClosed({})
     setExpanded({})
     setZoom({})
@@ -410,20 +411,14 @@ export function MarketDataScreen() {
                             onReset={() => clearZoom(sec.key)}
                             tip={(i) => (
                               <>
-                                <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[i]).toLocaleString('en-US')}</span>
-                                {' · '}
-                                <span style={s('color:#4A6FA5')}>therm {Math.round(sec.supThermA[i]).toLocaleString('en-US')}</span>
-                                {' · '}
-                                <span style={s('color:#C99A2E')}>sol/wnd {Math.round(sec.supSolarA[i]).toLocaleString('en-US')}</span>
-                                {' · '}
+                                {FUELS.map((f, k) => (sec.supFuelA[k][i] >= 1 ? (
+                                  <span key={f.key} style={s(`display:inline-block;margin-right:8px;color:${f.c === '#1B2A4A' || f.c === '#3A3A3A' ? 'inherit' : f.c}`)}>{f.en} {Math.round(sec.supFuelA[k][i]).toLocaleString('en-US')}</span>
+                                ) : null))}
                                 <span>dem {Math.round(sec.supDemandA[i]).toLocaleString('en-US')} MW</span>
                               </>
                             )}
                           >
-                            {sec.mix1.map((p, pi) => (<polygon key={'m1' + pi} points={p} fill="#2A9D8F" fillOpacity="0.78"></polygon>))}
-                            {sec.mix2.map((p, pi) => (<polygon key={'m2' + pi} points={p} fill="#4A6FA5" fillOpacity="0.72"></polygon>))}
-                            {sec.mix3.map((p, pi) => (<polygon key={'m3' + pi} points={p} fill="#E9C46A" fillOpacity="0.82"></polygon>))}
-                            {sec.mix4.map((p, pi) => (<polygon key={'m4' + pi} points={p} fill="#9AA5B5" fillOpacity="0.6"></polygon>))}
+                            {sec.mixPolys.map((segs, k) => segs.map((p, pi) => (<polygon key={'m' + k + '-' + pi} points={p} fill={FUELS[k].c} fillOpacity="0.85"></polygon>)))}
                             <g style={s('color:var(--tx)')}>{sec.demand.map((p, pi) => (<polyline key={'d' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="1.8" strokeDasharray="1 0"></polyline>))}</g>
                           </ChartFrame>
                           <div style={s("display:flex;justify-content:space-between;padding:0 1.67%;margin-top:5px;font-size:10px;color:var(--mut);font-feature-settings:'tnum' 1")}>
@@ -433,10 +428,7 @@ export function MarketDataScreen() {
                             <div style={s("font-size:10.5px;color:var(--warnTx);background:var(--warnBg);border-radius:6px;padding:2px 8px;margin-top:6px;display:inline-block;font-feature-settings:'tnum' 1")}>Supply data {sec.supStale} · 供給データ遅延</div>
                           ) : null}
                           <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
-                            <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
-                            <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
-                            <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar/Wind 太陽光・風力</span>
-                            {sec.mix4.length ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
+                            {sec.fuelLegend.map((f) => (<span key={f.key} style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s(`width:10px;height:10px;border-radius:3px;background:${f.c}`)}></span>{f.en} {f.ja}</span>))}
                             <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Demand 需要</span>
                             <span style={s("margin-left:auto;font-feature-settings:'tnum' 1;color:var(--mut)")}>peak {sec.peakMW} MW</span>
                           </div>
@@ -517,12 +509,9 @@ export function MarketDataScreen() {
                                   <>
                                     {si >= 0 && sec.supDemandA[si] != null ? (
                                       <>
-                                        <span style={s('color:#2A9D8F')}>base {Math.round(sec.supBaseA[si]).toLocaleString('en-US')}</span>
-                                        {' · '}
-                                        <span style={s('color:#4A6FA5')}>therm {Math.round(sec.supThermA[si]).toLocaleString('en-US')}</span>
-                                        {' · '}
-                                        <span style={s('color:#C99A2E')}>sol/wnd {Math.round(sec.supSolarA[si]).toLocaleString('en-US')}</span>
-                                        {' · '}
+                                        {FUELS.map((f, k) => (sec.supFuelA[k][si] >= 1 ? (
+                                          <span key={f.key} style={s(`display:inline-block;margin-right:8px;color:${f.c === '#1B2A4A' || f.c === '#3A3A3A' ? 'inherit' : f.c}`)}>{f.en} {Math.round(sec.supFuelA[k][si]).toLocaleString('en-US')}</span>
+                                        ) : null))}
                                         <span>dem {Math.round(sec.supDemandA[si]).toLocaleString('en-US')} MW</span>
                                       </>
                                     ) : null}
@@ -540,10 +529,7 @@ export function MarketDataScreen() {
                                 )
                               }}
                             >
-                              {sec.expMix1.map((p, pi) => (<polygon key={'em1' + pi} points={p} fill="#2A9D8F" fillOpacity="0.55"></polygon>))}
-                              {sec.expMix2.map((p, pi) => (<polygon key={'em2' + pi} points={p} fill="#4A6FA5" fillOpacity="0.5"></polygon>))}
-                              {sec.expMix3.map((p, pi) => (<polygon key={'em3' + pi} points={p} fill="#E9C46A" fillOpacity="0.6"></polygon>))}
-                              {sec.expMix4.map((p, pi) => (<polygon key={'em4' + pi} points={p} fill="#9AA5B5" fillOpacity="0.42"></polygon>))}
+                              {sec.expMixPolys.map((segs, k) => segs.map((p, pi) => (<polygon key={'em' + k + '-' + pi} points={p} fill={FUELS[k].c} fillOpacity="0.7"></polygon>)))}
                               <g style={s('color:var(--tx2)')}>{sec.expDemand.map((p, pi) => (<polyline key={'ed' + pi} points={p} fill="none" stroke="currentColor" strokeWidth="1.4" strokeOpacity="0.75"></polyline>))}</g>
                               {sec.expBand.map((p, pi) => (<polygon key={'eb' + pi} points={p} fill="#00A5CF" fillOpacity="0.10"></polygon>))}
                               {sec.expPMax.map((p, pi) => (<polyline key={'ex' + pi} points={p} fill="none" stroke="#E24B4A" strokeWidth="1.6"></polyline>))}
@@ -559,10 +545,7 @@ export function MarketDataScreen() {
                           </div>
                         </div>
                         <div style={s('display:flex;align-items:center;gap:14px;margin-top:9px;font-size:11px;color:var(--tx2);flex-wrap:wrap')}>
-                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#2A9D8F')}></span>Baseload 基幹</span>
-                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#4A6FA5')}></span>Thermal 火力</span>
-                          <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#E9C46A')}></span>Solar/Wind 太陽光・風力</span>
-                          {sec.expMix4.length ? (<span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:10px;height:10px;border-radius:3px;background:#9AA5B5')}></span>Imports/Storage 連系・貯蔵</span>) : null}
+                          {sec.fuelLegend.map((f) => (<span key={f.key} style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s(`width:10px;height:10px;border-radius:3px;background:${f.c}`)}></span>{f.en} {f.ja}</span>))}
                           <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx2)')}></span>Demand 需要 (MW)</span>
                           <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid #E24B4A')}></span>Max ¥{sec.vMax}</span>
                           <span style={s('display:inline-flex;align-items:center;gap:5px')}><span style={s('width:14px;height:0;border-top:2px solid var(--tx)')}></span>Avg ¥{sec.vAvg}</span>
@@ -657,6 +640,7 @@ export function MarketDataScreen() {
                   ))}
                   <div style={s('font-size:11px;color:var(--mut);margin-top:10px')}>一次=primary FCR · 二次=secondary AFC/RR · 三次=tertiary replacement · prices weighted by contracted MW · short = slots where national procurement fell below the requirement · 価格は約定量加重平均 · 不足＝全国の約定量が必要量を下回ったコマ</div>
                 </div>
+                <BalancingAreaGrid sel={sel} gran={gran} range={range} L={L} />
               </div>
   )
 
