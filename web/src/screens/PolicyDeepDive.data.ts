@@ -1,5 +1,6 @@
 // Fixture data ported from screens/policy-deep-dive.html (DCLogic constructor).
 
+import type { Cite } from '../lib/cite'
 import type { TagCoverage } from '../lib/policyTags'
 
 export interface Committee {
@@ -89,6 +90,8 @@ export interface Meeting {
   digest?: DigestSection[]
   jp?: JpSection[]
   refs?: string[]
+  /** The same citations as `refs`, structured: carries document + page once resolved. Live rows. */
+  cites?: Cite[]
   emptyTitle?: string
   emptySub?: string
   docs: DocRef[]

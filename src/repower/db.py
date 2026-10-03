@@ -251,6 +251,11 @@ class PolicyMeeting(Base):
     report_task_id: Mapped[str | None] = mapped_column(String(64))
     briefing_md: Mapped[str | None] = mapped_column(Text)  # detailed Japanese per-meeting briefing
     digest_en_json: Mapped[str | None] = mapped_column(Text)  # English ask --json (answer + references[])
+    # Where each digest citation lives: {"v", "resolvedAt", "items": [{n, url, doc, page?, pageEnd?}]}
+    # (see repower.policy.citations). Kept apart from digest_en_json so the raw NotebookLM answer
+    # stays untouched and the resolver can be re-run. NULL = never attempted; a non-NULL value with
+    # no items = attempted, nothing resolvable (so the backfill does not retry it forever).
+    citations_json: Mapped[str | None] = mapped_column(Text)
     has_minutes: Mapped[bool | None] = mapped_column(Boolean, default=False)  # 議事録 present
     has_torimatome: Mapped[bool | None] = mapped_column(Boolean, default=False)  # とりまとめ present → milestone
     # detected → downloading → ingesting → generating → done | error
@@ -377,6 +382,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_fetch_observability(engine)
             _migrate_add_policy_meeting_error(engine)
             _migrate_add_policy_tags(engine)
+            _migrate_add_policy_citations(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -541,6 +547,22 @@ def _migrate_add_policy_tags(engine) -> None:
                 conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags TEXT"))
             if "tags_source" not in cols:
                 conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags_source VARCHAR(8)"))
+
+
+def _migrate_add_policy_citations(engine) -> None:
+    """Add ``citations_json`` to ``policy_meeting`` (additive; NULL = never resolved).
+
+    The production DB is pulled from Hugging Face, so a column added only to the model
+    would be missing there until this runs.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    if "citations_json" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
+        with engine.begin() as conn:
+            conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

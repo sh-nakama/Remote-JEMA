@@ -645,6 +645,28 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._send(400, {"error": str(e)})
             except Exception as e:  # noqa: BLE001 — network fetch; never 500 the UI
                 return self._send(400, {"error": f"could not add committee: {e}"})
+        if path == "/api/policy/citations/resolve":
+            # A click on a citation chip whose page is not known yet: fetch the meeting's
+            # source PDFs (one human-triggered request per document, paced like the
+            # pipeline's), find each citation's page, store it, and return the chips.
+            # Synchronous on purpose — the caller opens the PDF as soon as it answers; a
+            # second click on the same meeting waits on the first rather than re-crawling.
+            from repower.dashboard.export_web import meeting_cites
+            from repower.policy.citation_resolver import resolve_meeting
+            key = (body.get("com") or "").strip()
+            try:
+                num = int(body.get("num") or "")
+            except (TypeError, ValueError):
+                return self._send(400, {"error": "num must be an integer"})
+            if not key:
+                return self._send(400, {"error": "com required"})
+            res = resolve_meeting(key, num, db_path=self.db_path)
+            if res["status"] == "no_digest":
+                return self._send(404, {"ok": False, **res})
+            out: dict = {"ok": res["status"] == "resolved", **res}
+            if out["ok"]:
+                out["cites"] = meeting_cites(key, num, db_path=self.db_path)
+            return self._send(200, out)
         if path == "/api/policy/catchup":
             return self._send(202, start_catchup(self.db_path))
         if path == "/api/data/refresh":

@@ -681,6 +681,34 @@ def policy_backfill(
     _warn_if_stopped_early(summary, "re-run this backfill later to continue.")
 
 
+@policy_app.command("resolve-citations")
+def policy_resolve_citations(
+    max_meetings: int = typer.Option(5, help="Max meetings to resolve this run"),
+    committee: str = typer.Option(None, help="Only this committee key"),
+    keep_pdfs: bool = typer.Option(False, help="Keep the downloaded PDFs in data/policy/pdf (default: delete)"),
+):
+    """Find the document + page behind each digest citation, for meetings summarised before pages
+    were tracked. Auth-free, resumable (re-run until nothing is pending); stops when the host's
+    request budget is spent or it blocks us. Newly summarised meetings resolve at ingest."""
+    from repower.policy.citation_resolver import backfill
+
+    summary = backfill(max_meetings=max_meetings, committee_key=committee, keep_pdfs=keep_pdfs)
+    typer.echo(
+        f"resolved {summary['resolved']}/{summary['attempted']} meetings "
+        f"({summary['pages']} of {summary['refs']} citations placed on a page); "
+        f"{summary['pending'] - summary['resolved']} still pending"
+    )
+    for err in summary["errors"]:
+        typer.echo(f"  ! {err}", err=True)
+    why = {
+        "budget_exhausted": "the host's request budget is spent — re-run later to continue.",
+        "host_blocked": "the host blocked us — re-run later (waiting does not clear a WAF flag; time does).",
+        "pymupdf_missing": "PyMuPDF is not installed — `pip install pymupdf`.",
+    }.get(summary["stopped_early"] or "")
+    if why:
+        typer.echo(f"stopped early: {why}", err=True)
+
+
 @policy_app.command("resume")
 def policy_resume():
     """Finish meetings left mid-flight after a partial failure (requires auth)."""

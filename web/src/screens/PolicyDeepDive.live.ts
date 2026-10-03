@@ -10,6 +10,7 @@
 // loading fallback so the render code is unchanged.
 
 import { useEffect, useRef, useState } from 'react'
+import type { Cite } from '../lib/cite'
 import { getSnapshot, useDataNonce } from '../lib/data'
 import { EMPTY_VOCAB, type TagCoverage, type TagVocab } from '../lib/policyTags'
 import type { Committee, DigestSection, DocRef, JpSection, Meeting, Upcoming } from './PolicyDeepDive.data'
@@ -63,6 +64,7 @@ interface MeetingSnap {
   digest?: DigestSection[]
   jp?: JpSection[]
   refs?: string[]
+  cites?: Cite[]
   prevEn?: string
   prevJa?: string
   emptyTitle?: string
@@ -158,6 +160,7 @@ function reshape(raw: Raw): Omit<PolicyLive, 'ready' | 'stale' | 'failed'> {
     digest: x.digest,
     jp: x.jp,
     refs: x.refs,
+    cites: x.cites,
     emptyTitle: x.emptyTitle,
     emptySub: x.emptySub,
     docs: x.docs || [],

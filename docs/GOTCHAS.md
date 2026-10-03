@@ -453,6 +453,30 @@ fixed.
   even though the code is right there. Before debugging the code, check who actually owns the
   port — `Get-NetTCPConnection -LocalPort 8787 -State Listen` — and kill *all* the stale
   `repower web-api` processes, not just the newest.
+- **Citation deep-links are *derived*, not given.** NotebookLM's `references[]` carry `source_id`,
+  `cited_text` and character offsets — never a page. `policy/citations.py` finds the page by
+  locating the passage in the PDF's own text (PyMuPDF; NFKC + whitespace-stripped, 10-char
+  shingles weighted by 1/pages-containing-them, head and tail voted separately so a chunk
+  across a page break becomes `pp.6–7`). Stored in `policy_meeting.citations_json`, exported as
+  `cites`; the link is a bare `url#page=N`. Traps:
+  - **Never guess a page.** Below the confidence floor, or for a fragment under 8 characters, a
+    citation gets *no* page. A one-character citation (`"4"`) once matched a one-page agenda
+    "uniquely" — a single page trivially holds anything once — so uniqueness alone proves nothing.
+  - **`source_id` only exists for digests summarised after `nblm_source_id` began being written**
+    (60 of 170 at the time). Older ones resolve by *text alone* across the meeting's PDFs, which
+    means re-downloading them. Hence resolve-at-ingest (the PDFs are already on disk, free) plus
+    the on-demand/`resolve-citations` path for the back-catalogue, both paced like the pipeline.
+  - **Write citations with `set_meeting_citations`, not `update_meeting`.** The latter bumps
+    `updated_at`, which the UI reads as "newly summarised", so a backfill would make every old
+    meeting look fresh.
+  - **`citations_json` NULL = never attempted; non-NULL with no items = attempted.** A permanently
+    missing PDF resolves against the ones that did download rather than pinning the meeting to the
+    front of the sweep. Transient host refusals store nothing (retry later).
+  - **The page is a physical PDF page** (what `#page=` counts), not the printed page label.
+  - **The click opens its tab before the fetch.** Resolving can take a minute, and a `window.open`
+    after that wait is popup-blocked; the tab is detached (`opener = null`) before it is pointed at
+    the PDF. PyMuPDF is AGPL — it is in the `pdf` extra and the policy workflow only, never the
+    Space image or the Pages build.
 - **Policy exports are three files, not two.** `policy/status.json` (per-meeting pipeline state
   for the Manage → Status table) is written alongside `committees.json` / `meetings.json`. It is
   the only one of the three that carries the raw lifecycle state (`downloading`/`ingesting`/

@@ -23,8 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10"]
-policy = ["notebooklm-py[browser]>=0.7.3,<1"]
+dev = ["pytest>=8.0", "ruff>=0.5", "mypy>=1.10", "pymupdf>=1.24"]
+policy = ["notebooklm-py[browser]>=0.7.3,<1", "pymupdf>=1.24"]
+# Reads PDF text to find the page a digest citation is on (policy/citations.py). AGPL-3.0, so it is
+# installed only where citations are resolved — the policy workflow and the local web-api — never in
+# the Space image or the Pages build.
+pdf = ["pymupdf>=1.24"]
 # Headless browser used only to mint AWS WAF clearance tokens (meti.go.jp).
 # Needs `playwright install chromium` after pip install.
 browser = ["playwright>=1.44"]

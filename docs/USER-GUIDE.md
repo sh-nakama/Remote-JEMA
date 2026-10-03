@@ -139,8 +139,16 @@ committees appear inline with a dashed *UNTRACKED* tag. The *recommended* list
 surfaces high-priority committees you already track.
 
 **Read a meeting.** Click a meeting card in the feed. The detail pane shows the
-digest sections (EN + JA), the source documents, and citations. Click a citation
-or document to open the original METI/OCCTO PDF.
+digest sections (EN + JA), the source documents, and citations. Click a document to
+open the original METI/OCCTO PDF. A citation chip reads `[3] 資料1 · p.18` and opens that
+PDF **at the cited page** (`pp.18–19` when the passage runs across a page break; hover for
+the quoted text). Meetings summarised from now on have their pages resolved automatically.
+For earlier meetings, the first click in the local app (`repower web-api`) fetches the
+meeting's PDFs, finds the pages and remembers them — expect up to a minute that once; a
+blank tab opens straight away and loads the PDF when it is ready. On the read-only site
+only already-resolved citations link. Citations that can't be placed on a page are left
+unlinked rather than guessed. To resolve old meetings in bulk, run
+`repower policy resolve-citations` (resumable; needs `pip install -e ".[pdf]"`).
 
 **Follow / unfollow.** Use the follow toggle on a committee (or the ⌘K palette).
 This is a personal filter only.

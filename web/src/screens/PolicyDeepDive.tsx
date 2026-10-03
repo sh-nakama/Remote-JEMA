@@ -11,6 +11,7 @@ import { filterChipBase, MONTHS, orgColor } from '../lib/chartkit'
 import { POLICY_RECENT_DAYS as RECENT_DAYS, POLICY_RECENT_MS as RECENT_MS } from '../lib/policyActivity'
 import { IconRail, TopBar, PageHeader } from '../lib/chrome'
 import { downloadIcs } from '../lib/download'
+import { citeHref, citeLabel, mergeCites, type Cite } from '../lib/cite'
 import {
   bestTopic, committeesWithTopicMeetings, matchesTags, pct, rankByFit, tagCounts, tagLabel, tagsByGroup, toggleTag, topicFit,
 } from '../lib/policyTags'
@@ -136,6 +137,12 @@ export function PolicyDeepDiveScreen() {
   const [showAllNew, setShowAllNew] = useState(false)
   // Notifications popover (bell): live recent policy activity, newest-first.
   const [showNotif, setShowNotif] = useState(false)
+  // Citation chips whose page was found this session, by meeting key: clicking a chip that has
+  // no page yet asks the local API to fetch the meeting's PDFs and locate it (see openCite).
+  const [citeFresh, setCiteFresh] = useState<Record<string, Cite[]>>({})
+  // The meeting whose pages are being resolved right now — one at a time, since each is a
+  // paced download of the whole meeting from a WAF-guarded host.
+  const [citeBusy, setCiteBusy] = useState<string | null>(null)
 
   // showAudioCard default prop = true
   const showAudioCard = true
@@ -287,7 +294,9 @@ export function PolicyDeepDiveScreen() {
   const tViewAll = () => setShowAllNew((v) => !v)
   const tAdd = () => openOverlay('committees')
   const tSource = () => toast('Opens the committee’s official METI/OCCTO page in a new tab · 公式ページを開きます')
-  const tRef = () => toast('Citation deep-link: opens the source PDF at the cited page · 引用元PDFの該当ページを開きます')
+  // Only reached for a snapshot that predates structured citations (or the sample data): there is
+  // nothing to link to, and saying so beats a toast that promises a deep-link.
+  const tRef = () => toast('No page link for this citation in this snapshot · このスナップショットには引用のページリンクがありません')
   const tDoc = () => toast('Opens the original PDF from METI · 元資料PDFを開きます')
   const tRetry = () => toast('Re-queued with high-accuracy OCR — will run on next catch-up · 高精度OCRで再実行キューに追加')
   const toggleNotif = () => setShowNotif((v) => !v)
@@ -672,6 +681,62 @@ export function PolicyDeepDiveScreen() {
   // Links come from scraped pages; never hand a javascript:/data: href to window.open.
   const openUrl = (url: string) => {
     if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
+  }
+
+  // ---- citation chips: open the source PDF at the cited page ----
+  const dCites = hasDigest ? mergeCites(dM.cites, citeFresh[d.key]) : []
+  const openCite = (c: Cite) => {
+    const href = citeHref(c)
+    if (href && c.page) return openUrl(href)
+    const canResolve = interactive && !!d.com && typeof dM.num === 'number'
+    if (!canResolve) {
+      // Read-only deploy: only what the export already resolved can link. A document with no
+      // known page still opens, from the top.
+      if (href) return openUrl(href)
+      return toast('Page links for earlier meetings are found in the local app · 過去の会合のページリンクはローカル版で解決されます')
+    }
+    if (citeBusy) return toast('Still finding the cited pages for a meeting… · ページを検索中です')
+    // Open the tab *now*, while the click still counts as a user gesture: finding the page can
+    // mean downloading the meeting's PDFs (about a minute), and browsers block a window.open
+    // that comes after that wait. Detach it so the PDF's origin never gets a handle on this one.
+    const tab = window.open('', '_blank')
+    if (tab) {
+      tab.opener = null
+      tab.document.body.textContent = 'Finding the cited page… · 該当ページを探しています…'
+    }
+    const meetingKey = d.key
+    setCiteBusy(meetingKey)
+    toast('Finding the cited page — first time for this meeting, this can take a minute · 該当ページを検索中（初回は1分ほどかかります）')
+    const fail = (msg: string) => {
+      tab?.close()
+      toast(msg)
+    }
+    fetch('/api/policy/citations/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ com: d.com, num: dM.num }),
+    })
+      .then((r) => r.json().catch(() => ({})))
+      .then((body: { ok?: boolean; status?: string; detail?: string; cites?: Cite[] }) => {
+        const cites = body.ok && Array.isArray(body.cites) ? body.cites : null
+        if (cites) setCiteFresh((prev) => ({ ...prev, [meetingKey]: cites }))
+        const hit = cites?.find((x) => x.n === c.n)
+        const target = hit ? citeHref(hit) : null
+        if (target) {
+          if (tab && !tab.closed) tab.location.href = target
+          else openUrl(target)
+        } else if (body.status === 'blocked') {
+          fail('The source site is refusing downloads right now — try again later · 配信元が一時的にダウンロードを拒否しています')
+        } else if (body.status === 'unavailable') {
+          fail(body.detail || 'PDF text extraction is not installed · PDFの文字抽出が未導入です')
+        } else if (body.status === 'error') {
+          fail('A source document could not be downloaded · 資料をダウンロードできませんでした')
+        } else {
+          fail('This citation could not be matched to a document · この引用は資料に対応付けできませんでした')
+        }
+      })
+      .catch(() => fail('Could not reach the local API · ローカルAPIに接続できません'))
+      .finally(() => setCiteBusy(null))
   }
   const showAudio = showAudioCard && !hasAgenda
 
@@ -1353,9 +1418,13 @@ export function PolicyDeepDiveScreen() {
                       </div>
                     ))}
                     <div style={s('display:flex;gap:6px;margin-top:12px;flex-wrap:wrap')}>
-                      {dRefs.map((r, ri) => (
-                        <Hoverable key={ri} as="span" base="font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1);font-feature-settings:'tnum' 1" hover="border-color:var(--ac);color:var(--acT)" onClick={tRef}>{r}</Hoverable>
-                      ))}
+                      {dCites.length > 0
+                        ? dCites.map((c) => (
+                            <Hoverable key={c.n} as="span" title={c.text} style={citeBusy === d.key ? { opacity: 0.6 } : undefined} base="font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1);font-feature-settings:'tnum' 1" hover="border-color:var(--ac);color:var(--acT)" onClick={() => openCite(c)}>{citeLabel(c)}</Hoverable>
+                          ))
+                        : dRefs.map((r, ri) => (
+                            <Hoverable key={ri} as="span" base="font-size:11px;font-weight:500;padding:2px 9px;border-radius:999px;border:1px solid var(--bd2);color:var(--tx2);cursor:pointer;background:var(--bg1);font-feature-settings:'tnum' 1" hover="border-color:var(--ac);color:var(--acT)" onClick={tRef}>{r}</Hoverable>
+                          ))}
                     </div>
 
                     {/* JP briefing accordion */}
