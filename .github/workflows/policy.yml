@@ -94,6 +94,18 @@ jobs:
           python -m repower.cli policy run --committee "$COMMITTEE" --max-per-run "$MAX_PER_RUN"
           python -m repower.cli policy digest --since-days 7
 
+      - name: Resolve citation pages for earlier meetings
+        # Auth-free, so it runs even when the NotebookLM session is stale. New summaries
+        # resolve their own citations at ingest; this drains the back-catalogue of digests
+        # written before pages were tracked, a few meetings a day (each one re-downloads the
+        # meeting's PDFs from a WAF-guarded host, and the summarise step above has already
+        # spent part of today's budget). Resumable and budget-aware: it stops quietly when the
+        # host blocks us, and a failure here must never fail the run or skip the push below.
+        # Keep the condition in sync with the push step's: don't work on a DB whose pull failed.
+        if: always() && (steps.pull.outcome == 'success' || inputs.bootstrap == true)
+        continue-on-error: true
+        run: python -m repower.cli policy resolve-citations --max-meetings 5
+
       - name: Alert when auth is stale (manual re-login needed)
         if: steps.auth.outputs.ok != 'true'
         run: |
