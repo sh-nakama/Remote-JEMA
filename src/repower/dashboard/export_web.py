@@ -1024,9 +1024,18 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 got + (1 if r["status"] == "ingested" else 0),
             )
 
-    def _stamp(m) -> str:
-        """Newest-first sort key; a row never touched since detection uses that."""
-        return str(m["updated_at"] or m["detected_at"] or "")
+    def _stamp(m) -> tuple:
+        """Newest-first sort key: chronological, not scrape order.
+
+        Meeting date leads; the meeting number breaks ties and stands in for the
+        date while it is not yet backfilled (numbers rise with time). The touch
+        time is only a last tie-break.
+        """
+        return (
+            str(m["meeting_date"])[:10] if m["meeting_date"] else "",
+            m["meeting_num"] or 0,
+            str(m["updated_at"] or m["detected_at"] or ""),
+        )
 
     by_com: dict[str, list] = {}
     for m in rows:
