@@ -141,10 +141,10 @@ def auth_ok(*, timeout: float = 60.0) -> bool:
 
 
 def require_auth(*, timeout: float = 60.0) -> None:
-    problem = binary_problem()
-    if problem:
-        raise NotebookLMAuthError(problem)  # not a lapsed login — `notebooklm login` cannot fix this
     if not auth_ok(timeout=timeout):
+        problem = binary_problem()
+        if problem:
+            raise NotebookLMAuthError(problem)  # not a lapsed login — `notebooklm login` cannot fix this
         raise NotebookLMAuthError(
             "NotebookLM auth missing/stale — run `notebooklm login` (or refresh the "
             "NOTEBOOKLM_AUTH_JSON secret) before summarising."

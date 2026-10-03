@@ -79,8 +79,8 @@ def test_running_a_missing_program_raises_the_accurate_error_not_a_login_one(exe
     assert not isinstance(e.value, nb.NotebookLMAuthError)
 
 
-def test_require_auth_blames_the_missing_program_and_never_runs_the_check(exe_dir, monkeypatch):
-    monkeypatch.setattr(nb, "auth_ok", lambda **k: pytest.fail("no point testing a login with no program"))
+def test_require_auth_blames_the_missing_program_when_the_check_cannot_pass(exe_dir, monkeypatch):
+    monkeypatch.setattr(nb, "auth_ok", lambda **k: False)
     with pytest.raises(nb.NotebookLMAuthError, match="was not found"):
         nb.require_auth()
 

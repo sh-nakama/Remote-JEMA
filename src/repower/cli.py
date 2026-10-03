@@ -445,11 +445,11 @@ def _require_auth_or_exit() -> None:
     loop get an actionable line instead of a stack trace."""
     from repower.policy.notebook import auth_ok, binary_problem
 
-    problem = binary_problem()
-    if problem:  # a missing program is not a lapsed login; `notebooklm login` would not help
-        typer.echo(problem, err=True)
-        raise typer.Exit(code=2)
     if not auth_ok():
+        problem = binary_problem()
+        if problem:  # a missing program is not a lapsed login; `notebooklm login` would not help
+            typer.echo(problem, err=True)
+            raise typer.Exit(code=2)
         typer.echo("NotebookLM auth is missing/stale.", err=True)
         typer.echo("Run `notebooklm login` locally (or refresh the NOTEBOOKLM_AUTH_JSON "
                    "secret), then retry.", err=True)

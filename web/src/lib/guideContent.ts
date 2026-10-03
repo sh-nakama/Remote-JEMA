@@ -216,8 +216,8 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     file: 'policy.yml', cron: '30 21 * * *', jst: '06:30',
     nameEn: 'Policy summaries', nameJa: '政策の要約',
     whenEn: 'Every day, 06:30 JST', whenJa: '毎日 06:30 JST',
-    doesEn: 'Detects new meetings, then — only if the NotebookLM login is valid — resumes stuck meetings, summarises up to 8 and builds the digest. A stale login skips the summaries and raises an alert.',
-    doesJa: '新規会合を検出し、NotebookLMのログインが有効な場合のみ、中断分の再開、最大8件の要約、ダイジェスト作成を実行。ログインが切れていると要約を省略してアラートを出します。',
+    doesEn: 'Detects new meetings, then — only if the NotebookLM login is valid — resumes stuck meetings, summarises up to 8 and builds the digest. Then, login or not, it resolves the source pages behind citations for up to 5 earlier meetings. A stale login skips the summaries and raises an alert.',
+    doesJa: '新規会合を検出し、NotebookLMのログインが有効な場合のみ、中断分の再開、最大8件の要約、ダイジェスト作成を実行。その後、ログインの有無にかかわらず、過去の会合最大5件の引用元ページを特定します。ログインが切れていると要約を省略してアラートを出します。',
     writes: true,
   },
   {

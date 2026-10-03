@@ -254,7 +254,9 @@ behind one another instead of racing. A push from your own machine is not in tha
   so a silently stale source fails the run.
 - **`policy.yml`** — daily (06:30 JST) + `workflow_dispatch` authenticated
   NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
-  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, push DB.
+  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, then resolve
+  the source page behind citations for up to 5 earlier meetings (`resolve-citations`;
+  needs no login and never fails the run), push DB.
   Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the
   operator runbook above).
 - **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
