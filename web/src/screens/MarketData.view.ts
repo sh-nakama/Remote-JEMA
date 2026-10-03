@@ -11,6 +11,7 @@ import {
   useWholesaleLive,
   windowLive,
   windowSupply,
+  FUELS,
   useDriversLive,
   useBalancingLive,
   BAL_CODES,
@@ -208,6 +209,20 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
   // ---- per-area sections ----
   const X = (i: number, n: number) => 8 + (i / (n - 1)) * 464
 
+  /** Stacked-area polygons, one list per layer: layer k spans cumulative(k-1)..cumulative(k) per gap segment. */
+  const stackPolys = (
+    layers: number[][],
+    segs: [number, number][],
+    xOf: (i: number) => number,
+    y: (val: number) => number,
+  ): string[][] => {
+    const cum: number[][] = []
+    layers.forEach((l, k) => cum.push(l.map((v, i) => v + (k ? cum[k - 1][i] : 0))))
+    return layers.map((_l, k) =>
+      segs.map((sg) => bandPoints(sg, xOf, (i) => y(cum[k][i]), (i) => y(k ? cum[k - 1][i] : 0))),
+    )
+  }
+
   // ---- plotted time window ----
   // Issue #22: the window is now derived from the *selected range*, anchored at
   // the newest datetime in the data — not from the union of whatever each area
@@ -314,15 +329,9 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
 
     // generation mix — real windowed supply when live (gran-responsive), else synthetic "today"
     const supW = la ? windowSupply(la, dom[0], dom[1]) : null
-    let mix1: string[]
-    let mix2: string[]
-    let mix3: string[]
-    let mix4: string[]
+    let mixPolys: string[][]
     let demandLine: string[]
-    let expMix1: string[] = []
-    let expMix2: string[] = []
-    let expMix3: string[] = []
-    let expMix4: string[] = []
+    let expMixPolys: string[][] = []
     let expDemand: string[] = []
     let peakMWStr: string
     let mixMeta: string
@@ -332,16 +341,9 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
     let supDtA: string[] = []
     let supTA: number[] = []
     let supDemandA: number[] = []
-    let supBaseA: number[] = []
-    let supThermA: number[] = []
-    let supSolarA: number[] = []
-    let supOtherA: number[] = []
+    let supFuelA: number[][] = FUELS.map(() => [])
     let supXs: number[] = []
     if (supW) {
-      const c1 = supW.baseload
-      const c2 = c1.map((b, i) => b + supW.thermal[i])
-      const c3 = c2.map((val, i) => val + supW.solar[i])
-      const c4 = c3.map((val, i) => val + supW.other[i])
       const nS = supW.demand.length
       const Xs = (i: number) => (useTime ? xOfT(supW.t[i]) : PLOT_X0 + (i / Math.max(1, nS - 1)) * PLOT_W)
       const my = (val: number) => 152 - (val / supW.ymax) * 140
@@ -350,35 +352,23 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
         ([s0, s1]) => s1 > s0,
       )
       const bands = (y: (val: number) => number) => ({
-        b1: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c1[i]), () => y(0))),
-        b2: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c2[i]), (i) => y(c1[i]))),
-        b3: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c3[i]), (i) => y(c2[i]))),
-        b4: sSegs.map((sg) => bandPoints(sg, Xs, (i) => y(c4[i]), (i) => y(c3[i]))),
+        polys: stackPolys(supW.fuels, sSegs, Xs, y),
         dem: sSegs.map((sg) => segPoints(sg, Xs, (i) => y(supW.demand[i]))),
       })
       const std = bands(my)
-      mix1 = std.b1
-      mix2 = std.b2
-      mix3 = std.b3
-      mix4 = std.b4
+      mixPolys = std.polys
       demandLine = std.dem
       const exp = bands(myE)
-      expMix1 = exp.b1
-      expMix2 = exp.b2
-      expMix3 = exp.b3
-      expMix4 = exp.b4
+      expMixPolys = exp.polys
       expDemand = exp.dem
       peakMWStr = Math.round(Math.max(1, ...supW.demand)).toLocaleString('en-US')
-      mixMeta = range + ' · ' + gran + ' · grouped MW'
+      mixMeta = range + ' · ' + gran + ' · MW by technology'
       supN = nS
       supYmax = supW.ymax
       supDtA = supW.dt
       supTA = supW.t
       supDemandA = supW.demand
-      supBaseA = supW.baseload
-      supThermA = supW.thermal
-      supSolarA = supW.solar
-      supOtherA = supW.other
+      supFuelA = supW.fuels
       supXs = supW.demand.map((_v, i) => Xs(i))
     } else {
       const P = a.peak
@@ -400,23 +390,19 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
       const demLine = dem.map((val) => val * 1.018)
       const fx = (i: number) => X(i, 48)
       const seg: [number, number] = [0, 47]
+      // Sample data only knows baseload / thermal / solar: file them under nuclear / LNG / solar.
+      const fx48 = FUELS.map((f) =>
+        f.key === 'nuclear' ? c1 : f.key === 'lng' ? c2.map((val, i) => Math.max(0, val - c1[i])) : f.key === 'solar_actual' ? c3.map((val, i) => Math.max(0, val - c2[i])) : c1.map(() => 0),
+      )
       const bands = (y: (val: number) => number) => ({
-        b1: [bandPoints(seg, fx, (i) => y(c1[i]), () => y(0))],
-        b2: [bandPoints(seg, fx, (i) => y(c2[i]), (i) => y(c1[i]))],
-        b3: [bandPoints(seg, fx, (i) => y(c3[i]), (i) => y(c2[i]))],
+        polys: stackPolys(fx48, [seg], fx, y),
         dem: [segPoints(seg, fx, (i) => y(demLine[i]))],
       })
       const std = bands(my)
-      mix1 = std.b1
-      mix2 = std.b2
-      mix3 = std.b3
-      mix4 = []
+      mixPolys = std.polys
       demandLine = std.dem
       const exp = bands(myE)
-      expMix1 = exp.b1
-      expMix2 = exp.b2
-      expMix3 = exp.b3
-      expMix4 = []
+      expMixPolys = exp.polys
       expDemand = exp.dem
       peakMWStr = P.toLocaleString('en-US')
       mixMeta = 'today · 14 fuels grouped · MW'
@@ -426,9 +412,7 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
       supDtA = Array.from({ length: 48 }, (_, i) => String(Math.floor(i / 2)).padStart(2, '0') + ':' + (i % 2 === 0 ? '00' : '30'))
       supTA = Array.from({ length: 48 }, () => NaN)
       supDemandA = demLine
-      supBaseA = c1
-      supThermA = c2.map((val, i) => Math.max(0, val - c1[i]))
-      supSolarA = c3.map((val, i) => Math.max(0, val - c2[i]))
+      supFuelA = fx48
       supXs = Array.from({ length: 48 }, (_v, i) => X(i, 48))
     }
 
@@ -497,10 +481,8 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
       zoomLabel,
       canZoom: useTime,
       tOfX,
-      mix1,
-      mix2,
-      mix3,
-      mix4,
+      mixPolys,
+      fuelLegend: FUELS.map((f, k) => ({ ...f, used: supFuelA[k].some((x) => x > 0) })).filter((f) => f.used),
       mixMeta,
       demand: demandLine,
       peakMW: peakMWStr,
@@ -535,16 +517,10 @@ export function buildMarketView({ view, range, gran, sel, closed, expanded, zoom
       supDt: supDtA,
       supXs,
       supDemandA,
-      supBaseA,
-      supThermA,
-      supSolarA,
-      supOtherA,
+      supFuelA,
       // combined (expanded) chart
       expH: EXP_H,
-      expMix1,
-      expMix2,
-      expMix3,
-      expMix4,
+      expMixPolys,
       expDemand,
       expBand: bandOf(pyE),
       expPMax: lineOf(w.max, pyE),

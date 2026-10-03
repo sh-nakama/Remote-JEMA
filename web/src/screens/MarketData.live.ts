@@ -31,13 +31,29 @@ export interface LiveArea {
   peakMW: number | null // stats.peak_demand_mw
   avgPrice: number | null // stats.avg_price
   latest: number | null // latest period price_avg
-  // grouped generation mix at the requested gran, newest-first (MW)
-  supBase: number[] // nuclear + hydro + geothermal + biomass
-  supTherm: number[] // coal + lng + oil + thermal_other
-  supSolar: number[] // solar + wind
+  // generation mix by technology at the requested gran, newest-first (MW), aligned to FUELS
+  supFuel: number[][]
   supDemand: number[] // area demand
   supDt: string[] // datetimes aligned to the supply arrays
 }
+
+/** Generation technologies in stack order (bottom → top), matching the Streamlit dashboard. */
+export const FUELS: { key: keyof SupplyRecord; en: string; ja: string; c: string }[] = [
+  { key: 'nuclear', en: 'Nuclear', ja: '原子力', c: '#7B2D8E' },
+  { key: 'lng', en: 'LNG', ja: 'LNG', c: '#00A5CF' },
+  { key: 'coal', en: 'Coal', ja: '石炭', c: '#3A3A3A' },
+  { key: 'oil', en: 'Oil', ja: '石油', c: '#6B4226' },
+  { key: 'thermal_other', en: 'Other thermal', ja: 'その他火力', c: '#9C6B4E' },
+  { key: 'hydro', en: 'Hydro', ja: '水力', c: '#1B2A4A' },
+  { key: 'geothermal', en: 'Geothermal', ja: '地熱', c: '#C1440E' },
+  { key: 'biomass', en: 'Biomass', ja: 'バイオマス', c: '#2A9D8F' },
+  { key: 'solar_actual', en: 'Solar', ja: '太陽光', c: '#E9C46A' },
+  { key: 'wind_actual', en: 'Wind', ja: '風力', c: '#4FB0A5' },
+  { key: 'pumped', en: 'Pumped storage', ja: '揚水', c: '#4A6FA5' },
+  { key: 'battery', en: 'Battery', ja: '蓄電池', c: '#8AB17D' },
+  { key: 'interconnect', en: 'Interconnect', ja: '連系線', c: '#9AA0A6' },
+  { key: 'other', en: 'Other', ja: 'その他', c: '#C9CCD1' },
+]
 
 export interface LiveState {
   areas: Record<string, LiveArea>
@@ -101,9 +117,7 @@ export function useWholesaleLive(selectedKeys: string[], gran: Gran): LiveState 
             peakMW: stats?.peak_demand_mw ?? null,
             avgPrice: stats?.avg_price ?? null,
             latest: price.length ? nn(price[price.length - 1].price_avg) : null,
-            supBase: rev(sup.map((r) => g(r, 'nuclear') + g(r, 'hydro') + g(r, 'geothermal') + g(r, 'biomass'))),
-            supTherm: rev(sup.map((r) => g(r, 'coal') + g(r, 'lng') + g(r, 'oil') + g(r, 'thermal_other'))),
-            supSolar: rev(sup.map((r) => g(r, 'solar_actual') + g(r, 'wind_actual'))),
+            supFuel: FUELS.map((f) => rev(sup.map((r) => g(r, f.key)))),
             supDemand: rev(sup.map((r) => nn(r.area_demand_mw))),
             supDt: rev(sup.map((r) => r.datetime)),
           }
@@ -686,37 +700,31 @@ export function windowLive(la: LiveArea, t0: number, t1: number): Windowed {
 }
 
 export interface SupplyWindow {
-  baseload: number[] // oldest -> newest
-  thermal: number[]
-  solar: number[]
-  other: number[] // residual to demand (net imports + storage), >= 0
+  fuels: number[][] // per FUELS entry, oldest -> newest, clamped >= 0 for stacking
   demand: number[]
   dt: string[] // raw ISO datetimes aligned to the windowed arrays (for hover)
   t: number[] // epoch ms aligned to dt
   ymax: number
 }
 
-/** Window the grouped generation mix to `[t0, t1]` (epoch ms), oldest→newest, on
- * the same budget as the price line. `other` fills the gap up to demand so the 4
- * bands stack to area demand (imports/storage); 0 when domestic generation
- * already exceeds it. */
+/** Window the per-technology generation mix to `[t0, t1]` (epoch ms), oldest→newest, on
+ * the same budget as the price line. Storage/interconnect can report negative MW
+ * (charging / export); those are clamped to 0 so the stack stays a valid area. */
 export function windowSupply(la: LiveArea, t0: number, t1: number): SupplyWindow {
   // Exports pad the series with rows whose values are all null (the TSO feed lags
   // behind the timestamp grid). Treating those as 0 drew a demand line flat along
   // the axis — i.e. "demand fell to zero" — so drop them and let the gap
   // segmentation leave honest whitespace instead.
   const order = indicesInWindow(la.supDt, t0, t1).filter((i) => Number.isFinite(la.supDemand[i]))
-  const pick = (arr: number[]) => order.map((i) => (Number.isFinite(arr[i]) ? arr[i] : 0))
-  const baseload = pick(la.supBase)
-  const thermal = pick(la.supTherm)
-  const solar = pick(la.supSolar)
-  const demand = pick(la.supDemand)
+  const pick = (arr: number[]) => order.map((i) => (Number.isFinite(arr[i]) ? Math.max(0, arr[i]) : 0))
+  const fuels = la.supFuel.map(pick)
+  const demand = order.map((i) => la.supDemand[i])
   const dt = order.map((i) => la.supDt[i])
   const t = order.map((i) => parseISO(la.supDt[i]))
-  const other = demand.map((d, i) => Math.max(0, d - baseload[i] - thermal[i] - solar[i]))
   let ymax = 1
   for (let i = 0; i < demand.length; i++) {
-    ymax = Math.max(ymax, demand[i], baseload[i] + thermal[i] + solar[i] + other[i])
+    ymax = Math.max(ymax, demand[i], fuels.reduce((a, f) => a + f[i], 0))
   }
-  return { baseload, thermal, solar, other, demand, dt, t, ymax: ymax * 1.08 }
+  return { fuels, demand, dt, t, ymax: ymax * 1.08 }
 }
+
