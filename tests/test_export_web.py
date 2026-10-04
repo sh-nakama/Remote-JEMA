@@ -429,3 +429,25 @@ def test_slot_col_fills_missing_slots_with_none():
     assert col[29] == 12.5
     assert col[1] is None  # 00:30 absent
     assert _slot_col(piv, "2099-01-01") == [None] * 48  # unknown day
+
+
+def test_build_policy_status_orders_meetings_chronologically(tmp_path: Path):
+    """Meetings list newest-held first, whatever order the pipeline touched them in."""
+    from datetime import date
+
+    from repower.dashboard.export_web import build_policy_status
+    from repower.policy import store
+
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    # Detected oldest-first, then the *oldest* meeting is touched last — so a
+    # sort on update time would put it on top.
+    for n in (1, 2, 3):
+        store.record_meeting("emissions_trading", n, None, db_path=db)
+    by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
+    store.update_meeting(by_num[3], db_path=db, meeting_date=date(2025, 3, 1))
+    store.update_meeting(by_num[2], db_path=db, meeting_date=date(2025, 2, 1))
+    store.update_meeting(by_num[1], db_path=db, meeting_date=date(2025, 1, 1))
+
+    mine = [m for m in build_policy_status(db)["meetings"] if m["com"] == "emissions_trading"]
+    assert [m["num"] for m in mine] == [3, 2, 1]

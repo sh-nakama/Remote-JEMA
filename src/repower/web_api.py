@@ -97,7 +97,7 @@ _REFRESH_TIMEOUT_S = 1800  # data refresh scrapes every source + re-exports; giv
 # daily generation quota, not wall-clock, so the 10-min command cap would kill it
 # mid-report and surface as a spurious "error" even with valid auth. Give it a wide
 # cap; the pipeline is crash-safe (Resume drains anything left mid-flight).
-# (The per-command caps now live in repower.commands: Command.timeout_s, 3600 for these.)
+# (The per-command caps now live in repower.commands: Command.timeout_s, 5400 for these.)
 _job_lock = threading.Lock()
 _job: dict = {
     "kind": None,       # 'catchup' | 'command'

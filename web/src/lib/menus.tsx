@@ -696,6 +696,8 @@ interface CatalogCommittee {
   discovered?: boolean
   priority?: number
   last: string
+  /** Date (YYYY-MM-DD) of the newest meeting held; null until dates are backfilled. */
+  last_date?: string | null
   url?: string
   source_count?: number
   meetings?: number
@@ -726,8 +728,8 @@ const ORGS: Array<'METI' | 'OCCTO' | 'EGC'> = ['METI', 'OCCTO', 'EGC']
 // The card grid answers "what do we track?". It cannot answer "what happened to
 // this committee last night, and if it failed, why?" — the cards show a tier and
 // a meeting number, and the per-meeting lifecycle isn't there at all. This view
-// is that second question: one row per committee ordered tracked-first then most
-// recently touched, expanding into its individual meetings with the raw pipeline
+// is that second question: one row per committee ordered tracked-first then by
+// newest meeting held, expanding into its individual meetings with the raw pipeline
 // state, the failure message and how long ago each was last written.
 const I_CHEV_R = '<polyline points="9 18 15 12 9 6"></polyline>'
 const I_CHEV_D = '<polyline points="6 9 12 15 18 9"></polyline>'
@@ -1648,8 +1650,9 @@ function CommitteesManage() {
   const nTracked = rows.filter((c) => c.tracked).length
   const nFailing = rows.filter(failing).length
 
-  // Tracked first, then most recently touched by the pipeline (never-run rows
-  // sink to the bottom of their group), then key for a stable tie-break.
+  // Tracked first, then newest meeting held (chronological, not scrape order;
+  // committees with no dated meeting sink to the bottom of their group), then
+  // most recently touched by the pipeline, then key for a stable tie-break.
   const tableRows = useMemo(() => {
     const inScope = (c: CatalogCommittee) =>
       scope === 'all' ? true : scope === 'tracked' ? c.tracked : failing(c)
@@ -1659,6 +1662,7 @@ function CommitteesManage() {
       .sort(
         (a, b) =>
           Number(b.tracked) - Number(a.tracked) ||
+          (b.last_date || '').localeCompare(a.last_date || '') ||
           tsOf(b.lastUpdateAt) - tsOf(a.lastUpdateAt) ||
           a.key.localeCompare(b.key),
       )

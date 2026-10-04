@@ -82,7 +82,7 @@ _COMMITTEE = Param("committee", "committee", "--committee", ("Committee", "委�
 _COMMITTEE_REQ = Param("committee", "committee", "--committee", ("Committee", "委員会"), required=True)
 _COMMITTEE_OPT = Param("committee", "committee", "--committee", ("Committee (optional)", "委員会（任意）"))
 
-_NBLM_TIMEOUT = 3600  # a meeting can block ~20 min on one report; see web_api._NOTEBOOKLM_TIMEOUT_S
+_NBLM_TIMEOUT = 5400  # 1.5h; a meeting can block ~20 min on one report; see web_api._NOTEBOOKLM_TIMEOUT_S
 
 COMMANDS: tuple[Command, ...] = (
     # ── Backflow: the back-catalogue workflow, in the order to run it ─────────────
