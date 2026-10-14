@@ -509,19 +509,35 @@ def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     window: int = typer.Option(8, help="Enumerate materials for the newest N new meetings"),
     dry_run: bool = typer.Option(False, help="Report new meetings without writing to the DB"),
+    refresh_days: int = typer.Option(
+        7,
+        help="Also re-read the document list of known meetings held in the last N days, "
+             "and re-queue summarised ones that gained a paper (0 = off)",
+    ),
 ):
     """Detect new committee meetings (no NotebookLM auth required)."""
     from repower.policy.detect import detect
 
     keys = None if committee == "all" else [committee]
-    results = detect(keys, enumerate_window=window, dry_run=dry_run)
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}")
+    results = detect(
+        keys, enumerate_window=window, dry_run=dry_run,
+        refresh_window_days=(refresh_days or None),
+    )
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}{'DOCS+':>6}{'REQ':>5}")
     for r in results:
         typer.echo(
             f"{r['key']:<28}{r['source']:<6}{r['status']:<10}"
             f"{str(r['latest_online'] or '-'):>7}{str(r['known_latest'] or '-'):>7}{r['new']:>5}"
+            f"{r.get('refreshed', 0):>6}{r.get('requeued', 0):>5}"
         )
     typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
+    refreshed = sum(r.get("refreshed", 0) for r in results)
+    requeued = sum(r.get("requeued", 0) for r in results)
+    if refreshed or requeued:
+        typer.echo(
+            f"── {refreshed} late document(s) found for known meetings; "
+            f"{requeued} summarised meeting(s) re-queued ──"
+        )
     _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
     if not dry_run:
         _retag_policy()
@@ -592,6 +608,36 @@ def policy_materials(
             total += r["materialised"]
     typer.echo(f"-- {total} meeting(s) populated with materials --")
     _report_deferred(sum(r["deferred"] for r in results), "meeting")
+
+
+@policy_app.command("reclassify")
+def policy_reclassify(
+    apply: bool = typer.Option(False, "--apply", help="Write the new kinds (default: report only)"),
+):
+    """Re-type stored documents with the current classifier (no network, no auth).
+
+    Documents are typed once, when first seen, so rows recorded by an earlier
+    classifier keep a stale kind — notably numbered papers stored as ``other``
+    (never ingested) and rosters stored as ``handout``. Report-only unless --apply.
+    A summarised meeting that gains an ingestable paper is listed so it can be
+    re-run with ``policy run --committee K --meeting N``; none is re-queued here.
+    """
+    from repower.policy.store import INGEST_KINDS, reclassify_materials
+
+    changes = reclassify_materials(dry_run=not apply)
+    moves: dict[tuple[str | None, str], int] = {}
+    for c in changes:
+        moves[(c["old"], c["new"])] = moves.get((c["old"], c["new"]), 0) + 1
+    for (old, new), n in sorted(moves.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"{n:>5}  {old} -> {new}")
+    gained = sorted({
+        (c["committee_key"], c["meeting_num"]) for c in changes
+        if c["state"] == "done" and c["new"] in INGEST_KINDS and c["old"] not in INGEST_KINDS
+    })
+    typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'}; "
+               f"{len(gained)} summarised meeting(s) gain a paper they were never given --")
+    if not apply and changes:
+        typer.echo("   re-run with --apply to write them")
 
 
 @policy_app.command("run")

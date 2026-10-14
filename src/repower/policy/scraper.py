@@ -260,32 +260,69 @@ def material_id(meeting_num: int, url: str) -> str:
     return f"{meeting_num:03d}_{stem}"
 
 
+# Boilerplate that carries no policy content and must never reach NotebookLM: a
+# roster, the committee's glossary (re-published verbatim every meeting), the venue
+# map, the list of the meeting's own documents, and the procedural notices about
+# closed sessions / how the minutes are handled. Matched on the link text (the
+# filenames vary per committee) with the venue map also caught by filename.
+#
+# Keep these specific. 非公開 alone would also match a real paper on 非公開情報, and a
+# bare 取扱い is in plenty of genuine titles ("…の取扱いについて"), so only the
+# notice phrasings seen on the committee pages are listed.
+_JUNK_TITLE = re.compile(
+    r"名簿"
+    r"|定義集"
+    r"|配布資料一覧|資料一覧"
+    r"|非公開について"
+    r"|議事の(?:取り扱い|取扱い|公表)"
+)
+_JUNK_FILENAME = re.compile(r"toyosu_map")
+_BARE_MAP = re.compile(r"^\s*map\s*$", re.IGNORECASE)
+
+
+def is_junk_material(link_text: str, url: str) -> bool:
+    """True for boilerplate documents that add nothing to a meeting briefing."""
+    text = link_text or ""
+    fn = Path(urlparse(url).path).name.lower()
+    return bool(
+        _JUNK_TITLE.search(text) or _BARE_MAP.match(text) or _JUNK_FILENAME.search(fn)
+    )
+
+
 def classify_material(link_text: str, url: str) -> str:
     """Classify a document by its link text + filename into a ``kind``.
 
-    Order matters: specific minute/summary/compilation types are checked before
-    the generic 資料 (handout) catch-all.
+    Order matters: minutes/summary/compilation are checked first, then boilerplate,
+    then appendices and the agenda; whatever is left is a handout.
+
+    ``other`` is reserved for *recognised boilerplate* (:func:`is_junk_material`) —
+    the one kind the pipeline never ingests. An unrecognised document is assumed to
+    be content and becomes a ``handout``: the previous default of ``other`` silently
+    dropped every OCCTO numbered paper (``chousei_122_01.pdf``, linked as just its
+    topic name), so whole meetings were summarised from their agenda alone.
     """
     text = link_text or ""
     fn = Path(urlparse(url).path).name.lower()
-    blob = f"{text} {fn}"
     if "議事録" in text or "gijiroku" in fn:
         return "minutes"
     if "議事要旨" in text or "gijiyoshi" in fn or "gijiyoushi" in fn:
         return "brief"
     if "とりまとめ" in text or "torimatome" in fn:
         return "compilation"
-    if "別紙" in text or "besshi" in fn:
+    is_agenda = "議事次第" in text or "shidai" in fn
+    # An agenda that also lists the meeting's documents ("議事次第・配布資料一覧") is
+    # still the agenda: it carries the item list, so the list wording must not demote it.
+    if is_junk_material(text, url) and not is_agenda:
+        return "other"
+    if "別紙" in text or "besshi" in fn or "bessi" in fn:
         return "appendix"
-    if "別添" in text or "betten" in fn:
+    if "別添" in text or "betten" in fn or "bessatsu" in fn or "tenpu" in fn:
         return "appendix"
-    if "議事次第" in text or "shidai" in fn:
+    if is_agenda:
         return "agenda"
-    if "参考" in text or "sankou" in fn or "sannkou" in fn:
-        return "handout"  # 参考資料 reference material → treated as a handout
-    if "資料" in blob or "haifu" in fn or "shiryo" in fn:
-        return "handout"
-    return "other"
+    if re.search(r"_data\d*\.[a-z]+$", fn):
+        return "appendix"  # raw data sheets attached to a paper (hokkaido_kensho_02_data1)
+    return "handout"  # incl. 参考資料 (reference material) and unrecognised papers
 
 
 def parse_pdf_links(content: bytes | str, base_url: str) -> list[dict]:
