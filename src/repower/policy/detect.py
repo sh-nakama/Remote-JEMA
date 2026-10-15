@@ -36,6 +36,7 @@ from repower.policy.store import (
     set_meeting_dates,
     sync_committees,
     tracked_committees,
+    watch_meeting_nums,
 )
 from repower.scrapers.http_cache import budget_exhausted
 
@@ -80,6 +81,14 @@ logger = logging.getLogger(__name__)
 REFRESH_WINDOW_DAYS = 7
 REFRESH_LIMIT_PER_COMMITTEE = 5
 
+# The slower tier: summarised meetings with no minutes yet are re-read about weekly
+# for WATCH_HORIZON_DAYS after the meeting (minutes land weeks later, and the 7-day
+# window above has long closed), plus once regardless of age. See
+# :func:`repower.policy.store.watch_meeting_nums`.
+WATCH_HORIZON_DAYS = 90
+WATCH_INTERVAL_DAYS = 7
+WATCH_LIMIT_PER_COMMITTEE = 5
+
 
 def detect(
     keys: list[str] | None = None,
@@ -90,6 +99,7 @@ def detect(
     dry_run: bool = False,
     progress: Callable[[int, int, str], None] | None = None,
     refresh_window_days: int | None = REFRESH_WINDOW_DAYS,
+    watch_horizon_days: int | None = WATCH_HORIZON_DAYS,
     today: date | None = None,
 ) -> list[dict]:
     """Run detection over the selected committees (default: all).
@@ -124,7 +134,11 @@ def detect(
     *refresh_window_days*; ``None``/0 disables) is re-read, because the list recorded
     when a meeting was first seen goes stale — see :func:`_refresh_recent_materials`.
     ``refreshed`` counts documents added to known meetings, ``requeued`` the already
-    summarised meetings sent back for a new briefing because of them.
+    summarised meetings flagged for a new briefing because of them.
+
+    A second, slower tier (*watch_horizon_days*; ``None``/0 disables) re-reads
+    summarised meetings that still have no minutes or brief, about weekly, out to that
+    many days after the meeting — the late-minutes case the 7-day window cannot reach.
     """
     if not dry_run:
         sync_committees(db_path)
@@ -242,16 +256,20 @@ def detect(
             res["dated"],
         )
 
-    if refresh_window_days and not dry_run:
+    if (refresh_window_days or watch_horizon_days) and not dry_run:
         # Only committees whose host answered this pass: a blocked or deferred one
         # would just spend more of an allowance that is already gone.
         by_key = {r["key"]: r for r in results}
-        since = (today or datetime.now(UTC).date()) - timedelta(days=refresh_window_days)
+        day = today or datetime.now(UTC).date()
+        since = day - timedelta(days=refresh_window_days) if refresh_window_days else None
         for c in committees:
             if by_key[c.key]["status"] not in ("ok", "unchanged"):
                 continue
             try:
-                got = _refresh_recent_materials(c, since, skip=just_listed, db_path=db_path)
+                got = _refresh_recent_materials(
+                    c, since, today=day, watch_horizon_days=watch_horizon_days,
+                    skip=just_listed, db_path=db_path,
+                )
             except Exception:  # noqa: BLE001 — a repair pass must never fail detection
                 logger.warning("policy detect %-26s document refresh failed", c.key,
                                exc_info=True)
@@ -264,13 +282,17 @@ def detect(
 
 def _refresh_recent_materials(
     c,
-    since: date,
+    since: date | None,
     *,
+    today: date,
+    watch_horizon_days: int | None,
     skip: set[tuple[str, int]],
     db_path: str | None,
     limit: int = REFRESH_LIMIT_PER_COMMITTEE,
+    watch_limit: int = WATCH_LIMIT_PER_COMMITTEE,
 ) -> dict:
-    """Re-read the document list of *c*'s known meetings held on/after *since*.
+    """Re-read the document list of *c*'s known meetings held on/after *since*, plus
+    summarised ones still waiting on minutes (the watch tier).
 
     ``detect`` lists a meeting's documents once, when the meeting is first seen, and
     :func:`~repower.policy.pipeline.summarize_meeting` then trusts that list. But a
@@ -280,12 +302,18 @@ def _refresh_recent_materials(
     them. Documents found now are added to the meeting; a meeting already ``done``
     that gains one is re-queued (:func:`~repower.policy.store.add_late_materials`).
 
-    Newest *limit* meetings only. Skips meetings listed earlier in this pass, and
-    stops as soon as the host's request allowance is spent.
+    Newest *limit* recent meetings, then up to *watch_limit* watched ones — recent
+    first, so a spent allowance costs the tier that matters less. Skips meetings listed
+    earlier in this pass, and stops as soon as the host's request allowance is spent.
     """
     out = {"refreshed": 0, "requeued": 0}
-    nums = [n for n in recent_meeting_nums(c.key, since, db_path=db_path)
-            if (c.key, n) not in skip][:limit]
+    recent = ([n for n in recent_meeting_nums(c.key, since, db_path=db_path)
+               if (c.key, n) not in skip][:limit] if since is not None else [])
+    watched = ([n for n in watch_meeting_nums(c.key, today, horizon_days=watch_horizon_days,
+                                              interval_days=WATCH_INTERVAL_DAYS, db_path=db_path)
+                if (c.key, n) not in skip and n not in recent][:watch_limit]
+               if watch_horizon_days else [])
+    nums = recent + watched
     if not nums or budget_exhausted(c.url):
         return out
     # METI: one index fetch resolves every meeting's subpage. A meeting absent from it

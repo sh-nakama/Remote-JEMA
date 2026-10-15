@@ -750,6 +750,8 @@ interface MeetingStatus {
   errorAt: string | null
   retries: number
   requested: boolean
+  /** Summarised, but a paper arrived afterwards: queued to be written again. Still `done`. */
+  resummarise?: boolean
   minutes: boolean
   tori: boolean
   docs: number
@@ -934,7 +936,7 @@ function MeetingRows({
               style={s(`font-size:11px;color:${isErr ? 'var(--dn)' : warn ? 'var(--warnTx)' : 'var(--mut)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`)}
               title={detail + (m.retries ? pick(` · ${m.retries} retries`, ` · 再試行 ${m.retries}回`) : '')}
             >
-              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : '—')}
+              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : m.resummarise ? pick('update queued — a paper arrived after it was summarised', '更新待ち — 要約後に資料が追加されました') : '—')}
               {m.retries ? ` (${m.retries}×)` : ''}
             </span>
             <span style={s(TD)} title={m.updatedAt || ''}>{ago(m.updatedAt, L === 'ja')}</span>

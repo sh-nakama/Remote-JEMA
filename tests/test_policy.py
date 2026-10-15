@@ -2371,13 +2371,18 @@ def test_add_late_materials_requeues_a_done_meeting(policy_db):
 
     assert got == {"added": 1, "requeued": True}
     m = _row(db, key, 122)
-    assert m.state == "detected"            # back in the worklist…
-    assert m.briefing_md == "# 要約"         # …but the old briefing stays until replaced
-    assert m.synth_done is False             # so the synthesis re-reads the new one
-    assert m.updated_at >= before
+    assert m.state == "done"                 # still shown…
+    assert m.briefing_md == "# 要約"         # …with its briefing, until the re-run replaces it
+    assert m.resummarise_requested is True
+    assert m.updated_at == before            # "when it was summarised" has not moved
+    assert m.materials_checked_at is not None
     assert {r["pdf_id"] for r in store.meeting_materials(key, 122, db_path=db)} == {
         "122_gijishidai", "122_01"}
-    assert any(p["meeting_num"] == 122 for p in store.pending_meetings(key, db_path=db))
+    # Not "pending": a status count of backlog keeps meaning "no briefing yet"…
+    assert store.pending_meetings(key, db_path=db) == []
+    # …but the run's worklist has it.
+    assert [(p["meeting_num"], p["resummarise"]) for p in
+            store.pending_meetings(key, db_path=db, include_resummarise=True)] == [(122, True)]
 
 
 def test_add_late_materials_is_a_noop_when_nothing_is_new(policy_db):
@@ -2472,10 +2477,12 @@ def test_detect_refreshes_recent_meetings_and_requeues_the_summarised(monkeypatc
 
     res = detect_mod.detect([key], db_path=db, today=today)
 
-    assert listed == [122]                      # 100 is outside the window: not fetched
-    assert (res[0]["refreshed"], res[0]["requeued"]) == (2, 1)
-    assert _row(db, key, 122).state == "detected"
-    assert _row(db, key, 100).state == "done"
+    # 122 is inside the 7-day window; 100 is far outside it, but has no minutes/brief
+    # and was never re-read, so the watch tier looks at it once.
+    assert sorted(listed) == [100, 122]
+    assert (res[0]["refreshed"], res[0]["requeued"]) == (4, 2)
+    assert _row(db, key, 122).resummarise_requested is True
+    assert _row(db, key, 122).state == "done"
 
 
 def test_detect_refresh_does_not_re_read_meetings_it_just_listed(monkeypatch, policy_db):
@@ -2506,9 +2513,11 @@ def test_detect_refresh_is_off_for_dry_run_and_when_disabled(monkeypatch, policy
 
     today = datetime.date(2026, 10, 3)
     detect_mod.detect([key], db_path=db, today=today, dry_run=True)
-    detect_mod.detect([key], db_path=db, today=today, refresh_window_days=None)
-    detect_mod.detect([key], db_path=db, today=today, refresh_window_days=0)
-    assert _row(db, key, 122).state == "done"
+    detect_mod.detect([key], db_path=db, today=today,
+                      refresh_window_days=None, watch_horizon_days=None)
+    detect_mod.detect([key], db_path=db, today=today,
+                      refresh_window_days=0, watch_horizon_days=0)
+    assert _row(db, key, 122).resummarise_requested in (None, False)
 
 
 def test_detect_refresh_skips_committees_that_were_not_reachable(monkeypatch, policy_db):
