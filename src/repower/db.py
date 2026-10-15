@@ -326,6 +326,7 @@ class PolicyMaterial(Base):
     meeting_num: Mapped[int] = mapped_column(Integer, nullable=False)
     pdf_id: Mapped[str] = mapped_column(String(128), nullable=False)  # stable per-committee dedup key
     # minutes | brief | compilation | appendix | handout | agenda | other
+    # ("other" = recognised boilerplate - roster, map, glossary - never ingested)
     kind: Mapped[str | None] = mapped_column(String(16))
     url: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)  # link text

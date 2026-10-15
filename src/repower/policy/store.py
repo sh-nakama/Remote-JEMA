@@ -553,6 +553,132 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
         return is_new
 
 
+# A document of one of these kinds arriving after a meeting was summarised makes
+# that briefing incomplete. Appendices are left out: they are only ingested when the
+# source budget has room, so one arriving late is not worth a quota slot on its own.
+LATE_REQUEUE_KINDS = ("minutes", "brief", "compilation", "handout", "agenda")
+
+# States in which a meeting's document list is safe to refresh. The in-flight ones
+# (downloading / ingesting / generating) have a notebook being built from the list as
+# it stands, so it is left alone until that attempt resolves.
+_REFRESHABLE_STATES = ("done", "detected", "error")
+
+
+def recent_meeting_nums(key: str, since: date, db_path: str | None = None) -> list[int]:
+    """Meetings of *key* held on/after *since* whose document list may still grow,
+    newest first.
+
+    An undated meeting falls back to the day it was detected, so a committee whose
+    index carries no dates still gets its latest meetings refreshed.
+    """
+    with session_scope(db_path, commit=False) as session:
+        rows = (
+            session.query(PolicyMeeting.meeting_num, PolicyMeeting.meeting_date,
+                          PolicyMeeting.detected_at)
+            .filter(PolicyMeeting.committee_key == key,
+                    PolicyMeeting.state.in_(_REFRESHABLE_STATES))
+            .order_by(PolicyMeeting.meeting_num.desc())
+            .all()
+        )
+    out = []
+    for num, held, detected in rows:
+        when = held or (detected.date() if detected else None)
+        if when is not None and when >= since:
+            out.append(num)
+    return out
+
+
+def add_late_materials(key: str, meeting_num: int, materials: list[Material],
+                       db_path: str | None = None) -> dict:
+    """Merge a re-enumerated document list into an already-known meeting.
+
+    Returns ``{"added": n, "requeued": bool}``. Only documents not yet on file are
+    added, so a re-fetch that finds nothing new changes nothing — in particular
+    ``updated_at``, which the UI reads as "when this was summarised".
+
+    A ``done`` meeting that gains a minutes / brief / compilation / handout / agenda
+    document is sent back to ``detected``: its briefing was written without that
+    paper. It rejoins the normal worklist (breadth-first by committee priority — and
+    a recent meeting is its committee's newest, so it is early in line), and its
+    ``synth_done`` flag is cleared so the corrected briefing is folded back into the
+    committee synthesis. The stored briefing is kept until the re-run replaces it.
+    """
+    with session_scope(db_path) as session:
+        meeting = (
+            session.query(PolicyMeeting)
+            .filter_by(committee_key=key, meeting_num=meeting_num)
+            .one_or_none()
+        )
+        if meeting is None:
+            return {"added": 0, "requeued": False}
+        known = {
+            r[0]
+            for r in session.query(PolicyMaterial.pdf_id)
+            .filter_by(committee_key=key)
+            .filter(PolicyMaterial.meeting_num == meeting_num)
+            .all()
+        }
+        added: list[Material] = []
+        for m in materials:
+            if m.pdf_id in known:
+                continue
+            known.add(m.pdf_id)
+            added.append(m)
+            session.add(PolicyMaterial(
+                committee_key=key, meeting_num=meeting_num, pdf_id=m.pdf_id,
+                kind=m.kind, url=m.url, title=m.title, status="detected",
+            ))
+        if not added:
+            return {"added": 0, "requeued": False}
+        kinds = {m.kind for m in added}
+        if "minutes" in kinds:
+            meeting.has_minutes = True
+        if "compilation" in kinds:
+            meeting.has_torimatome = True
+        requeue = meeting.state == "done" and any(k in LATE_REQUEUE_KINDS for k in kinds)
+        if requeue:
+            meeting.state = "detected"
+            meeting.synth_done = False
+            meeting.retry_count = 0
+            meeting.quality_flag = None
+            meeting.last_error = None
+            meeting.last_error_at = None
+            meeting.updated_at = _now()
+        return {"added": len(added), "requeued": requeue}
+
+
+def reclassify_materials(db_path: str | None = None, dry_run: bool = False) -> list[dict]:
+    """Re-run :func:`classify_material` over every stored document.
+
+    ``record_meeting`` never revisits a document once it is on file, so rows typed by
+    an earlier classifier keep their old ``kind`` forever. Pure DB work — no fetch.
+    Returns one ``{committee_key, meeting_num, pdf_id, old, new, state}`` dict per
+    document whose kind changes; with *dry_run* nothing is written.
+    """
+    from repower.policy.scraper import classify_material
+
+    changes: list[dict] = []
+    with session_scope(db_path, commit=not dry_run) as session:
+        states = {
+            (c, n): s
+            for c, n, s in session.query(
+                PolicyMeeting.committee_key, PolicyMeeting.meeting_num, PolicyMeeting.state
+            )
+        }
+        for m in session.query(PolicyMaterial).all():
+            new = classify_material(m.title or "", m.url or "")
+            if new == m.kind:
+                continue
+            changes.append({
+                "committee_key": m.committee_key, "meeting_num": m.meeting_num,
+                "pdf_id": m.pdf_id, "old": m.kind, "new": new,
+                "state": states.get((m.committee_key, m.meeting_num)),
+            })
+            if not dry_run:
+                m.kind = new
+    return changes
+
+
 def set_committee_checked(key: str, db_path: str | None = None) -> None:
     """Record that a detection pass ran (used for the dashboard / freshness)."""
     with session_scope(db_path) as session:

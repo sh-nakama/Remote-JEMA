@@ -495,7 +495,7 @@ only if this copy was pulled recently.
 | # | Command | What it does |
 | --- | --- | --- |
 | 1 | `repower pull-hf` | **Dangerous.** Replace the local database and Parquet files with the shared dataset's. Start every session here; push first if you have local work to keep. |
-| 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates). Auth-free. |
+| 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates), and re-read the document list of meetings held in the last 7 days (`--refresh-days`): papers published after a meeting was first seen are added, and an already-summarised meeting that gains one is queued for a new briefing. Auth-free. |
 | 3 | `repower policy dates` | Repair meetings that have no meeting date yet. |
 | 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
 | 5 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 7–9. |

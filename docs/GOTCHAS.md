@@ -802,6 +802,29 @@ fixed.
   committee payload is shared, so missing one silently exports `tags: []` for that path. The
   retag step is wrapped (`cli._retag_policy`) so a tagging bug can never fail the scrape or the
   HF push — keep it that way, it is derived data.
+- **A briefing can be written from an agenda alone, twice over.** `chousei_jukyu` 第119–122回
+  were each "summarised" from their 議事次第 only, and read as complete (出席者：資料に記載なし).
+  Two independent causes, both fixed, either of which reproduces it:
+  - *The document list went stale.* `detect` lists a meeting's documents once, when the meeting is
+    first seen (the agenda is up before the meeting; handouts and 議事録 come later), and
+    `summarize_meeting` trusts that list. `detect` now re-reads the list of every known meeting
+    held in the last 7 days (`--refresh-days`, newest 5 per committee, METI via one index fetch)
+    and `store.add_late_materials` adds what is new. A `done` meeting that gains a
+    minutes/brief/compilation/handout/agenda paper goes back to `detected` (briefing kept until
+    the re-run replaces it); a late appendix alone does not — it is only ingested when the
+    budget has room. Minutes land weeks after the meeting, **outside the 7-day window**: a
+    meeting summarised without its 議事録 is not repaired by this; re-run it with
+    `policy run --committee K --meeting N`.
+  - *The classifier dropped the papers.* `classify_material` used to default to `other`, which
+    `_select_materials` never ingests, so OCCTO's numbered papers (`chousei_122_01.pdf`, linked as
+    just their topic) were typed `other` and skipped even when listed. The default is now
+    `handout`; `other` is only recognised boilerplate (`is_junk_material`: 名簿, 定義集, 配布資料一覧,
+    …非公開について, 議事の取り扱い/公表, the venue map). Keep those patterns specific — a bare
+    `非公開` or `取扱い` matches real papers ("非公開情報の…", "…の取扱いについて").
+- **A document is typed once, when first seen.** `record_meeting` skips a `pdf_id` it already has,
+  so changing `classify_material` never changes stored rows. `policy reclassify` reports (and with
+  `--apply` writes) what would change, and lists the summarised meetings that would gain a paper;
+  it does not re-queue them — that is a quota decision (`policy run --meeting`).
 
 ## Streamlit dashboard
 

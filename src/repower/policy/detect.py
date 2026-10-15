@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 
 from repower.policy.scraper import (
     POLITE_DELAY,
@@ -23,10 +24,12 @@ from repower.policy.scraper import (
     list_materials,
 )
 from repower.policy.store import (
+    add_late_materials,
     committee_or_config,
     known_meeting_nums,
     meetings_missing_date,
     meetings_missing_materials,
+    recent_meeting_nums,
     record_meeting,
     set_committee_checked,
     set_committee_fetch_result,
@@ -69,6 +72,14 @@ def _select_committees(keys: list[str] | None, db_path: str | None):
 
 logger = logging.getLogger(__name__)
 
+# How far back (by meeting date) a known meeting's document list is re-read, and how
+# many meetings per committee. A meeting's papers are not all up when it is first
+# seen: the agenda goes out ahead of it, the handouts around it, and minutes weeks
+# later. A week catches the delayed handouts; the per-committee cap keeps the cost
+# at a couple of page fetches on a quiet day.
+REFRESH_WINDOW_DAYS = 7
+REFRESH_LIMIT_PER_COMMITTEE = 5
+
 
 def detect(
     keys: list[str] | None = None,
@@ -78,13 +89,15 @@ def detect(
     backfill_to: int | None = None,
     dry_run: bool = False,
     progress: Callable[[int, int, str], None] | None = None,
+    refresh_window_days: int | None = REFRESH_WINDOW_DAYS,
+    today: date | None = None,
 ) -> list[dict]:
     """Run detection over the selected committees (default: all).
 
     Returns one result dict per committee::
 
         {"key", "source", "status", "error_kind", "error_detail", "latest_online",
-         "known_latest", "new", "enumerated", "dated"}
+         "known_latest", "new", "enumerated", "dated", "refreshed", "requeued"}
 
     ``status`` is ``ok`` / ``unchanged`` (index 304'd) / ``error`` / ``deferred``,
     and on error ``error_kind`` is a :data:`repower.scrapers.http_cache.FETCH_KINDS`
@@ -106,6 +119,12 @@ def detect(
     a 検出 (detection) date instead of the date the meeting was held. A committee
     whose index 304s but still has dateless meetings gets one scoped forced
     re-fetch, so settled committees can still self-heal.
+
+    After discovery, the document list of every **recent known meeting** (held within
+    *refresh_window_days*; ``None``/0 disables) is re-read, because the list recorded
+    when a meeting was first seen goes stale — see :func:`_refresh_recent_materials`.
+    ``refreshed`` counts documents added to known meetings, ``requeued`` the already
+    summarised meetings sent back for a new briefing because of them.
     """
     if not dry_run:
         sync_committees(db_path)
@@ -113,6 +132,7 @@ def detect(
     committees = _select_committees(keys, db_path)
     results: list[dict] = []
     total = len(committees)
+    just_listed: set[tuple[str, int]] = set()  # enumerated this pass — no need to re-read
 
     for idx, c in enumerate(committees):
         if progress is not None:
@@ -128,6 +148,7 @@ def detect(
                 "key": c.key, "source": c.source, "status": "deferred",
                 "error_kind": None, "error_detail": None, "latest_online": None,
                 "known_latest": None, "new": 0, "enumerated": 0, "dated": 0,
+                "refreshed": 0, "requeued": 0,
             })
             continue
         known = known_meeting_nums(c.key, db_path)
@@ -163,6 +184,8 @@ def detect(
             "new": 0,
             "enumerated": 0,
             "dated": 0,
+            "refreshed": 0,
+            "requeued": 0,
         }
 
         if not dry_run:
@@ -198,6 +221,7 @@ def detect(
             if n in to_enum:
                 mats = list_materials(c, n, db_path=db_path)
                 res["enumerated"] += 1
+                just_listed.add((c.key, n))
             if dry_run:
                 res["new"] += 1
                 continue
@@ -218,7 +242,77 @@ def detect(
             res["dated"],
         )
 
+    if refresh_window_days and not dry_run:
+        # Only committees whose host answered this pass: a blocked or deferred one
+        # would just spend more of an allowance that is already gone.
+        by_key = {r["key"]: r for r in results}
+        since = (today or datetime.now(UTC).date()) - timedelta(days=refresh_window_days)
+        for c in committees:
+            if by_key[c.key]["status"] not in ("ok", "unchanged"):
+                continue
+            try:
+                got = _refresh_recent_materials(c, since, skip=just_listed, db_path=db_path)
+            except Exception:  # noqa: BLE001 — a repair pass must never fail detection
+                logger.warning("policy detect %-26s document refresh failed", c.key,
+                               exc_info=True)
+                continue
+            by_key[c.key]["refreshed"] = got["refreshed"]
+            by_key[c.key]["requeued"] = got["requeued"]
+
     return results
+
+
+def _refresh_recent_materials(
+    c,
+    since: date,
+    *,
+    skip: set[tuple[str, int]],
+    db_path: str | None,
+    limit: int = REFRESH_LIMIT_PER_COMMITTEE,
+) -> dict:
+    """Re-read the document list of *c*'s known meetings held on/after *since*.
+
+    ``detect`` lists a meeting's documents once, when the meeting is first seen, and
+    :func:`~repower.policy.pipeline.summarize_meeting` then trusts that list. But a
+    committee page fills in over days: chousei_jukyu 第122回 was recorded with only
+    its 議事次第, summarised from that alone, and the papers appeared afterwards — so
+    a briefing of a meeting that had plainly discussed three papers said nothing of
+    them. Documents found now are added to the meeting; a meeting already ``done``
+    that gains one is re-queued (:func:`~repower.policy.store.add_late_materials`).
+
+    Newest *limit* meetings only. Skips meetings listed earlier in this pass, and
+    stops as soon as the host's request allowance is spent.
+    """
+    out = {"refreshed": 0, "requeued": 0}
+    nums = [n for n in recent_meeting_nums(c.key, since, db_path=db_path)
+            if (c.key, n) not in skip][:limit]
+    if not nums or budget_exhausted(c.url):
+        return out
+    # METI: one index fetch resolves every meeting's subpage. A meeting absent from it
+    # is skipped rather than costing its own index fetch (list_materials would).
+    meti_urls = None
+    if not c.is_occto and not c.is_egc:
+        meti_urls = fetch_meti_url_map(c, db_path=db_path)
+        if not meti_urls:
+            return out
+    for n in nums:
+        if budget_exhausted(c.url):
+            break
+        page_url = None
+        if meti_urls is not None:
+            page_url = meti_urls.get(n)
+            if page_url is None:
+                continue
+        mats = list_materials(c, n, db_path=db_path, page_url=page_url)
+        if mats:  # [] is "page unreachable", not "document list emptied"
+            got = add_late_materials(c.key, n, mats, db_path=db_path)
+            out["refreshed"] += got["added"]
+            out["requeued"] += int(got["requeued"])
+            if got["added"]:
+                logger.info("policy detect %-26s 第%d回 +%d document(s)%s", c.key, n,
+                            got["added"], " — re-queued" if got["requeued"] else "")
+        time.sleep(POLITE_DELAY)
+    return out
 
 
 def backfill_dates(
