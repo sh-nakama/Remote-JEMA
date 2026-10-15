@@ -277,6 +277,14 @@ class PolicyMeeting(Base):
     # Set when a user asks the dashboard to summarise this meeting but auth was stale
     # (or they queued it): the next `policy run` drains requested meetings first.
     gen_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # A ``done`` meeting whose briefing is stale and should be written again — a paper
+    # (minutes, handout…) turned up after it was summarised. Unlike a state change this
+    # keeps the existing briefing in view while the re-run waits for quota; the run
+    # clears it when the new briefing lands. Ordered behind never-summarised meetings.
+    resummarise_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # When this meeting's document list was last re-read from its page (NULL = never
+    # since it was first recorded). Drives the sparse re-check for late minutes.
+    materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # Topic tags for *this* meeting (not inherited from the committee) — same encoding
     # as ``PolicyCommittee.tags``; source is rule | llm | manual.
     tags: Mapped[str | None] = mapped_column(Text)
@@ -334,6 +342,10 @@ class PolicyMaterial(Base):
     sha256: Mapped[str | None] = mapped_column(String(64))
     # detected | downloaded | ingested | error
     status: Mapped[str | None] = mapped_column(String(16), default="detected")
+    # When this document first appeared on the meeting page. NULL on rows recorded before
+    # this column existed. With the meeting date it gives the publication lag per
+    # committee — what the late-minutes re-check schedule should be tuned to.
+    first_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     __table_args__ = (
         UniqueConstraint("committee_key", "pdf_id", name="uq_policy_material"),
     )
@@ -384,6 +396,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_meeting_error(engine)
             _migrate_add_policy_tags(engine)
             _migrate_add_policy_citations(engine)
+            _migrate_add_policy_minutes_watch(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -564,6 +577,37 @@ def _migrate_add_policy_citations(engine) -> None:
     if "citations_json" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
         with engine.begin() as conn:
             conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
+
+
+def _migrate_add_policy_minutes_watch(engine) -> None:
+    """Add the late-document tracking columns (additive; all NULL/0 = "not yet").
+
+    ``policy_meeting.resummarise_requested`` / ``materials_checked_at`` and
+    ``policy_material.first_seen_at``. Pulled production DBs predate them.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    names = insp.get_table_names()
+    adds = {
+        "policy_meeting": [
+            ("resummarise_requested",
+             "ALTER TABLE policy_meeting ADD COLUMN resummarise_requested BOOLEAN DEFAULT 0"),
+            ("materials_checked_at",
+             "ALTER TABLE policy_meeting ADD COLUMN materials_checked_at DATETIME"),
+        ],
+        "policy_material": [
+            ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),
+        ],
+    }
+    with engine.begin() as conn:
+        for table, cols_ddl in adds.items():
+            if table not in names:
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for col, ddl in cols_ddl:
+                if col not in have:
+                    conn.execute(sql_text(ddl))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

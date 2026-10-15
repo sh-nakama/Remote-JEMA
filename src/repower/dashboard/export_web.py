@@ -1001,7 +1001,7 @@ def build_policy_status(db_path: str | None = None) -> dict:
     with eng.connect() as con:
         rows = con.execute(text(
             "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
-            "last_error, last_error_at, retry_count, gen_requested, has_minutes, "
+            "last_error, last_error_at, retry_count, gen_requested, resummarise_requested, has_minutes, "
             "has_torimatome, gen_seconds, updated_at, detected_at FROM policy_meeting"
         )).mappings().all()
         # Documents on the page, how many the pipeline would ingest, and how many
@@ -1062,6 +1062,9 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 "errorAt": str(m["last_error_at"]) if m["last_error_at"] else None,
                 "retries": m["retry_count"] or 0,
                 "requested": bool(m["gen_requested"]),
+                # A summarised meeting whose briefing is stale (late papers) and queued
+                # to be written again. It stays `done`: the old briefing is still shown.
+                "resummarise": bool(m["resummarise_requested"]),
                 "minutes": bool(m["has_minutes"]),
                 "tori": bool(m["has_torimatome"]),
                 "docs": mat_counts.get((key, m["meeting_num"]), (0, 0, 0))[0],
