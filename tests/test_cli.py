@@ -10,6 +10,7 @@ import importlib
 import pathlib
 import re
 import shlex
+import tempfile
 from datetime import date
 
 import httpx
@@ -20,6 +21,7 @@ from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from repower import cli
+from repower.policy.weekly import WeeklyReport
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 TODAY = date(2026, 9, 27)
@@ -94,6 +96,11 @@ def stubs(monkeypatch):
         "repower.policy.digest.build_digest": s.stub("digest", "# Weekly digest"),
         "repower.policy.digest.post_digest": s.stub("post", True),
         "repower.policy.energy_board.cross_check": s.stub("crosscheck", CROSSCHECK),
+        "repower.policy.energy_board.fetch_feed": s.stub("board", []),
+        "repower.policy.weekly.build_report": s.stub("weekly", lambda **k: WeeklyReport(
+            start=TODAY, end=TODAY, summarised=[], late=[], held=[])),
+        "repower.notify.mail.is_configured": lambda: True,
+        "repower.notify.mail.send_email": s.stub("email", True),
         "repower.policy.citation_resolver.backfill": s.stub("resolve_citations", {
             "resolved": 0, "attempted": 0, "pages": 0, "refs": 0, "pending": 0,
             "errors": [], "stopped_early": None}),
@@ -130,6 +137,7 @@ _WORKFLOW_VALUES = {
     "MAX_PER_RUN": "8",
     "steps.window.outputs.since": "2026-03",
     "steps.window.outputs.jepx_since": "2025",
+    "RUNNER_TEMP": pathlib.Path(tempfile.gettempdir()).as_posix(),
 }
 
 

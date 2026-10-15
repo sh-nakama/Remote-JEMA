@@ -33,6 +33,7 @@ from repower.policy.committees import (
     committee_priority,
 )
 from repower.policy.scraper import Material
+from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
 
@@ -909,6 +910,47 @@ def recent_done_meetings(since_days: int, db_path: str | None = None) -> list[di
         ]
 
 
+def meetings_for_week(
+    held_from: date, held_to: date, db_path: str | None = None,
+    *, summarised_since: datetime | None = None,
+) -> list[dict]:
+    """Meetings *held* ``held_from..held_to`` (inclusive, by ``meeting_date``).
+
+    With ``summarised_since``, only those whose summary landed at or after it — the
+    weekly email's "summaries now available" catch-up for meetings held before the
+    week. Undated meetings never match: when a meeting was held is the whole point.
+    """
+    with session_scope(db_path, commit=False) as session:
+        q = session.query(PolicyMeeting).filter(
+            PolicyMeeting.meeting_date >= held_from, PolicyMeeting.meeting_date <= held_to,
+        )
+        if summarised_since is not None:
+            q = q.filter(PolicyMeeting.state == "done", PolicyMeeting.summarised_at >= summarised_since)
+        rows = q.order_by(PolicyMeeting.meeting_date.desc(), PolicyMeeting.committee_key).all()
+        return [
+            {
+                "committee_key": m.committee_key,
+                "meeting_num": m.meeting_num,
+                "meeting_date": m.meeting_date,
+                "state": m.state,
+                "has_torimatome": bool(m.has_torimatome),
+                "digest_en_json": m.digest_en_json,
+                "summarised_at": m.summarised_at,
+            }
+            for m in rows
+        ]
+
+
+def undated_meetings_detected_since(since: datetime, db_path: str | None = None) -> int:
+    """How many meetings detected at or after *since* still have no ``meeting_date``."""
+    with session_scope(db_path, commit=False) as session:
+        return (
+            session.query(func.count(PolicyMeeting.id))
+            .filter(PolicyMeeting.detected_at >= since, PolicyMeeting.meeting_date.is_(None))
+            .scalar()
+        ) or 0
+
+
 def update_committee(key: str, db_path: str | None = None, **fields) -> None:
     """Patch a ``policy_committee`` row (synthesis_notebook_id, last_synth_meeting, ...)."""
     with session_scope(db_path) as session:
@@ -1036,20 +1078,38 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
 
 
 # ── Upcoming (scheduled) meetings ────────────────────────────────────────────
-def replace_upcoming(rows, db_path: str | None = None) -> int:
-    """Replace the ``policy_upcoming`` snapshot with *rows* (``schedule.Upcoming``).
+# Past calendar rows are kept this long: the weekly summary reads them to list
+# meetings that were held — including ones on committees nothing else tracks.
+UPCOMING_HISTORY_DAYS = 90
 
-    The table is a rolling snapshot, so it is truncated and rewritten atomically.
-    Rows are deduped on ``(meeting_date, source_key)`` in case a source repeats an
-    entry. Returns the number of rows written.
+
+def replace_upcoming(rows, db_path: str | None = None, *, today: date | None = None) -> int:
+    """Refresh ``policy_upcoming`` from *rows* (``schedule.Upcoming``).
+
+    The table has two parts. **Future** rows (``meeting_date >= today``) are a rolling
+    snapshot of the calendar: truncated and rewritten atomically, so a cancelled or
+    moved meeting disappears. **Past** rows are a short history of what the calendar
+    announced, kept for ``UPCOMING_HISTORY_DAYS`` — once its date passes, a meeting
+    drops off the calendar but did happen. Past rows in *rows* are inserted only when
+    absent. Rows are deduped on ``(meeting_date, source_key)``. Returns the number of
+    future rows written.
     """
+    from datetime import timedelta
+
+    today = today or today_jst()
+    cutoff = today - timedelta(days=UPCOMING_HISTORY_DAYS)
     with session_scope(db_path) as session:
-        session.query(PolicyUpcoming).delete()
-        seen: set[tuple] = set()
+        session.query(PolicyUpcoming).filter(
+            or_(PolicyUpcoming.meeting_date >= today, PolicyUpcoming.meeting_date < cutoff)
+        ).delete(synchronize_session=False)
+        seen: set[tuple] = {
+            (d, k)
+            for d, k in session.query(PolicyUpcoming.meeting_date, PolicyUpcoming.source_key).all()
+        }
         written = 0
         for r in rows:
             k = (r.date, r.source_key)
-            if k in seen:
+            if k in seen or r.date < cutoff:
                 continue
             seen.add(k)
             session.add(
@@ -1064,30 +1124,49 @@ def replace_upcoming(rows, db_path: str | None = None) -> int:
                     source_url=r.source_url,
                 )
             )
-            written += 1
+            if r.date >= today:
+                written += 1
         return written
 
 
-def list_upcoming(db_path: str | None = None) -> list[dict]:
-    """All rows from the ``policy_upcoming`` snapshot, soonest first, as plain dicts."""
+def _upcoming_dict(r: PolicyUpcoming) -> dict:
+    return {
+        "date": r.meeting_date.isoformat() if r.meeting_date else None,
+        "name_ja": r.name_ja,
+        "org": r.org,
+        "committee_key": r.committee_key,
+        "meeting_num": r.meeting_num,
+        "source": r.source,
+        "source_url": r.source_url,
+    }
+
+
+def list_upcoming(db_path: str | None = None, *, today: date | None = None) -> list[dict]:
+    """Scheduled meetings on or after *today* (JST), soonest first, as plain dicts.
+
+    Past rows (the calendar history) are excluded — see :func:`calendar_entries`.
+    """
+    today = today or today_jst()
     with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyUpcoming)
+            .filter(PolicyUpcoming.meeting_date >= today)
             .order_by(PolicyUpcoming.meeting_date.asc(), PolicyUpcoming.org.asc())
             .all()
         )
-        return [
-            {
-                "date": r.meeting_date.isoformat() if r.meeting_date else None,
-                "name_ja": r.name_ja,
-                "org": r.org,
-                "committee_key": r.committee_key,
-                "meeting_num": r.meeting_num,
-                "source": r.source,
-                "source_url": r.source_url,
-            }
-            for r in rows
-        ]
+        return [_upcoming_dict(r) for r in rows]
+
+
+def calendar_entries(start: date, end: date, db_path: str | None = None) -> list[dict]:
+    """Calendar rows dated ``start..end`` inclusive (past or future), soonest first."""
+    with session_scope(db_path, commit=False) as session:
+        rows = (
+            session.query(PolicyUpcoming)
+            .filter(PolicyUpcoming.meeting_date >= start, PolicyUpcoming.meeting_date <= end)
+            .order_by(PolicyUpcoming.meeting_date.asc(), PolicyUpcoming.org.asc())
+            .all()
+        )
+        return [_upcoming_dict(r) for r in rows]
 
 
 # ── Running document ─────────────────────────────────────────────────────────

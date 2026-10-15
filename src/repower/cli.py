@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from datetime import date
+from pathlib import Path
 from typing import Any
 
 import typer
@@ -1460,6 +1461,43 @@ def policy_digest(
     if not dry_run:
         ok = post_digest(md)
         typer.echo("Digest posted" if ok else "(no webhook configured / post failed)")
+
+
+@policy_app.command("weekly")
+def policy_weekly(
+    days: int = typer.Option(7, min=1, max=31, help="Rolling window of days held, ending today (JST)"),
+    dry_run: bool = typer.Option(False, help="Print the summary without sending the email"),
+    out: Path | None = typer.Option(None, help="Also write the HTML email to this file"),
+    board: bool = typer.Option(True, help="Include the energy-board feed (one network fetch)"),
+):
+    """Email the weekly summary of committee meetings held in the past week."""
+    from repower.notify.mail import EmailError, is_configured, send_email
+    from repower.policy.weekly import build_report, render_html, render_text, subject
+
+    feed = []
+    if board:
+        from repower.policy.energy_board import fetch_feed
+
+        feed = fetch_feed()
+    report = build_report(days=days, board=feed)
+    text, html = render_text(report), render_html(report)
+    if out:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(html, encoding="utf-8")
+    typer.echo(subject(report))
+    typer.echo("")
+    typer.echo(text)
+    if dry_run:
+        return
+    if not is_configured():
+        typer.echo("Email not configured (SMTP_USER, SMTP_PASSWORD, MAIL_TO); use --dry-run to preview.", err=True)
+        raise typer.Exit(1)
+    try:
+        send_email(subject(report), text, html)
+    except EmailError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from e
+    typer.echo("Weekly summary emailed")
 
 
 if __name__ == "__main__":

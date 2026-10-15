@@ -492,6 +492,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             # longer describes the meeting — clear it rather than leave the status
             # table reporting a resolved error against a summarised meeting.
             last_error=None, last_error_at=None,
+            summarised_at=datetime.now(UTC),
         )
         regenerate_running_doc(committee.key, db_path=db_path)
         if llm_tags is not None:

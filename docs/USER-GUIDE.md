@@ -438,7 +438,7 @@ the Hugging Face dataset push, not git.
 
 ### What runs automatically (GitHub Actions)
 
-Eight workflows in [`.github/workflows/`](../.github/workflows/) run without you. Times are
+Nine workflows in [`.github/workflows/`](../.github/workflows/) run without you. Times are
 the cron in UTC and the same moment in JST; **GitHub can start a scheduled job hours late**,
 so treat a time as "no earlier than". `tests/test_workflow_docs.py` checks this table (and
 the in-app copy) against the workflow files, so it cannot quietly go stale.
@@ -449,6 +449,7 @@ the in-app copy) against the workflow files, so it cannot quietly go stale.
 | `policy.yml` — Daily Policy Summaries | `30 21 * * *` → 06:30 JST, every day | `repower pull-hf`, `repower policy detect`; then, only if the NotebookLM login is valid, `repower policy resume`, `repower policy run` (up to 8 meetings) and `repower policy digest`; then, with or without a login, `repower policy resolve-citations --max-meetings 5` (finds the source page behind older digests' citations, a few meetings a day; a failure never fails the run); `repower push-hf`. A stale login skips the summaries and raises an alert. | Yes |
 | `weekly-backfill.yml` — Weekly Deep Re-validation | `30 19 * * 0` → 04:30 JST, Mondays | `repower pull-hf`, `repower backfill` over a deeper window (about 6 months of TSO data, JEPX from last year, EPRX from FY2025) to catch late upstream revisions, `repower push-hf`. | Yes |
 | `policy-crosscheck.yml` — Monthly Committee Cross-check | `0 22 1 * *` → 07:00 JST on the 2nd of each month | `repower pull-hf`, `repower policy crosscheck` (adds energy committees the energy-board feed has and we lack, as untracked), `repower push-hf`. | Yes |
+| `weekly-summary.yml` — Weekly Summary Email | `0 8 * * 5` → 17:00 JST, Fridays | `repower pull-hf`, then `repower policy weekly`: emails the committee meetings *held* in the last 7 days — tracked ones that have a summary (with a short brief), summaries that landed this week for meetings held in the three weeks before, and every other meeting held, tracked or not. Manual runs can be a dry run; the HTML email is kept as a run artifact. Needs the `SMTP_USER`, `SMTP_PASSWORD` and `MAIL_TO` secrets. | No (read only) |
 | `backfill.yml` — Historical Backfill | Manual only (`since` and `area` inputs) | `repower pull-hf`, `repower backfill`, `repower push-hf`. | Yes |
 | `web-deploy.yml` — Deploy Web (JEMA) | After any of the five dataset workflows above finishes; backstop `30 21 * * *` → 06:30 JST; pushes to `main` touching `web/` or the exporter; manual | `repower pull-hf`, `repower export-web`, then builds and publishes the public site to GitHub Pages. Skipped when the pulled database is unchanged. | No (read only) |
 | `sync-space.yml` — Sync to HF Space | Pushes to `main` touching code or Space config; manual | Uploads the Streamlit Space and waits for it to rebuild. Runs no `repower` command. | No |
@@ -532,6 +533,7 @@ and 12 are optional) and **Citations only** (`pull-hf` → `resolve-citations` �
 | `repower policy discover` | Discover new committees (incl. the energy-board backup feed). |
 | `repower policy crosscheck` | Show committees the energy-board feed has that we don't. |
 | `repower policy digest` | Assemble the digest of recently summarised meetings (a dry run from the pane — it never posts). |
+| `repower policy weekly` | Build and email the weekly summary of meetings held in the last 7 days. `--dry-run` prints it without sending; `--out file.html` keeps the HTML; `--no-board` skips the energy-board fetch. |
 | `repower cache prune` | Evict stale HTTP-cache entries so the synced database stops growing (a dry run by default in the pane). |
 
 #### Other commands

@@ -190,7 +190,7 @@ def parse_meti_calendar(content: bytes | str, base_url: str = METI_CALENDAR_URL)
 
 
 def _dedupe_future(items: list[Upcoming], today: datetime.date) -> list[Upcoming]:
-    """Keep only future (>= today) entries, deduped on (date, source_key).
+    """Keep only entries on or after *today*, deduped on (date, source_key).
 
     A tracked-committee match wins over an unmatched duplicate; otherwise the
     first seen wins. Sorted by date ascending.
@@ -246,14 +246,16 @@ def fetch_upcoming(*, db_path: str | None = None, today: datetime.date | None = 
 def refresh_upcoming(*, db_path: str | None = None, today: datetime.date | None = None) -> int:
     """Refresh the ``policy_upcoming`` snapshot from the live schedule sources.
 
-    Fully replaces the table (it's a rolling snapshot). Returns the row count.
+    Rewrites the future part of the table (a rolling snapshot) and keeps past
+    entries as history — see :func:`repower.policy.store.replace_upcoming`. Returns
+    the number of upcoming (today or later) rows.
 
     Raises ``ScheduleUnavailable`` when the feed can't be fetched (network error or the
     METI overload/failover page) so a transient outage does NOT clobber the existing
     snapshot with an empty set. Both callers — the CLI pipeline and the web-api catch-up
     job — already treat that as a soft, non-fatal "feed unavailable".
     """
-    from repower.policy.store import replace_upcoming
+    from repower.policy.store import UPCOMING_HISTORY_DAYS, replace_upcoming
 
     today = today or today_jst()
     meti = _fetch(METI_CALENDAR_URL, db_path=db_path)
@@ -262,8 +264,11 @@ def refresh_upcoming(*, db_path: str | None = None, today: datetime.date | None 
             "METI committee calendar unavailable (network error or overload page); "
             "keeping the existing upcoming snapshot"
         )
-    rows = _dedupe_future(parse_meti_calendar(meti), today)
-    replace_upcoming(rows, db_path=db_path)
+    # Past-dated entries still on the page are kept too: they seed the calendar
+    # history the weekly summary reads (replace_upcoming never rewrites the past).
+    since = today - datetime.timedelta(days=UPCOMING_HISTORY_DAYS)
+    rows = _dedupe_future(parse_meti_calendar(meti), since)
+    n = replace_upcoming(rows, db_path=db_path, today=today)
     logger.info("policy schedule: %d upcoming meeting(s) (%d matched to tracked committees)",
-                len(rows), sum(1 for r in rows if r.committee_key))
-    return len(rows)
+                n, sum(1 for r in rows if r.committee_key and r.date >= today))
+    return n

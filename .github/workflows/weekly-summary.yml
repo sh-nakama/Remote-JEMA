@@ -1,0 +1,82 @@
+name: Weekly Summary Email
+
+# Emails a summary of the committee meetings *held* in the last 7 days (JST): the
+# tracked ones that already have a summary (with a short brief), summaries that
+# landed this week for meetings held in the three weeks before, and every other
+# meeting held — tracked or not. Reads the dataset; never writes it.
+#
+# Secrets: SMTP_USER + SMTP_PASSWORD (a Gmail App Password) and MAIL_TO. The
+# recipient address lives only in the secret, never in this repo.
+
+on:
+  schedule:
+    # 08:00 UTC = 17:00 JST, Fridays — after the morning's detection + summaries.
+    - cron: "0 8 * * 5"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the summary (log + artifact) without sending the email"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  email:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
+      WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+      MAIL_TO: ${{ secrets.MAIL_TO }}
+      # Optional repo variables for a non-Gmail provider (implicit TLS).
+      SMTP_HOST: ${{ vars.SMTP_HOST || 'smtp.gmail.com' }}
+      SMTP_PORT: ${{ vars.SMTP_PORT || '465' }}
+      MAIL_FROM: ${{ vars.MAIL_FROM }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e . -c constraints.txt
+
+      - name: Pull latest DB from Hugging Face
+        run: python -m repower.cli pull-hf
+
+      - name: Build and send the weekly summary
+        # The input goes through env: spliced into the script, a crafted value would run as shell.
+        env:
+          DRY_RUN: ${{ inputs.dry_run == true }}
+        run: |
+          if [ "$DRY_RUN" = "true" ]; then
+            python -m repower.cli policy weekly --out "$RUNNER_TEMP/weekly-summary.html" --dry-run
+          else
+            python -m repower.cli policy weekly --out "$RUNNER_TEMP/weekly-summary.html"
+          fi
+
+      - name: Keep the HTML email as an artifact
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: weekly-summary
+          path: ${{ runner.temp }}/weekly-summary.html
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Alert on failure
+        if: failure()
+        run: |
+          url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          echo "::error::Weekly summary email failed — $url"
+          if [ -n "$WEBHOOK_URL" ]; then
+            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Weekly summary email failed — $url\"}" || true
+          fi

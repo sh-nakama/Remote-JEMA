@@ -237,6 +237,14 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     writes: true,
   },
   {
+    file: 'weekly-summary.yml', cron: '0 8 * * 5', jst: '17:00',
+    nameEn: 'Weekly summary email', nameJa: '週次サマリーのメール',
+    whenEn: 'Fridays, 17:00 JST', whenJa: '毎週金曜 17:00 JST',
+    doesEn: 'Emails the committee meetings held in the last 7 days: tracked ones with a summary (and a short brief), summaries that just landed for meetings held in the three weeks before, and every other meeting held, tracked or not.',
+    doesJa: '直近7日間に開催された委員会の会合をメールで送信します。要約済みの追跡中会合（短い要旨付き）、その前3週間に開催され今週要約が完成した会合、追跡の有無を問わずその他の開催会合を含みます。',
+    writes: false,
+  },
+  {
     file: 'backfill.yml', cron: null, jst: null,
     nameEn: 'Historical backfill', nameJa: '過去データの遡及取得',
     whenEn: 'Manual only', whenJa: '手動のみ',

@@ -29,6 +29,17 @@ HF_DATASET_REPO: str = os.getenv("HF_DATASET_REPO", "")
 # ── Webhooks ───────────────────────────────────────────────────────────────
 WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
 
+# ── Email (weekly summary) ─────────────────────────────────────────────────
+# SMTP over implicit TLS. Defaults suit Gmail with an App Password; any provider
+# works by overriding host/port. MAIL_TO is comma-separated and lives only in a
+# secret / .env — never in the repo.
+SMTP_HOST: str = os.getenv("SMTP_HOST") or "smtp.gmail.com"
+SMTP_PORT: int = int(os.getenv("SMTP_PORT") or "465")  # "" (an unset CI var) → default
+SMTP_USER: str = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+MAIL_FROM: str = os.getenv("MAIL_FROM", "")  # defaults to SMTP_USER
+MAIL_TO: str = os.getenv("MAIL_TO", "")
+
 # ── LLM (deferred) ────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
 ANTHROPIC_MONTHLY_CAP_USD: float = float(os.getenv("ANTHROPIC_MONTHLY_CAP_USD", "5.0"))

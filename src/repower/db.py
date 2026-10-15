@@ -283,6 +283,9 @@ class PolicyMeeting(Base):
     tags_source: Mapped[str | None] = mapped_column(String(8))
     detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
+    # When the summary landed (state → done). Not ``updated_at``: detection, retries
+    # and materials backfills bump that, so it cannot say "summarised this week".
+    summarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
     )
@@ -383,6 +386,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_meeting_error(engine)
             _migrate_add_policy_tags(engine)
             _migrate_add_policy_citations(engine)
+            _migrate_add_policy_summarised_at(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -563,6 +567,27 @@ def _migrate_add_policy_citations(engine) -> None:
     if "citations_json" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
         with engine.begin() as conn:
             conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
+
+
+def _migrate_add_policy_summarised_at(engine) -> None:
+    """Add ``summarised_at`` to ``policy_meeting`` (additive).
+
+    Existing ``done`` rows are backfilled from ``updated_at`` — the closest record of
+    when they finished. It can be later than the real moment (detection bumps it), so
+    a meeting summarised long ago may show once as "summary now available" in the
+    first weekly email after this runs; every summary written afterwards is exact.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    if "summarised_at" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
+        with engine.begin() as conn:
+            conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"))
+            conn.execute(sql_text(
+                "UPDATE policy_meeting SET summarised_at = updated_at WHERE state = 'done'"
+            ))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

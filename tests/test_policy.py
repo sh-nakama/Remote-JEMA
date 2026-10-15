@@ -2003,6 +2003,11 @@ def test_blocked_meeting_keeps_its_downloads_for_the_next_attempt(monkeypatch, t
 
     assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "done"
     assert asked == ["https://x/13_01_00.pdf"]  # the minutes were NOT re-fetched
+    # The weekly email's "summaries now available" reads when the summary landed.
+    with store.session_scope(db, commit=False) as s:
+        from repower.db import PolicyMeeting
+        row = s.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
+        assert row.summarised_at is not None
     # Both documents are recorded as ingested, so the status table's N/M is honest.
     mats = {m["pdf_id"]: m for m in store.meeting_materials(key, num, db_path=db)}
     assert {m["status"] for m in mats.values()} == {"ingested"}
