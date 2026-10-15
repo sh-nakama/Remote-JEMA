@@ -810,21 +810,55 @@ fixed.
     `summarize_meeting` trusts that list. `detect` now re-reads the list of every known meeting
     held in the last 7 days (`--refresh-days`, newest 5 per committee, METI via one index fetch)
     and `store.add_late_materials` adds what is new. A `done` meeting that gains a
-    minutes/brief/compilation/handout/agenda paper goes back to `detected` (briefing kept until
-    the re-run replaces it); a late appendix alone does not — it is only ingested when the
-    budget has room. Minutes land weeks after the meeting, **outside the 7-day window**: a
-    meeting summarised without its 議事録 is not repaired by this; re-run it with
-    `policy run --committee K --meeting N`.
+    minutes/brief/compilation/handout/agenda paper gets `resummarise_requested` (see the
+    next bullet); a late appendix alone does not — it is only ingested when the budget has
+    room.
   - *The classifier dropped the papers.* `classify_material` used to default to `other`, which
     `_select_materials` never ingests, so OCCTO's numbered papers (`chousei_122_01.pdf`, linked as
     just their topic) were typed `other` and skipped even when listed. The default is now
     `handout`; `other` is only recognised boilerplate (`is_junk_material`: 名簿, 定義集, 配布資料一覧,
     …非公開について, 議事の取り扱い/公表, the venue map). Keep those patterns specific — a bare
     `非公開` or `取扱い` matches real papers ("非公開情報の…", "…の取扱いについて").
+- **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
+  separate column, not a state change: the meeting stays `done` and its briefing stays on the
+  page while the re-run waits for quota (a minutes upgrade makes a *valid* briefing better, so
+  hiding it for days would be a regression). `pending_meetings` leaves flagged meetings out by
+  default — "pending" is also a count meaning *no briefing yet* — and `run` asks for them with
+  `include_resummarise=True`, ordering them **behind every never-summarised meeting** and not
+  counting them as breadth-first backlog depth. They share the `MAX_RETRIES` cap, so an upgrade
+  that keeps failing cannot burn quota daily. Things that must stay true:
+  - The run restores `done` after a failed/blocked/rate-limited re-run
+    (`_keep_briefing_visible`) because the pipeline's failure paths set `error`/`detected`;
+    a new failure path that skips this takes a good briefing off the page.
+  - Success clears the flag **and** `synth_done`, so the committee synthesis re-reads the new
+    briefing. `clear_generation_request` deliberately does not clear the flag (the pipeline
+    calls it after failed attempts too); only a person un-queuing does (`withdraw_resummarise`).
+  - `request_generation` ("queue to front") on a `done` meeting sets the flag too — a bare
+    `gen_requested` on a done meeting is outside the worklist and would never be read.
+- **Minutes land weeks late; a second, slower tier re-reads for them.** The 7-day window above
+  has closed by then. `detect` also re-reads summarised, tracked meetings with **neither minutes
+  nor a brief** (`store.watch_meeting_nums`): once at any age (lists were frozen at first sight,
+  so an old meeting may already have minutes), then about weekly until 90 days after the meeting
+  (`--watch-days`, 0 = off; 5 per committee per pass, after the recent tier). A committee that
+  never publishes minutes therefore costs ~13 fetches per meeting, once, not a daily poll.
+  `materials_checked_at` stamps every successful listing (found-nothing included) and
+  `policy_material.first_seen_at` records when each document appeared, so publication lag per
+  committee can be measured rather than guessed — rows recorded before the column are NULL.
 - **A document is typed once, when first seen.** `record_meeting` skips a `pdf_id` it already has,
   so changing `classify_material` never changes stored rows. `policy reclassify` reports (and with
   `--apply` writes) what would change, and lists the summarised meetings that would gain a paper;
-  it does not re-queue them — that is a quota decision (`policy run --meeting`).
+  it does not re-queue them — that is a quota decision (`policy run --meeting`). It is also a
+  Commands-pane entry (`reclassify`, backflow step 5, apply **off** by default): the first click is
+  the report, the second is the write. Its log names the summarised meetings that would gain a
+  paper (capped at 60) so there is something to act on.
+- **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
+  `docs/USER-GUIDE.md`, and the "steps 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
+  Only the *presence* of each command in the guide is tested, so inserting a step (as
+  `reclassify` did at 5) silently leaves the table numbering wrong unless you renumber it.
+- **The Status table's "Update queued" chip needs the flagged meeting to be in the list it
+  expands to.** `build_policy_status` therefore pins `resummarise_requested` meetings like errored
+  ones (the 20-per-committee cap would trim an old flagged meeting first), and the chip's count
+  comes from `updateQueued`, computed over every row — not from the capped `meetings` list.
 
 ## Streamlit dashboard
 

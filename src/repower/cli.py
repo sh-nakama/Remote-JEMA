@@ -512,7 +512,12 @@ def policy_detect(
     refresh_days: int = typer.Option(
         7,
         help="Also re-read the document list of known meetings held in the last N days, "
-             "and re-queue summarised ones that gained a paper (0 = off)",
+             "and flag summarised ones that gained a paper for a new briefing (0 = off)",
+    ),
+    watch_days: int = typer.Option(
+        90,
+        help="Also re-check summarised meetings with no minutes yet, about weekly, for N "
+             "days after the meeting (each is also looked at once at any age; 0 = off)",
     ),
 ):
     """Detect new committee meetings (no NotebookLM auth required)."""
@@ -522,6 +527,7 @@ def policy_detect(
     results = detect(
         keys, enumerate_window=window, dry_run=dry_run,
         refresh_window_days=(refresh_days or None),
+        watch_horizon_days=(watch_days or None),
     )
     typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}{'DOCS+':>6}{'REQ':>5}")
     for r in results:
@@ -536,7 +542,7 @@ def policy_detect(
     if refreshed or requeued:
         typer.echo(
             f"── {refreshed} late document(s) found for known meetings; "
-            f"{requeued} summarised meeting(s) re-queued ──"
+            f"{requeued} summarised meeting(s) queued for a new briefing ──"
         )
     _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
     if not dry_run:
@@ -610,6 +616,9 @@ def policy_materials(
     _report_deferred(sum(r["deferred"] for r in results), "meeting")
 
 
+_RECLASSIFY_LIST_CAP = 60
+
+
 @policy_app.command("reclassify")
 def policy_reclassify(
     apply: bool = typer.Option(False, "--apply", help="Write the new kinds (default: report only)"),
@@ -636,6 +645,12 @@ def policy_reclassify(
     })
     typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'}; "
                f"{len(gained)} summarised meeting(s) gain a paper they were never given --")
+    # Name them: the count alone leaves nothing to act on, and re-running is a quota
+    # decision this command does not make. Capped so a first run stays readable.
+    for key, num in gained[:_RECLASSIFY_LIST_CAP]:
+        typer.echo(f"   {key} 第{num}回   (policy run --committee {key} --meeting {num})")
+    if len(gained) > _RECLASSIFY_LIST_CAP:
+        typer.echo(f"   ... and {len(gained) - _RECLASSIFY_LIST_CAP} more")
     if not apply and changes:
         typer.echo("   re-run with --apply to write them")
 
@@ -885,21 +900,28 @@ def policy_notebooks():
 
 @policy_app.command("status")
 def policy_status():
-    """Show per-committee state: enabled flag, priority, latest meeting, pending counts."""
+    """Show per-committee state: enabled flag, priority, latest meeting, pending counts.
+
+    PENDING is meetings with no briefing yet. UPDATE is summarised meetings queued to be
+    written again because a paper (e.g. the minutes) arrived after the summary.
+    """
     from collections import Counter
 
     from repower.policy.store import list_committees, pending_meetings, sync_committees
 
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}  {'FETCH':<22}")
+    upd = Counter(m["committee_key"] for m in pending_meetings(include_resummarise=True)
+                  if m["resummarise"])
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}{'UPDATE':>8}  {'FETCH':<22}")
     for c in list_committees():
         latest = c["latest_meeting"] if c["latest_meeting"] else "-"
         on = "y" if c["enabled"] else "-"
         tag = "*" if c["user_added"] else ""
         typer.echo(
             f"{c['committee_key'] + tag:<28}{c['source']:<6}{on:>3}{c['priority']:>5}"
-            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}  {_fetch_label(c):<22}"
+            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}"
+            f"{upd.get(c['committee_key'], 0):>8}  {_fetch_label(c):<22}"
         )
 
 

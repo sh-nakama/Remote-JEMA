@@ -750,6 +750,8 @@ interface MeetingStatus {
   errorAt: string | null
   retries: number
   requested: boolean
+  /** Summarised, but a paper arrived afterwards: queued to be written again. Still `done`. */
+  resummarise?: boolean
   minutes: boolean
   tori: boolean
   docs: number
@@ -766,6 +768,9 @@ interface StatusPayload {
   meetings: MeetingStatus[]
   /** committee_key → meetings trimmed from its list (quiet backlog only). */
   truncated?: Record<string, number>
+  /** committee_key → summarised meetings queued to be written again (a paper arrived
+   *  after the summary). Counted over every meeting, so it survives `truncated`. */
+  updateQueued?: Record<string, number>
 }
 
 const MSTATE: Record<string, { en: string; ja: string; color: string }> = {
@@ -934,7 +939,7 @@ function MeetingRows({
               style={s(`font-size:11px;color:${isErr ? 'var(--dn)' : warn ? 'var(--warnTx)' : 'var(--mut)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`)}
               title={detail + (m.retries ? pick(` · ${m.retries} retries`, ` · 再試行 ${m.retries}回`) : '')}
             >
-              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : '—')}
+              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : m.resummarise ? pick('update queued — a paper arrived after it was summarised', '更新待ち — 要約後に資料が追加されました') : '—')}
               {m.retries ? ` (${m.retries}×)` : ''}
             </span>
             <span style={s(TD)} title={m.updatedAt || ''}>{ago(m.updatedAt, L === 'ja')}</span>
@@ -1311,7 +1316,7 @@ function CommitteesManage() {
       return 'cards'
     }
   })
-  const [scope, setScope] = useState<'all' | 'tracked' | 'failing'>('all')
+  const [scope, setScope] = useState<'all' | 'tracked' | 'failing' | 'update'>('all')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
 
@@ -1335,8 +1340,10 @@ function CommitteesManage() {
       ? fetch('/api/policy/status').then((r) => r.json())
       : getSnapshot<StatusPayload>('policy/status.json')
     return p
-      .then((d: StatusPayload) => setStatus({ meetings: d.meetings || [], truncated: d.truncated || {} }))
-      .catch(() => setStatus({ meetings: [], truncated: {} }))
+      .then((d: StatusPayload) =>
+        setStatus({ meetings: d.meetings || [], truncated: d.truncated || {}, updateQueued: d.updateQueued || {} }),
+      )
+      .catch(() => setStatus({ meetings: [], truncated: {}, updateQueued: {} }))
       .finally(() => setStatusLoading(false))
   }
 
@@ -1649,13 +1656,25 @@ function CommitteesManage() {
     c.fetchStatus === 'error' || (c.error || 0) > 0 || c.lastUpdateState === 'error'
   const nTracked = rows.filter((c) => c.tracked).length
   const nFailing = rows.filter(failing).length
+  // Committees with a summarised meeting waiting to be written again (a late paper —
+  // usually the minutes). Not an error and not backlog, so neither of the chips above
+  // shows it. Only known once the status payload has loaded.
+  const queuedFor = (c: CatalogCommittee) => status?.updateQueued?.[c.key] || 0
+  const nUpdate = rows.filter((c) => queuedFor(c) > 0).length
+  const nUpdateMeetings = rows.reduce((n, c) => n + queuedFor(c), 0)
 
   // Tracked first, then newest meeting held (chronological, not scrape order;
   // committees with no dated meeting sink to the bottom of their group), then
   // most recently touched by the pipeline, then key for a stable tie-break.
   const tableRows = useMemo(() => {
     const inScope = (c: CatalogCommittee) =>
-      scope === 'all' ? true : scope === 'tracked' ? c.tracked : failing(c)
+      scope === 'all'
+        ? true
+        : scope === 'tracked'
+          ? c.tracked
+          : scope === 'update'
+            ? queuedFor(c) > 0
+            : failing(c)
     return rows
       .filter((c) => match(c) && inScope(c))
       .slice()
@@ -1667,7 +1686,7 @@ function CommitteesManage() {
           a.key.localeCompare(b.key),
       )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, needle, scope])
+  }, [rows, needle, scope, status])
 
   const setViewMode = (v: 'cards' | 'table') => {
     setView(v)
@@ -1796,13 +1815,22 @@ function CommitteesManage() {
         {view === 'table' && (
           <div style={s('flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 20px 6px')}>
             {([
-              ['all', pick(`All ${rows.length}`, `全 ${rows.length}`)],
-              ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`)],
-              ['failing', pick(`Needs attention ${nFailing}`, `要対応 ${nFailing}`)],
-            ] as const).map(([v, label]) => (
+              ['all', pick(`All ${rows.length}`, `全 ${rows.length}`), ''],
+              ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`), ''],
+              ['failing', pick(`Needs attention ${nFailing}`, `要対応 ${nFailing}`), ''],
+              [
+                'update',
+                pick(`Update queued ${nUpdate}`, `更新待ち ${nUpdate}`),
+                pick(
+                  `${nUpdateMeetings} summarised meeting(s) in ${nUpdate} committee(s) will be written again: a paper (usually the minutes) arrived after they were summarised. They still show their current summary meanwhile.`,
+                  `要約後に資料（多くは議事録）が追加された ${nUpdateMeetings} 件（${nUpdate} 委員会）が再要約待ちです。それまでは現在の要約が表示されます。`,
+                ),
+              ],
+            ] as const).map(([v, label, tip]) => (
               <Hoverable
                 as="span"
                 key={v}
+                title={tip || undefined}
                 base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:3px 12px;white-space:nowrap;cursor:pointer;${
                   scope === v
                     ? 'background:var(--acTint);border:1px solid var(--ac);color:var(--acT)'
