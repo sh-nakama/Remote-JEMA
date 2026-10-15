@@ -847,7 +847,18 @@ fixed.
 - **A document is typed once, when first seen.** `record_meeting` skips a `pdf_id` it already has,
   so changing `classify_material` never changes stored rows. `policy reclassify` reports (and with
   `--apply` writes) what would change, and lists the summarised meetings that would gain a paper;
-  it does not re-queue them — that is a quota decision (`policy run --meeting`).
+  it does not re-queue them — that is a quota decision (`policy run --meeting`). It is also a
+  Commands-pane entry (`reclassify`, backflow step 5, apply **off** by default): the first click is
+  the report, the second is the write. Its log names the summarised meetings that would gain a
+  paper (capped at 60) so there is something to act on.
+- **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
+  `docs/USER-GUIDE.md`, and the "steps 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
+  Only the *presence* of each command in the guide is tested, so inserting a step (as
+  `reclassify` did at 5) silently leaves the table numbering wrong unless you renumber it.
+- **The Status table's "Update queued" chip needs the flagged meeting to be in the list it
+  expands to.** `build_policy_status` therefore pins `resummarise_requested` meetings like errored
+  ones (the 20-per-committee cap would trim an old flagged meeting first), and the chip's count
+  comes from `updateQueued`, computed over every row — not from the capped `meetings` list.
 
 ## Streamlit dashboard
 

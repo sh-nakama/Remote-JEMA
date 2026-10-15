@@ -1045,8 +1045,13 @@ def build_policy_status(db_path: str | None = None) -> dict:
     truncated: dict[str, int] = {}
     for key in sorted(by_com):
         group = sorted(by_com[key], key=_stamp, reverse=True)
-        pinned = [m for m in group if m["state"] in _STATUS_ALWAYS_KEEP]
-        rest = [m for m in group if m["state"] not in _STATUS_ALWAYS_KEEP]
+        # A queued update is never trimmed away: the "update queued" filter would
+        # otherwise name a committee whose flagged meeting is not in its list.
+        def _keep(m) -> bool:
+            return m["state"] in _STATUS_ALWAYS_KEEP or bool(m["resummarise_requested"])
+
+        pinned = [m for m in group if _keep(m)]
+        rest = [m for m in group if not _keep(m)]
         room = max(0, STATUS_MEETINGS_PER_COMMITTEE - len(pinned))
         if len(rest) > room:
             truncated[key] = len(rest) - room
@@ -1080,6 +1085,14 @@ def build_policy_status(db_path: str | None = None) -> dict:
         "meetings": meetings,
         "truncated": truncated,
         "perCommittee": STATUS_MEETINGS_PER_COMMITTEE,
+        # committee_key → summarised meetings queued to be written again. Counted over
+        # every row, so it is right even where the meeting list above is capped.
+        "updateQueued": {
+            k: n for k, n in sorted(
+                {key: sum(1 for m in ms if m["resummarise_requested"])
+                 for key, ms in by_com.items()}.items()
+            ) if n
+        },
     }
 
 

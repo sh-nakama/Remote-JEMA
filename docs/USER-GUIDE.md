@@ -498,18 +498,19 @@ only if this copy was pulled recently.
 | 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates), and re-read the document list of meetings held in the last 7 days (`--refresh-days`): papers published after a meeting was first seen are added, and an already-summarised meeting that gains one stays as it is on screen and is queued for a new briefing behind any never-summarised meeting. Summarised meetings still without minutes are re-checked about weekly for 90 days (`--watch-days`). Auth-free. |
 | 3 | `repower policy dates` | Repair meetings that have no meeting date yet. |
 | 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
-| 5 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 7–9. |
-| 6 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
-| 7 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
-| 8 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
-| 9 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |
-| 10 | `repower policy resolve-citations` | Find the document and page behind each digest citation for meetings summarised before pages were tracked. Auth-free and resumable; needs PyMuPDF (`pip install -e ".[pdf]"`). |
-| 11 | `repower policy tag` | Apply rule-based topic tags (a dry run unless `--apply`). Hand-set and NotebookLM tags are never overwritten. |
-| 12 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
-| 13 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
+| 5 | `repower policy reclassify` | Re-type stored documents with the current classifier — numbered papers once filed as `other` (never summarised), rosters and glossaries filed as handouts. No network, no login; report-only unless `--apply`. The report names the summarised meetings that would gain a paper; it queues nothing (re-run them with `policy run --committee <key> --meeting <N>`). |
+| 6 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 8–10. |
+| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
+| 8 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
+| 9 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
+| 10 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |
+| 11 | `repower policy resolve-citations` | Find the document and page behind each digest citation for meetings summarised before pages were tracked. Auth-free and resumable; needs PyMuPDF (`pip install -e ".[pdf]"`). |
+| 12 | `repower policy tag` | Apply rule-based topic tags (a dry run unless `--apply`). Hand-set and NotebookLM tags are never overwritten. |
+| 13 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
+| 14 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
 
-Two flows are offered in the pane: **Backflow — full** (all of the above; steps 5, 6, 8, 9, 11
-and 12 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
+Two flows are offered in the pane: **Backflow — full** (all of the above; steps 6, 7, 9, 10, 12
+and 13 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
 
 #### Inspect — read-only
 
