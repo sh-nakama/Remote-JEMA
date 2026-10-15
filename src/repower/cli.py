@@ -616,6 +616,9 @@ def policy_materials(
     _report_deferred(sum(r["deferred"] for r in results), "meeting")
 
 
+_RECLASSIFY_LIST_CAP = 60
+
+
 @policy_app.command("reclassify")
 def policy_reclassify(
     apply: bool = typer.Option(False, "--apply", help="Write the new kinds (default: report only)"),
@@ -642,6 +645,12 @@ def policy_reclassify(
     })
     typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'}; "
                f"{len(gained)} summarised meeting(s) gain a paper they were never given --")
+    # Name them: the count alone leaves nothing to act on, and re-running is a quota
+    # decision this command does not make. Capped so a first run stays readable.
+    for key, num in gained[:_RECLASSIFY_LIST_CAP]:
+        typer.echo(f"   {key} 第{num}回   (policy run --committee {key} --meeting {num})")
+    if len(gained) > _RECLASSIFY_LIST_CAP:
+        typer.echo(f"   ... and {len(gained) - _RECLASSIFY_LIST_CAP} more")
     if not apply and changes:
         typer.echo("   re-run with --apply to write them")
 
