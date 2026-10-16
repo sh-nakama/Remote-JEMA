@@ -760,6 +760,34 @@ def reclassify_materials(db_path: str | None = None, dry_run: bool = False) -> l
     return changes
 
 
+def queue_resummarise(meetings: list[tuple[str, int]], db_path: str | None = None) -> dict:
+    """Flag summarised meetings for a new briefing (``resummarise_requested``).
+
+    Only ``done`` meetings of **tracked** committees: the flag is what the run reads, and a
+    run on ``--committee all`` skips untracked ones, so flagging them would only light the
+    "update queued" chip for work that never starts. Returns
+    ``{"queued": [...], "untracked": [...]}`` of ``(committee_key, meeting_num)``; anything
+    that is not ``done`` (it changed state since the caller looked) is silently left alone.
+    The retry count is reset: a fresh reason, so earlier failures no longer count against it.
+    """
+    queued: list[tuple[str, int]] = []
+    untracked: list[tuple[str, int]] = []
+    with session_scope(db_path) as session:
+        tracked = {c.committee_key: c.enabled is not False for c in session.query(PolicyCommittee)}
+        for key, num in meetings:
+            m = (session.query(PolicyMeeting)
+                 .filter_by(committee_key=key, meeting_num=num).one_or_none())
+            if m is None or m.state != "done":
+                continue
+            if not tracked.get(key, True):
+                untracked.append((key, num))
+                continue
+            m.resummarise_requested = True
+            m.retry_count = 0
+            queued.append((key, num))
+    return {"queued": queued, "untracked": untracked}
+
+
 def set_committee_checked(key: str, db_path: str | None = None) -> None:
     """Record that a detection pass ran (used for the dashboard / freshness)."""
     with session_scope(db_path) as session:
