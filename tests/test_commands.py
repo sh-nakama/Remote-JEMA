@@ -329,3 +329,12 @@ def test_api_serves_the_registry_guards_and_committees(get):
 def test_api_commands_is_refused_to_a_foreign_page(get):
     status, _ = get("/api/commands", {"Origin": "https://evil.example"})
     assert status == 403
+
+
+def test_every_backflow_command_is_a_step_of_some_flow():
+    """The Commands pane draws its Backflow section from the *selected flow's steps*, not
+    from the command group. A backflow command that no flow names exists in the API and the
+    CLI but is never rendered — which is how `reclassify` once went missing from the pane."""
+    in_a_flow = {step for r in commands.RECIPES for step in r.steps}
+    orphans = [c.id for c in commands.COMMANDS if c.group == commands.BACKFLOW and c.id not in in_a_flow]
+    assert orphans == [], f"backflow commands the pane would never show: {orphans}"

@@ -30,8 +30,10 @@ def test_reclassify_sits_between_materials_and_the_summarising_steps():
     assert cmd.group == commands.BACKFLOW and cmd.level == commands.WRITES
     assert not cmd.needs_notebooklm  # no network, no login
     assert commands.BY_ID["materials"].order < cmd.order < commands.BY_ID["auth"].order
-    # a maintenance step, not part of either guided flow
-    assert all("reclassify" not in r.steps for r in commands.RECIPES)
+    # The pane draws a backflow command only as a step of the selected flow, so it has to
+    # be one — as an optional step of the full flow (it is a maintenance pass, not required).
+    full = next(r for r in commands.RECIPES if r.id == "backflow")
+    assert "reclassify" in full.steps and "reclassify" in full.optional
 
 
 def test_reclassify_form_has_one_unticked_checkbox_and_no_committee_scope():

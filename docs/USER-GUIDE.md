@@ -509,8 +509,8 @@ only if this copy was pulled recently.
 | 13 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
 | 14 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
 
-Two flows are offered in the pane: **Backflow — full** (all of the above; steps 6, 7, 9, 10, 12
-and 13 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
+Two flows are offered in the pane: **Backflow — full** (all of the above; steps 5, 6, 7, 9, 10,
+12 and 13 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
 
 #### Inspect — read-only
 
