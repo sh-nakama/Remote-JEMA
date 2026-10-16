@@ -914,6 +914,12 @@ fixed.
   counts them instead), so meeting-date coverage (`policy dates`, OCCTO JSON, energy-board)
   is what decides what the email can show. A skipped Friday run is not caught up: the
   windows are rolling 7 days, not "since the last email".
+- **`smtplib.SMTPException` is an `OSError`.** In `notify/mail.py` the server-reply branch
+  (`SMTPResponseException`: bad credentials, rejected recipient — never retried) must come
+  *before* the generic `(SMTPException, OSError)` branch (no reply: disconnect, DNS, timeout —
+  retried), or an auth failure is retried three times. The error names the stage
+  (connect/login/send) because a bare `SMTPServerDisconnected` otherwise says nothing about
+  where the connection died; credentials are redacted from the server text.
 
 ## Streamlit dashboard
 
