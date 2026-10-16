@@ -285,6 +285,12 @@ class PolicyMeeting(Base):
     # When this meeting's document list was last re-read from its page (NULL = never
     # since it was first recorded). Drives the sparse re-check for late minutes.
     materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    # When the pipeline last finished writing this meeting's briefing, and — when that
+    # replaced an existing briefing rather than writing the first — when. ``updated_at``
+    # cannot say this: other writes touch it. They are what the Queue view's "recently
+    # drained" list reads, so an operator can see what the daily run actually worked through.
+    summarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    resummarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # Topic tags for *this* meeting (not inherited from the committee) — same encoding
     # as ``PolicyCommittee.tags``; source is rule | llm | manual.
     tags: Mapped[str | None] = mapped_column(Text)
@@ -595,6 +601,8 @@ def _migrate_add_policy_minutes_watch(engine) -> None:
              "ALTER TABLE policy_meeting ADD COLUMN resummarise_requested BOOLEAN DEFAULT 0"),
             ("materials_checked_at",
              "ALTER TABLE policy_meeting ADD COLUMN materials_checked_at DATETIME"),
+            ("summarised_at", "ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"),
+            ("resummarised_at", "ALTER TABLE policy_meeting ADD COLUMN resummarised_at DATETIME"),
         ],
         "policy_material": [
             ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),

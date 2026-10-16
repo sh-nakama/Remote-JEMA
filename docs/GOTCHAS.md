@@ -851,6 +851,20 @@ fixed.
   Commands-pane entry (`reclassify`, backflow step 5, apply **off** by default): the first click is
   the report, the second is the write. Its log names the summarised meetings that would gain a
   paper (capped at 60) so there is something to act on.
+- **The Queue view is `pending_meetings`, not a second opinion.** `store.queue_snapshot` calls the
+  very function `policy run --committee all` uses (tracked, breadth-first, upgrades included), so the
+  order cannot drift from the run; a test pins that. Things that must stay true:
+  - `DAILY_RUN_CAP` (8) mirrors the `policy.yml` default; `test_daily_run_cap_matches_the_workflow_default`
+    fails if either changes alone. The real limiter is usually the NotebookLM daily quota, so the view
+    says "first 8", never "will run".
+  - `items` is the first 100 by rank **plus every update/retry/moved-to-front meeting wherever it
+    ranks**. A plain cap hid the one `Update` meeting — it ranks *last*, behind the whole new backlog —
+    so the chip said 1 and the filtered list said nothing (found in the running app, not by a test).
+    Ranks are therefore non-contiguous; `withGaps` renders the "… N more …" marker.
+  - "Drained" reads `summarised_at` / `resummarised_at`, stamped only on a *successful* summarise
+    (`updated_at` is touched by other writes). Rows finished before the columns existed fall back to
+    "done, touched recently, has a generation time" and carry `kind: null` (shown `SUMMARISED`).
+  - A meeting is an *update* (not new) when it already had a briefing when the run started.
 - **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
   `docs/USER-GUIDE.md`, and the "steps 5, 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
   Only the *presence* of each command in the guide is tested, so inserting a step (as

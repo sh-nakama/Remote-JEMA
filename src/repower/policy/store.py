@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # transient failures (network/rate-limit) are retried by the next `policy run`.
 MAX_RETRIES = 3
 
+# Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
+# .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
+# account's daily NotebookLM quota, which stops a run sooner.
+DAILY_RUN_CAP = 8
+
 # Documents to ingest per meeting, in priority order (code-enforced, not agent
 # judgment), keeping a meeting to a handful of sources well under any tier cap.
 INGEST_KINDS = ("minutes", "brief", "compilation", "handout", "agenda", "appendix")
@@ -970,6 +975,107 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
             }
             for m in rows
         ]
+
+
+def queue_snapshot(
+    db_path: str | None = None,
+    *,
+    cap: int = DAILY_RUN_CAP,
+    now: datetime | None = None,
+    recent_days: int = 7,
+    max_items: int = 100,
+    max_recent: int = 40,
+) -> dict:
+    """What the daily run will work through next, and what it has just worked through.
+
+    ``items`` is :func:`pending_meetings` exactly as ``policy run --committee all`` calls
+    it (tracked committees, breadth-first, upgrades included) — the same function, so the
+    view cannot drift from the run — numbered from 1. The first *cap* are what one daily
+    run takes. Each carries a ``kind``: ``update`` (summarised; a late paper means it is
+    being written again), ``retry`` (errored, under the retry cap) or ``new`` (no briefing
+    yet), plus ``requested`` when someone moved it to the front.
+
+    It is the *expected* order: a run also skips a committee whose host is cooling down and
+    stops early on a rate limit. ``totals`` count the whole worklist. ``items`` holds the
+    first *max_items* by rank **plus every update, retry and moved-to-front meeting whatever
+    its rank** — a long backlog of ordinary new meetings is a count, not a list, but the rare
+    ones an operator filters for must not be cut off behind it (an update ranks last, so a
+    plain cap would hide exactly the meeting the "Update" filter is for). Ranks are kept, so
+    they can be non-contiguous; ``truncated`` is how many new meetings are left out.
+
+    ``recent`` is what left the queue in the last *recent_days*, newest first, with
+    ``kind`` ``update`` or ``new``. Rows summarised before ``summarised_at`` existed fall
+    back to a done meeting touched recently with a recorded generation time, and carry
+    ``kind: None`` — "summarised", but not known to be first or repeat.
+    """
+    now = now or _now()
+    work = pending_meetings(db_path=db_path, only_enabled=True, breadth_first=True,
+                            include_resummarise=True)
+    with session_scope(db_path, commit=False) as session:
+        def _kind(w: dict) -> str:
+            return "update" if w["state"] == "done" else "retry" if w["state"] == "error" else "new"
+
+        ranked = list(enumerate(work, start=1))
+        listed = [(r, w) for r, w in ranked if r <= max_items or _kind(w) != "new" or w["gen_requested"]]
+        ids = [w["id"] for _, w in listed]
+        extra = {
+            m.id: m for m in session.query(PolicyMeeting).filter(PolicyMeeting.id.in_(ids)).all()
+        } if ids else {}
+        items = []
+        for rank, w in listed:
+            m = extra[w["id"]]
+            kind = _kind(w)
+            items.append({
+                "rank": rank, "com": w["committee_key"], "num": w["meeting_num"],
+                "date": str(m.meeting_date)[:10] if m.meeting_date else None,
+                "kind": kind, "requested": bool(w["gen_requested"]),
+                "state": w["state"], "retries": m.retry_count or 0,
+            })
+
+        cutoff = now - timedelta(days=recent_days)
+        rows = (
+            session.query(PolicyMeeting)
+            .filter(PolicyMeeting.state == "done")
+            .filter(or_(
+                PolicyMeeting.summarised_at >= cutoff,
+                (PolicyMeeting.summarised_at.is_(None))
+                & (PolicyMeeting.updated_at >= cutoff)
+                & (PolicyMeeting.gen_seconds.isnot(None)),
+            ))
+            .all()
+        )
+
+        def _when(m: PolicyMeeting) -> datetime:
+            return m.summarised_at or m.updated_at or datetime.min  # both set for any row selected above
+
+        rows.sort(key=_when, reverse=True)
+        recent = [{
+            "com": m.committee_key, "num": m.meeting_num, "at": str(_when(m)),
+            "kind": ("update" if m.resummarised_at else "new") if m.summarised_at else None,
+        } for m in rows[:max_recent]]
+
+    totals = {"new": 0, "update": 0, "retry": 0, "requested": 0}
+    by_com: dict[str, dict[str, int]] = {}
+    for w in work:
+        kind = "update" if w["state"] == "done" else "retry" if w["state"] == "error" else "new"
+        totals[kind] += 1
+        totals["requested"] += int(bool(w["gen_requested"]))
+        c = by_com.setdefault(w["committee_key"], {"new": 0, "update": 0, "retry": 0, "requested": 0})
+        c[kind] += 1
+        c["requested"] += int(bool(w["gen_requested"]))
+    return {
+        "cap": cap,
+        "total": len(work),
+        "totals": totals,
+        # Over the whole worklist, not the capped `items`: "which committees are queued"
+        # must not depend on how far down the list happens to be cut. Biggest first.
+        "byCom": dict(sorted(
+            by_com.items(), key=lambda kv: (-sum(kv[1][k] for k in ("new", "update", "retry")), kv[0]))),
+        "items": items,
+        "truncated": max(0, len(work) - len(items)),
+        "recent": recent,
+        "recentDays": recent_days,
+    }
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
