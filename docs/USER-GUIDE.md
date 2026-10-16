@@ -182,7 +182,7 @@ switched from the toggle in its header:
   but a paper — usually the minutes — arrived afterwards, so it is written again),
   **Retry** (an earlier attempt failed) and **Moved to front** (set with the ↑ button
   or `policy queue`). A chip per committee narrows the list to it. A dashed line marks
-  where one daily run stops by count (`--max-per-run`, 8): rows below it carry a rough
+  where one daily run stops by count (`--max-per-run`, 8) — an **Update** is placed after every committee's newest pending meeting and ahead of deeper backlog, so it is normally inside that first 8: rows below the line carry a rough
   `~day N`. That is a floor — NotebookLM's daily quota usually stops a run sooner, and
   a committee whose source site is blocked that day is skipped. **Drained** lists the
   meetings summarised in the last 7 days, marked `NEW` or `UPDATE` (or `SUMMARISED`

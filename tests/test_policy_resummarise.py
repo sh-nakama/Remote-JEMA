@@ -102,9 +102,66 @@ def test_resummarise_does_not_deepen_the_breadth_first_backlog(policy_db):
     store.record_meeting("santeii", 3, [_mat(3, "01", "handout")], db_path=db)
     store.record_meeting("santeii", 2, [_mat(2, "01", "handout")], db_path=db)
 
-    # newest of each committee first, then santeii's second-newest, then the upgrade
+    # Every committee's newest pending meeting (the first pass), then the update, then deeper
+    # backlog. Were the update counted as depth, KEY 4 would be pushed to second place.
     assert _worklist(db, breadth_first=True) == [
-        (KEY, 4), ("santeii", 3), ("santeii", 2), (KEY, 9)]
+        (KEY, 4), ("santeii", 3), (KEY, 9), ("santeii", 2)]
+
+
+def test_an_update_follows_each_committees_newest_but_precedes_deeper_backlog(policy_db):
+    """The daily run's rule, with numbers: committees A and B each have three pending
+    meetings; an update on C. First pass A-newest, B-newest; then the update; only then the
+    second-newest of anyone — so it does not wait behind the whole backlog."""
+    db = policy_db
+    for key, nums in (("santeii", (30, 29, 28)), ("saisei_kano", (20, 19, 18))):
+        for n in nums:
+            store.record_meeting(key, n, [_mat(n, "01", "handout")], db_path=db)
+    _summarised(db, "doji_shijo", 5, [_mat(5, "01", "handout")])
+    _update(db, "doji_shijo", 5, resummarise_requested=True)
+
+    order = _worklist(db, breadth_first=True)
+
+    assert set(order[:2]) == {("saisei_kano", 20), ("santeii", 30)}   # the two newest, in priority order
+    assert order[2] == ("doji_shijo", 5)                              # then the update
+    assert order.index(("doji_shijo", 5)) < order.index(("santeii", 29))
+    assert order.index(("doji_shijo", 5)) < order.index(("saisei_kano", 19))
+
+
+def test_updates_share_their_slot_in_priority_then_newest_order(policy_db):
+    db = policy_db
+    store.record_meeting("santeii", 30, [_mat(30, "01", "handout")], db_path=db)
+    store.record_meeting("santeii", 29, [_mat(29, "01", "handout")], db_path=db)
+    for key, num in (("saisei_kano", 7), ("saisei_kano", 8), ("doji_shijo", 5)):
+        _summarised(db, key, num, [_mat(num, "01", "handout")])
+        _update(db, key, num, resummarise_requested=True)
+
+    updates = [x for x in _worklist(db, breadth_first=True) if x[0] != "santeii"]
+    # newest first within a committee; committees in priority order
+    assert [n for k, n in updates if k == "saisei_kano"] == [8, 7]
+    # and all three sit between santeii's newest (30) and its second-newest (29)
+    order = _worklist(db, breadth_first=True)
+    lo, hi = order.index(("santeii", 30)), order.index(("santeii", 29))
+    assert all(lo < order.index(u) < hi for u in updates)
+
+
+def test_a_depth_first_run_still_puts_updates_after_every_pending_meeting(policy_db):
+    """A single-committee backfill drains history; an update is not part of it. (Only the
+    breadth-first daily run slots updates in early.)"""
+    db = policy_db
+    _summarised(db, KEY, 9, [_mat(9, "01", "handout")])
+    _update(db, KEY, 9, resummarise_requested=True)
+    for n in (4, 3, 2):
+        store.record_meeting(KEY, n, [_mat(n, "01", "handout")], db_path=db)
+    assert _worklist(db) == [(KEY, 4), (KEY, 3), (KEY, 2), (KEY, 9)]
+
+
+def test_a_meeting_moved_to_the_front_still_outranks_an_update(policy_db):
+    db = policy_db
+    _summarised(db, KEY, 9, [_mat(9, "01", "handout")])
+    _update(db, KEY, 9, resummarise_requested=True)
+    store.record_meeting("santeii", 3, [_mat(3, "01", "handout")], db_path=db)
+    store.request_generation("santeii", 3, db_path=db)
+    assert _worklist(db, breadth_first=True)[0] == ("santeii", 3)
 
 
 def test_pending_counts_do_not_include_upgrades_unless_asked(policy_db):

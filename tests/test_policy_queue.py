@@ -96,12 +96,27 @@ def test_queue_leaves_out_untracked_committees_and_retry_capped_meetings(policy_
     assert _order(q) == [("santeii", 5)] and q["total"] == 1
 
 
-def test_an_update_waits_behind_never_summarised_meetings(policy_db):
-    """The ordering rule, made visible: a flagged meeting is last, whatever its date."""
+def test_an_update_follows_the_newest_pending_meetings_but_not_the_whole_backlog(policy_db):
+    """The ordering rule, made visible: with a deep backlog the update ranks right after the
+    committees' newest pending meetings. It once ranked 291 of 291 (about 37 daily runs away)."""
+    db = policy_db
+    for n in range(1, 41):
+        _meeting(db, "santeii", n)                    # a deep backlog in one committee
+    _meeting(db, "saisei_kano", 5)
+    _done(db, "doji_shijo", 9, resummarise_requested=True)
+
+    q = _snap(db)
+    update = next(i for i in q["items"] if i["kind"] == "update")
+
+    assert update["rank"] == 3                        # santeii's newest, saisei_kano's newest, then it
+    assert update["rank"] <= q["cap"]                 # so the next daily run takes it
+    assert q["total"] == 42
+
+
+def test_an_update_alone_is_still_queued(policy_db):
     db = policy_db
     _done(db, "santeii", 9, resummarise_requested=True)
-    _meeting(db, "santeii", 4)
-    assert _order(_snap(db)) == [("santeii", 4), ("santeii", 9)]
+    assert _order(_snap(db)) == [("santeii", 9)]
 
 
 def test_items_are_capped_but_totals_and_by_committee_count_the_whole_queue(policy_db):
@@ -120,20 +135,23 @@ def test_items_are_capped_but_totals_and_by_committee_count_the_whole_queue(poli
 
 
 def test_updates_retries_and_moved_to_front_are_listed_whatever_their_rank(policy_db):
-    """An update ranks last, so a plain cap would hide exactly the meeting the "Update" filter
-    is for: the chip said 1, the filtered list said nothing."""
+    """An update can rank past a plain list cap (here: after each committee's newest pending
+    meeting, which is more than the cap), and the "Update" filter would then find nothing — the
+    chip said 1, the filtered list said nothing, when it ranked 291."""
     db = policy_db
     for n in range(1, 21):
         _meeting(db, "santeii", n)                                           # ordinary backlog
-    _done(db, "saisei_kano", 7, resummarise_requested=True)                  # ranks last
+    _meeting(db, "saisei_kano", 3)
     _meeting(db, "doji_shijo", 2, state="error", retry_count=1)              # a retry
-    q = _snap(db, max_items=5)
+    _done(db, "youryou_kentoukai", 7, resummarise_requested=True)            # the update
+    q = _snap(db, max_items=2)
 
     by_kind = {i["kind"]: i for i in q["items"] if i["kind"] != "new"}
     assert set(by_kind) == {"update", "retry"}
-    assert by_kind["update"]["rank"] == q["total"]                           # genuinely last…
-    assert by_kind["update"]["rank"] > 5                                     # …and beyond the cap
-    assert sum(1 for i in q["items"] if i["kind"] == "new") <= 5
+    assert by_kind["update"]["rank"] == 4        # after the three committees' newest, not last…
+    assert by_kind["update"]["rank"] < q["total"]
+    assert by_kind["update"]["rank"] > 2         # …but beyond the list cap, and still listed
+    assert sum(1 for i in q["items"] if i["kind"] == "new") <= 2
     # truncated counts only the ordinary new meetings left out
     assert q["truncated"] == q["total"] - len(q["items"])
     assert [i["rank"] for i in q["items"]] == sorted(i["rank"] for i in q["items"])
