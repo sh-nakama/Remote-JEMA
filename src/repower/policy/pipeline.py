@@ -296,6 +296,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
 
     work = _scratch() / committee.key / str(meeting_num)
     started = time.monotonic()
+    had_briefing = _has_briefing(meeting_row, db_path)  # a re-run replaces it: an *update*, not a first summary
     notebook_id: str | None = None
     # Documents already fetched are kept when a meeting is left pending, so the next
     # attempt only asks for what is missing (see the `finally` below).
@@ -484,6 +485,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         if quality_flag is None and len(briefing) < 400:
             quality_flag = "short_output"
 
+        finished = datetime.now(UTC)
         update_meeting(
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
             digest_en_json=digest_json, citations_json=citations_json, quality_flag=quality_flag,
@@ -495,6 +497,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             # A re-run replaces the briefing: it answers a queued upgrade, and the copy
             # folded into the committee synthesis is now stale (so synthesis re-reads it).
             resummarise_requested=False, synth_done=False,
+            summarised_at=finished, **({"resummarised_at": finished} if had_briefing else {}),
         )
         regenerate_running_doc(committee.key, db_path=db_path)
         if llm_tags is not None:
@@ -861,6 +864,18 @@ def _meeting_id(key: str, meeting_num: int, db_path: str | None) -> int | None:
     try:
         row = session.query(PolicyMeeting.id).filter_by(committee_key=key, meeting_num=meeting_num).one_or_none()
         return row[0] if row else None
+    finally:
+        session.close()
+
+
+def _has_briefing(meeting_id: int, db_path: str | None) -> bool:
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        row = session.get(PolicyMeeting, meeting_id)
+        return bool(row is not None and row.briefing_md)
     finally:
         session.close()
 

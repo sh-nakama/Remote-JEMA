@@ -163,7 +163,7 @@ This is a personal filter only.
 committee "gear"). Toggling *Track* here changes what the backend summarises; the
 screen behind refetches so the change is reflected immediately.
 
-**See what the pipeline actually did (Status view).** Manage has two views,
+**See what the pipeline actually did (Status view).** Manage has three views,
 switched from the toggle in its header:
 
 - **Cards** — the three-org grid. This is where you *manage the tracked set*.
@@ -173,7 +173,21 @@ switched from the toggle in its header:
   summarised / pending / errored, and whether the committee's pages could be
   fetched at all. Click any row to expand it into that committee's individual
   meetings — each with its raw lifecycle state, **the message it failed with**, its
-  document count and when it was last written.
+  document count and when it was last written. A meeting that is waiting to be
+  summarised carries a chip with its place in the queue (`NEW next run #5`,
+  `UPDATE #291`).
+- **Queue** — what the daily run will work through, **in the order it takes it**, and
+  what it has just worked through. Filter chips count the whole queue by kind: **New**
+  (never summarised), **Update** (already summarised and still showing that summary,
+  but a paper — usually the minutes — arrived afterwards, so it is written again),
+  **Retry** (an earlier attempt failed) and **Moved to front** (set with the ↑ button
+  or `policy queue`). A chip per committee narrows the list to it. A dashed line marks
+  where one daily run stops by count (`--max-per-run`, 8): rows below it carry a rough
+  `~day N`. That is a floor — NotebookLM's daily quota usually stops a run sooner, and
+  a committee whose source site is blocked that day is skipped. **Drained** lists the
+  meetings summarised in the last 7 days, marked `NEW` or `UPDATE` (or `SUMMARISED`
+  for those finished before that was recorded). Updates, retries and moved-to-front
+  meetings are always listed; a long run of ordinary new meetings is shown as a count.
 
 Two independent kinds of failure show up there, and it's worth keeping them apart:
 the **Fetch** column is whether we could *reach* the committee's pages (`blocked_403`,

@@ -996,6 +996,8 @@ def build_policy_status(db_path: str | None = None) -> dict:
     ``truncated`` so the UI can say a committee's list was capped instead of
     implying the backlog it shows is all of it.
     """
+    from repower.policy.store import queue_snapshot  # local: keeps the export's import graph unchanged
+
     init_db(db_path)
     eng = get_engine(db_path)
     with eng.connect() as con:
@@ -1093,6 +1095,8 @@ def build_policy_status(db_path: str | None = None) -> dict:
                  for key, ms in by_com.items()}.items()
             ) if n
         },
+        # What the daily run takes next, in order, and what it has just worked through.
+        "queue": queue_snapshot(db_path),
     }
 
 
