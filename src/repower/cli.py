@@ -617,22 +617,36 @@ def policy_materials(
 
 
 _RECLASSIFY_LIST_CAP = 60
+_RECLASSIFY_TOP_COMMITTEES = 8
 
 
 @policy_app.command("reclassify")
 def policy_reclassify(
     apply: bool = typer.Option(False, "--apply", help="Write the new kinds (default: report only)"),
+    queue: bool = typer.Option(
+        False, "--queue",
+        help="With --apply: also queue the summarised meetings that gain a paper for a new "
+             "briefing (tracked committees; they run behind new meetings). Acts only on the "
+             "documents this run re-types, so use it on the same run as --apply.",
+    ),
 ):
     """Re-type stored documents with the current classifier (no network, no auth).
 
     Documents are typed once, when first seen, so rows recorded by an earlier
     classifier keep a stale kind — notably numbered papers stored as ``other``
     (never ingested) and rosters stored as ``handout``. Report-only unless --apply.
-    A summarised meeting that gains an ingestable paper is listed so it can be
-    re-run with ``policy run --committee K --meeting N``; none is re-queued here.
+    A summarised meeting that gains an ingestable paper is listed, per committee and by
+    meeting, so it can be re-run with ``policy run --committee K --meeting N``. Nothing is
+    queued unless --queue is given (which needs --apply): that flags those meetings for a
+    new briefing, drained behind never-summarised meetings by the normal run.
     """
-    from repower.policy.store import INGEST_KINDS, reclassify_materials
+    from collections import Counter
 
+    from repower.policy.store import INGEST_KINDS, queue_resummarise, reclassify_materials
+
+    if queue and not apply:
+        raise typer.BadParameter("--queue needs --apply: queueing changes data, so it is not "
+                                 "part of the report-only run", param_hint="--queue")
     changes = reclassify_materials(dry_run=not apply)
     moves: dict[tuple[str | None, str], int] = {}
     for c in changes:
@@ -643,16 +657,37 @@ def policy_reclassify(
         (c["committee_key"], c["meeting_num"]) for c in changes
         if c["state"] == "done" and c["new"] in INGEST_KINDS and c["old"] not in INGEST_KINDS
     })
-    typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'}; "
+    by_com = Counter(c["committee_key"] for c in changes)
+    typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'} "
+               f"across {len(by_com)} committee(s); "
                f"{len(gained)} summarised meeting(s) gain a paper they were never given --")
-    # Name them: the count alone leaves nothing to act on, and re-running is a quota
-    # decision this command does not make. Capped so a first run stays readable.
+    # Per committee, because the meeting list below is capped and alphabetical: one big
+    # committee fills it, and a run that touched 66 committees read as touching one.
+    if by_com:
+        top = by_com.most_common(_RECLASSIFY_TOP_COMMITTEES)
+        more = len(by_com) - len(top)
+        typer.echo("   documents by committee: " + ", ".join(f"{k} {n}" for k, n in top)
+                   + (f" (+{more} more committee(s))" if more > 0 else ""))
+    gain_by = Counter(k for k, _ in gained)
+    if gain_by:
+        typer.echo("   meetings gaining a paper: "
+                   + ", ".join(f"{k} {n}" for k, n in sorted(gain_by.items(), key=lambda kv: (-kv[1], kv[0]))))
+    # Name them: a count alone leaves nothing to act on. Capped so a first run stays readable.
     for key, num in gained[:_RECLASSIFY_LIST_CAP]:
         typer.echo(f"   {key} 第{num}回   (policy run --committee {key} --meeting {num})")
     if len(gained) > _RECLASSIFY_LIST_CAP:
         typer.echo(f"   ... and {len(gained) - _RECLASSIFY_LIST_CAP} more")
-    if not apply and changes:
-        typer.echo("   re-run with --apply to write them")
+    if queue:
+        res = queue_resummarise(gained)
+        typer.echo(f"-- queued {len(res['queued'])} meeting(s) for a new briefing"
+                   + (f"; skipped {len(res['untracked'])} in untracked committee(s)" if res["untracked"] else "")
+                   + " --")
+    elif apply and gained:
+        # After an apply the old kinds are gone, so a later run has nothing left to diff.
+        typer.echo("   not queued. --queue only acts on the run that re-types the documents; from "
+                   "here queue one meeting with `policy queue --committee K --meeting N`.")
+    elif not apply and changes:
+        typer.echo("   re-run with --apply to write them (add --queue to also queue the meetings above)")
 
 
 @policy_app.command("run")

@@ -136,13 +136,18 @@ COMMANDS: tuple[Command, ...] = (
          "資料として扱われていた名簿・定義集が対象です。"),
         ("No network, no login. Run it with Apply off first: the log lists how many documents would change and "
          "which summarised meetings would gain a paper they were never given. Then run it with Apply on. It "
-         "queues nothing — re-run those meetings with Run now (the ▶ in Manage → Status), and push "
-         "afterwards to sync.",
+         "queues nothing unless you tick Queue on that same Apply run — then those meetings are flagged for a "
+         "new briefing and drained behind new meetings (Queue acts only on the run that re-types the "
+         "documents). Push afterwards to sync.",
          "ネットワーク・ログイン不要。まず「適用」を外して実行すると、変更される資料数と、これまで使われていなかった資料が"
-         "加わる要約済みの会合が表示されます。確認後に「適用」を付けて実行してください。要約キューには何も追加しません"
-         "（該当の会合は管理→状態の▶で再要約）。反映にはpushが必要です。"),
+         "加わる要約済みの会合が表示されます。確認後に「適用」を付けて実行してください。同じ適用の実行で「キュー」も付けた場合のみ、"
+         "該当の会合が再要約待ちになり、未要約の会合の後に順次処理されます（キューは資料の種別を変更したその実行にのみ作用します）。"
+         "反映にはpushが必要です。"),
         (Param("apply", "bool", "--apply", ("Apply (otherwise report only)", "適用（外すとレポートのみ）"),
-               default=False),),
+               default=False),
+         Param("queue", "bool", "--queue",
+               ("Also queue the meetings that gain a paper (needs Apply)", "該当の会合を再要約キューへ（適用が必要）"),
+               default=False)),
     ),
     Command(
         "auth", ("policy", "auth"), BACKFLOW, SAFE, 6,
@@ -425,6 +430,9 @@ def build_argv(cmd_id: str, params: dict, known_committees: Callable[[], set[str
         key = _committee(committee, params.get("committee"), known_committees, required=True)
         number = _int(replace(spec, required=True), params.get("meeting"))
         return [*cmd.argv, "--committee", str(key), "--meeting", str(number)]
+
+    if cmd.id == "reclassify" and params.get("queue") and not params.get("apply"):
+        raise ValueError("Queue needs Apply: queueing changes data, so it cannot ride a report-only run")
 
     argv = [*cmd.argv]
     for p in cmd.params:
