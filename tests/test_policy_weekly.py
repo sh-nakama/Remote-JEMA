@@ -300,6 +300,63 @@ def test_send_failure_raises_without_leaking_the_password(monkeypatch):
     assert "hunter2" not in str(e.value) and "535" in str(e.value)
 
 
+def test_dropped_connection_is_retried_then_names_the_stage(monkeypatch):
+    _configure(monkeypatch, SMTP_PASSWORD="hunter2")
+    monkeypatch.setattr(mail.time, "sleep", lambda s: None)
+    calls = []
+
+    def dropped(*a, **k):
+        calls.append(1)
+        raise mail.smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", dropped)
+    with pytest.raises(mail.EmailError) as e:
+        mail.send_email("s", "t", "h")
+    assert len(calls) == mail.ATTEMPTS
+    assert "at connect" in str(e.value) and "Connection unexpectedly closed" in str(e.value)
+
+
+def test_a_transient_disconnect_then_success_sends(monkeypatch):
+    _configure(monkeypatch)
+    monkeypatch.setattr(mail.time, "sleep", lambda s: None)
+    state = {"n": 0, "sent": False}
+
+    class Flaky:
+        def __init__(self, *a, **k):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise mail.smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def login(self, *a):
+            pass
+
+        def send_message(self, msg):
+            state["sent"] = True
+
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", Flaky)
+    assert mail.send_email("s", "t", "h") is True and state["sent"] and state["n"] == 2
+
+
+def test_a_smtp_reply_is_not_retried_and_is_redacted(monkeypatch):
+    _configure(monkeypatch, SMTP_PASSWORD="hunter2")
+    calls = []
+
+    def refused(*a, **k):
+        calls.append(1)
+        raise mail.smtplib.SMTPAuthenticationError(535, b"bad credentials hunter2 for bot@example.test")
+
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", refused)
+    with pytest.raises(mail.EmailError) as e:
+        mail.send_email("s", "t", "h")
+    assert len(calls) == 1 and "hunter2" not in str(e.value) and "bot@example.test" not in str(e.value)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 def test_cli_dry_run_prints_and_writes_html_without_sending(monkeypatch, tmp_path):
     monkeypatch.setattr(weekly, "build_report", lambda **k: _report())
