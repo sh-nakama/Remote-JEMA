@@ -178,7 +178,7 @@ def test_replace_upcoming_keeps_past_rows_and_prunes_old_ones(tmp_path):
     assert len(store.calendar_entries(day - timedelta(days=30), day, db_path=db)) == 1
 
 
-def test_migration_adds_summarised_at_and_backfills_done_rows(tmp_path):
+def test_migration_adds_summarised_at_without_backfilling(tmp_path):
     from repower import db as db_mod
 
     db = str(tmp_path / "old.db")
@@ -196,7 +196,8 @@ def test_migration_adds_summarised_at_and_backfills_done_rows(tmp_path):
     con = sqlite3.connect(db)
     got = dict(con.execute("SELECT meeting_num, summarised_at IS NOT NULL FROM policy_meeting"))
     con.close()
-    assert got == {1: 1, 2: 0}
+    # The column is restored; old rows stay NULL rather than guessing from updated_at.
+    assert got == {1: 0, 2: 0}
 
 
 # ── Rendering ────────────────────────────────────────────────────────────────

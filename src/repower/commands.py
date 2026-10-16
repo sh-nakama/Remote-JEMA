@@ -128,7 +128,29 @@ COMMANDS: tuple[Command, ...] = (
                default=0, lo=0, hi=500)),
     ),
     Command(
-        "auth", ("policy", "auth"), BACKFLOW, SAFE, 5,
+        "reclassify", ("policy", "reclassify"), BACKFLOW, WRITES, 5,
+        ("Re-type stored documents", "保存済み資料の種別を再判定"),
+        ("Re-runs the document classifier over every stored document: numbered papers once filed as "
+         "“other” (never summarised) and rosters/glossaries filed as handouts.",
+         "保存済みの全資料を現在の判定ルールで再分類します。以前「その他」とされ要約に使われなかった番号付き資料や、"
+         "資料として扱われていた名簿・定義集が対象です。"),
+        ("No network, no login. Run it with Apply off first: the log lists how many documents would change and "
+         "which summarised meetings would gain a paper they were never given. Then run it with Apply on. It "
+         "queues nothing unless you tick Queue on that same Apply run — then those meetings are flagged for a "
+         "new briefing and drained behind new meetings (Queue acts only on the run that re-types the "
+         "documents). Push afterwards to sync.",
+         "ネットワーク・ログイン不要。まず「適用」を外して実行すると、変更される資料数と、これまで使われていなかった資料が"
+         "加わる要約済みの会合が表示されます。確認後に「適用」を付けて実行してください。同じ適用の実行で「キュー」も付けた場合のみ、"
+         "該当の会合が再要約待ちになり、未要約の会合の後に順次処理されます（キューは資料の種別を変更したその実行にのみ作用します）。"
+         "反映にはpushが必要です。"),
+        (Param("apply", "bool", "--apply", ("Apply (otherwise report only)", "適用（外すとレポートのみ）"),
+               default=False),
+         Param("queue", "bool", "--queue",
+               ("Also queue the meetings that gain a paper (needs Apply)", "該当の会合を再要約キューへ（適用が必要）"),
+               default=False)),
+    ),
+    Command(
+        "auth", ("policy", "auth"), BACKFLOW, SAFE, 6,
         ("Check NotebookLM login", "NotebookLMのログイン確認"),
         ("Checks that the NotebookLM session is valid (a live test, not just a file check).",
          "NotebookLMのセッションが有効か確認します（ファイルの有無ではなく実際に通信して確認）。"),
@@ -137,7 +159,7 @@ COMMANDS: tuple[Command, ...] = (
         needs_notebooklm=True, timeout_s=180,
     ),
     Command(
-        "login", ("policy", "login"), BACKFLOW, SAFE, 6,
+        "login", ("policy", "login"), BACKFLOW, SAFE, 7,
         ("Sign in to NotebookLM", "NotebookLMにログイン"),
         ("Opens a browser window on this machine for Google sign-in and saves the session.",
          "この端末でブラウザを開き、Googleにログインしてセッションを保存します。"),
@@ -152,7 +174,7 @@ COMMANDS: tuple[Command, ...] = (
         needs_notebooklm=True, timeout_s=420,
     ),
     Command(
-        "backfill", ("policy", "backfill"), BACKFLOW, WRITES, 7,
+        "backfill", ("policy", "backfill"), BACKFLOW, WRITES, 8,
         ("Backfill older meetings", "過去の会合を遡及要約"),
         ("Summarises one committee's older meetings, newest first, from a meeting number onwards.",
          "1つの委員会の過去の会合を、指定の回以降について新しい順に要約します。"),
@@ -165,7 +187,7 @@ COMMANDS: tuple[Command, ...] = (
         needs_notebooklm=True, timeout_s=_NBLM_TIMEOUT,
     ),
     Command(
-        "resume", ("policy", "resume"), BACKFLOW, WRITES, 8,
+        "resume", ("policy", "resume"), BACKFLOW, WRITES, 9,
         ("Resume stuck meetings", "中断した会合を再開"),
         ("Finishes meetings left mid-flight by an interrupted or rate-limited run.",
          "中断やレート制限で途中のまま残った会合を完了させます。"),
@@ -174,7 +196,7 @@ COMMANDS: tuple[Command, ...] = (
         needs_notebooklm=True, timeout_s=_NBLM_TIMEOUT,
     ),
     Command(
-        "run", ("policy", "run"), BACKFLOW, WRITES, 9,
+        "run", ("policy", "run"), BACKFLOW, WRITES, 10,
         ("Summarise pending meetings", "未要約の会合を要約"),
         ("Summarises pending meetings of tracked committees, then refreshes each committee's synthesis.",
          "追跡中の委員会の未要約の会合を要約し、委員会の総括を更新します。"),
@@ -189,7 +211,7 @@ COMMANDS: tuple[Command, ...] = (
         needs_notebooklm=True, timeout_s=_NBLM_TIMEOUT,
     ),
     Command(
-        "resolve-citations", ("policy", "resolve-citations"), BACKFLOW, WRITES, 10,
+        "resolve-citations", ("policy", "resolve-citations"), BACKFLOW, WRITES, 11,
         ("Resolve citation pages", "引用ページを解決"),
         ("Finds the document and page behind each digest citation, for meetings summarised before pages "
          "were tracked.",
@@ -203,7 +225,7 @@ COMMANDS: tuple[Command, ...] = (
         timeout_s=1800,
     ),
     Command(
-        "tag", ("policy", "tag"), BACKFLOW, WRITES, 11,
+        "tag", ("policy", "tag"), BACKFLOW, WRITES, 12,
         ("Apply topic tags", "トピックタグを適用"),
         ("Applies the rule-based topic tags to committees and meetings.",
          "ルールベースのトピックタグを委員会と会合に適用します。"),
@@ -213,7 +235,7 @@ COMMANDS: tuple[Command, ...] = (
          _COMMITTEE),
     ),
     Command(
-        "export-web", ("export-web",), BACKFLOW, WRITES, 12,
+        "export-web", ("export-web",), BACKFLOW, WRITES, 13,
         ("Rebuild web snapshots", "Webスナップショットを再生成"),
         ("Rewrites the static JSON the read-only site serves from the current database.",
          "現在のDBから、閲覧専用サイトが読む静的JSONを再生成します。"),
@@ -222,7 +244,7 @@ COMMANDS: tuple[Command, ...] = (
         timeout_s=900,
     ),
     Command(
-        "push-hf", ("push-hf",), BACKFLOW, DANGEROUS, 13,
+        "push-hf", ("push-hf",), BACKFLOW, DANGEROUS, 14,
         ("Push to Hugging Face", "Hugging Faceへ送信"),
         ("Replaces the shared dataset with your local database and Parquet files.",
          "共有データセットを、ローカルのDBとParquetで置き換えます。"),
@@ -360,9 +382,9 @@ RECIPES: tuple[Recipe, ...] = (
         ("Pull, find what is missing, summarise it, resolve citations, then push. Pull first and push last: both "
          "overwrite a whole database and the daily runs write to the same one.",
          "pull → 不足の検出 → 要約 → 引用解決 → push。pullは最初、pushは最後。どちらもDB全体を上書きし、日次実行も同じDBに書き込むためです。"),
-        ("pull-hf", "detect", "dates", "materials", "auth", "login", "backfill", "resume", "run",
-         "resolve-citations", "tag", "export-web", "push-hf"),
-        optional=("auth", "login", "resume", "run", "tag", "export-web"),
+        ("pull-hf", "detect", "dates", "materials", "reclassify", "auth", "login", "backfill", "resume",
+         "run", "resolve-citations", "tag", "export-web", "push-hf"),
+        optional=("reclassify", "auth", "login", "resume", "run", "tag", "export-web"),
     ),
     Recipe(
         "citations", ("Citations only", "引用の解決のみ"),
@@ -408,6 +430,9 @@ def build_argv(cmd_id: str, params: dict, known_committees: Callable[[], set[str
         key = _committee(committee, params.get("committee"), known_committees, required=True)
         number = _int(replace(spec, required=True), params.get("meeting"))
         return [*cmd.argv, "--committee", str(key), "--meeting", str(number)]
+
+    if cmd.id == "reclassify" and params.get("queue") and not params.get("apply"):
+        raise ValueError("Queue needs Apply: queueing changes data, so it cannot ride a report-only run")
 
     argv = [*cmd.argv]
     for p in cmd.params:

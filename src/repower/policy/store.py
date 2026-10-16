@@ -12,7 +12,7 @@ import json
 import logging
 import re
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from sqlalchemy import func, or_
 
@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 # Errored meetings stay in the worklist until they've failed this many times, so
 # transient failures (network/rate-limit) are retried by the next `policy run`.
 MAX_RETRIES = 3
+
+# Where a flagged *update* sits in the breadth-first order, as a backlog depth: after every
+# committee's newest pending meeting (depth 0), ahead of any committee's second-newest (depth 1).
+# See ``pending_meetings``.
+UPDATE_DEPTH = 0.5
+
+# Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
+# .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
+# account's daily NotebookLM quota, which stops a run sooner.
+DAILY_RUN_CAP = 8
 
 # Documents to ingest per meeting, in priority order (code-enforced, not agent
 # judgment), keeping a meeting to a handful of sources well under any tier cap.
@@ -464,7 +474,12 @@ def add_user_committee(item: dict, *, enabled: bool = True, db_path: str | None 
 
 # ── Generation queue (dashboard "Generate summary" when auth is stale) ────────
 def request_generation(key: str, meeting_num: int, db_path: str | None = None) -> bool:
-    """Flag one meeting for summarisation. Returns True if the row exists/was flagged."""
+    """Flag one meeting for summarisation. Returns True if the row exists/was flagged.
+
+    On an already-``done`` meeting this means "write it again, at the front": the row
+    also gets ``resummarise_requested``, since a done meeting is outside the pending
+    worklist and a bare ``gen_requested`` on it would never be picked up.
+    """
     with session_scope(db_path) as session:
         m = (
             session.query(PolicyMeeting)
@@ -474,11 +489,19 @@ def request_generation(key: str, meeting_num: int, db_path: str | None = None) -
         if m is None:
             return False
         m.gen_requested = True
+        if m.state == "done":
+            m.resummarise_requested = True
         return True
 
 
-def clear_generation_request(key: str, meeting_num: int, db_path: str | None = None) -> None:
-    """Clear a meeting's generation-requested flag (once it's been summarised)."""
+def clear_generation_request(key: str, meeting_num: int, db_path: str | None = None, *,
+                             withdraw_resummarise: bool = False) -> None:
+    """Clear a meeting's generation-requested flag (once it's been summarised).
+
+    ``resummarise_requested`` is left alone by default: the pipeline calls this after
+    every attempt, including a failed one, and a failed re-run must stay queued for the
+    next round. *withdraw_resummarise* is for a person taking the meeting off the queue.
+    """
     with session_scope(db_path) as session:
         m = (
             session.query(PolicyMeeting)
@@ -487,6 +510,8 @@ def clear_generation_request(key: str, meeting_num: int, db_path: str | None = N
         )
         if m is not None and m.gen_requested:
             m.gen_requested = False
+        if m is not None and withdraw_resummarise and m.resummarise_requested:
+            m.resummarise_requested = False
 
 
 def get_committee(key: str, db_path: str | None = None) -> PolicyCommittee | None:
@@ -543,6 +568,7 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
                         url=m.url,
                         title=m.title,
                         status="detected",
+                        first_seen_at=_now(),
                     )
                 )
             kinds = {m.kind for m in mats}
@@ -552,6 +578,220 @@ def record_meeting(key: str, meeting_num: int, materials: list[Material] | None,
                 meeting.has_torimatome = True
         meeting.updated_at = _now()
         return is_new
+
+
+# A document of one of these kinds arriving after a meeting was summarised makes
+# that briefing incomplete. Appendices are left out: they are only ingested when the
+# source budget has room, so one arriving late is not worth a quota slot on its own.
+LATE_REQUEUE_KINDS = ("minutes", "brief", "compilation", "handout", "agenda")
+
+# States in which a meeting's document list is safe to refresh. The in-flight ones
+# (downloading / ingesting / generating) have a notebook being built from the list as
+# it stands, so it is left alone until that attempt resolves.
+_REFRESHABLE_STATES = ("done", "detected", "error")
+
+
+def recent_meeting_nums(key: str, since: date, db_path: str | None = None) -> list[int]:
+    """Meetings of *key* held on/after *since* whose document list may still grow,
+    newest first.
+
+    An undated meeting falls back to the day it was detected, so a committee whose
+    index carries no dates still gets its latest meetings refreshed.
+    """
+    with session_scope(db_path, commit=False) as session:
+        rows = (
+            session.query(PolicyMeeting.meeting_num, PolicyMeeting.meeting_date,
+                          PolicyMeeting.detected_at)
+            .filter(PolicyMeeting.committee_key == key,
+                    PolicyMeeting.state.in_(_REFRESHABLE_STATES))
+            .order_by(PolicyMeeting.meeting_num.desc())
+            .all()
+        )
+    out = []
+    for num, held, detected in rows:
+        when = held or (detected.date() if detected else None)
+        if when is not None and when >= since:
+            out.append(num)
+    return out
+
+
+def watch_meeting_nums(
+    key: str,
+    today: date,
+    *,
+    horizon_days: int = 90,
+    interval_days: int = 7,
+    db_path: str | None = None,
+) -> list[int]:
+    """Summarised meetings of *key* still worth re-checking for late minutes, newest first.
+
+    A meeting qualifies when it is ``done``, has **neither minutes nor a brief** on
+    file, and either
+
+    * has never had its document list re-read (``materials_checked_at`` NULL) — one
+      look regardless of age, because lists were frozen when a meeting was first
+      seen, so an old meeting may long since have its minutes; or
+    * is within *horizon_days* of its date **and** was last read at least
+      *interval_days* ago — a slow weekly poll that stops after the horizon, so a
+      committee that never publishes minutes costs ~13 fetches per meeting, once.
+
+    Tracked (enabled) committees only: nobody reads a briefing of an untracked one,
+    and a re-run would never be scheduled for it anyway.
+    """
+    from sqlalchemy import exists
+
+    with session_scope(db_path, commit=False) as session:
+        committee = session.get(PolicyCommittee, key)
+        if committee is not None and committee.enabled is False:
+            return []
+
+        def _has(kind: str):
+            return exists().where(
+                PolicyMaterial.committee_key == PolicyMeeting.committee_key,
+                PolicyMaterial.meeting_num == PolicyMeeting.meeting_num,
+                PolicyMaterial.kind == kind,
+            )
+
+        rows = (
+            session.query(PolicyMeeting.meeting_num, PolicyMeeting.meeting_date,
+                          PolicyMeeting.detected_at, PolicyMeeting.materials_checked_at)
+            .filter(PolicyMeeting.committee_key == key, PolicyMeeting.state == "done",
+                    ~_has("minutes"), ~_has("brief"))
+            .order_by(PolicyMeeting.meeting_num.desc())
+            .all()
+        )
+    horizon = today - timedelta(days=horizon_days)
+    due = datetime.combine(today, datetime.min.time(), tzinfo=UTC) - timedelta(days=interval_days)
+    out = []
+    for num, held, detected, checked in rows:
+        if checked is None:
+            out.append(num)
+            continue
+        when = held or (detected.date() if detected else None)
+        if when is None or when < horizon:
+            continue
+        if checked.replace(tzinfo=checked.tzinfo or UTC) <= due:
+            out.append(num)
+    return out
+
+
+def add_late_materials(key: str, meeting_num: int, materials: list[Material],
+                       db_path: str | None = None) -> dict:
+    """Merge a re-enumerated document list into an already-known meeting.
+
+    Returns ``{"added": n, "requeued": bool}``. Only documents not yet on file are
+    added, so a re-fetch that finds nothing new changes nothing — in particular
+    ``updated_at``, which the UI reads as "when this was summarised".
+
+    A ``done`` meeting that gains a minutes / brief / compilation / handout / agenda
+    document gets ``resummarise_requested``: its briefing was written without that
+    paper. It **stays ``done``** — the existing briefing remains visible, just thinner
+    than it could be — and the next ``policy run`` writes a new one behind any
+    never-summarised meeting, then clears the flag.
+
+    Every successful listing stamps ``materials_checked_at``, whether or not it found
+    anything, so the re-check schedule can tell "looked and found nothing" from
+    "never looked".
+    """
+    with session_scope(db_path) as session:
+        meeting = (
+            session.query(PolicyMeeting)
+            .filter_by(committee_key=key, meeting_num=meeting_num)
+            .one_or_none()
+        )
+        if meeting is None:
+            return {"added": 0, "requeued": False}
+        known = {
+            r[0]
+            for r in session.query(PolicyMaterial.pdf_id)
+            .filter_by(committee_key=key)
+            .filter(PolicyMaterial.meeting_num == meeting_num)
+            .all()
+        }
+        meeting.materials_checked_at = _now()
+        added: list[Material] = []
+        for m in materials:
+            if m.pdf_id in known:
+                continue
+            known.add(m.pdf_id)
+            added.append(m)
+            session.add(PolicyMaterial(
+                committee_key=key, meeting_num=meeting_num, pdf_id=m.pdf_id,
+                kind=m.kind, url=m.url, title=m.title, status="detected",
+                first_seen_at=_now(),
+            ))
+        if not added:
+            return {"added": 0, "requeued": False}
+        kinds = {m.kind for m in added}
+        if "minutes" in kinds:
+            meeting.has_minutes = True
+        if "compilation" in kinds:
+            meeting.has_torimatome = True
+        requeue = meeting.state == "done" and any(k in LATE_REQUEUE_KINDS for k in kinds)
+        if requeue:
+            meeting.resummarise_requested = True
+            meeting.retry_count = 0  # a fresh reason; earlier failures no longer count
+        return {"added": len(added), "requeued": requeue}
+
+
+def reclassify_materials(db_path: str | None = None, dry_run: bool = False) -> list[dict]:
+    """Re-run :func:`classify_material` over every stored document.
+
+    ``record_meeting`` never revisits a document once it is on file, so rows typed by
+    an earlier classifier keep their old ``kind`` forever. Pure DB work — no fetch.
+    Returns one ``{committee_key, meeting_num, pdf_id, old, new, state}`` dict per
+    document whose kind changes; with *dry_run* nothing is written.
+    """
+    from repower.policy.scraper import classify_material
+
+    changes: list[dict] = []
+    with session_scope(db_path, commit=not dry_run) as session:
+        states = {
+            (c, n): s
+            for c, n, s in session.query(
+                PolicyMeeting.committee_key, PolicyMeeting.meeting_num, PolicyMeeting.state
+            )
+        }
+        for m in session.query(PolicyMaterial).all():
+            new = classify_material(m.title or "", m.url or "")
+            if new == m.kind:
+                continue
+            changes.append({
+                "committee_key": m.committee_key, "meeting_num": m.meeting_num,
+                "pdf_id": m.pdf_id, "old": m.kind, "new": new,
+                "state": states.get((m.committee_key, m.meeting_num)),
+            })
+            if not dry_run:
+                m.kind = new
+    return changes
+
+
+def queue_resummarise(meetings: list[tuple[str, int]], db_path: str | None = None) -> dict:
+    """Flag summarised meetings for a new briefing (``resummarise_requested``).
+
+    Only ``done`` meetings of **tracked** committees: the flag is what the run reads, and a
+    run on ``--committee all`` skips untracked ones, so flagging them would only light the
+    "update queued" chip for work that never starts. Returns
+    ``{"queued": [...], "untracked": [...]}`` of ``(committee_key, meeting_num)``; anything
+    that is not ``done`` (it changed state since the caller looked) is silently left alone.
+    The retry count is reset: a fresh reason, so earlier failures no longer count against it.
+    """
+    queued: list[tuple[str, int]] = []
+    untracked: list[tuple[str, int]] = []
+    with session_scope(db_path) as session:
+        tracked = {c.committee_key: c.enabled is not False for c in session.query(PolicyCommittee)}
+        for key, num in meetings:
+            m = (session.query(PolicyMeeting)
+                 .filter_by(committee_key=key, meeting_num=num).one_or_none())
+            if m is None or m.state != "done":
+                continue
+            if not tracked.get(key, True):
+                untracked.append((key, num))
+                continue
+            m.resummarise_requested = True
+            m.retry_count = 0
+            queued.append((key, num))
+    return {"queued": queued, "untracked": untracked}
 
 
 def set_committee_checked(key: str, db_path: str | None = None) -> None:
@@ -674,7 +914,8 @@ def prune_fetch_events(older_than_days: float = 90, db_path: str | None = None) 
 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────
 def pending_meetings(key: str | None = None, db_path: str | None = None,
-                     only_enabled: bool = False, breadth_first: bool = False) -> list[dict]:
+                     only_enabled: bool = False, breadth_first: bool = False,
+                     include_resummarise: bool = False) -> list[dict]:
     """Meetings still needing work, in summarisation order, as plain dicts.
 
     Ordered by: **user-requested first** (a dashboard "Generate summary" that was
@@ -691,6 +932,17 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
 
     Includes everything not yet ``done``, plus ``error`` rows that have failed
     fewer than ``MAX_RETRIES`` times (so transient failures are retried). With
+    ``include_resummarise`` it also returns ``done`` meetings flagged
+    ``resummarise_requested`` (``"resummarise": True``), held to the same retry cap.
+    Off by default because "pending" is also a *count* (status tables, the backlog
+    badge) that should keep meaning "no briefing yet".
+
+    **Where an update sits.** Breadth-first (the daily run): after every committee's
+    *newest* pending meeting, but **ahead of any committee's deeper backlog** — a
+    meeting that just got its minutes is worth more than the fifth-newest never-summarised
+    one, which at a few a day it would otherwise wait ~weeks behind (it ranked last of
+    ~290 when this was measured). Depth-first (a single committee): after every pending
+    meeting, unchanged — a backfill drains history, and an update is not part of it. With
     ``only_enabled`` the result is restricted to tracked (``enabled=1``) committees
     — used by ``policy run --committee all`` so disabling a committee removes it
     from the daily worklist.
@@ -706,6 +958,15 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         if key:
             q = q.filter_by(committee_key=key)
         rows = q.all()
+        if include_resummarise:
+            uq = session.query(PolicyMeeting).filter(
+                PolicyMeeting.state == "done",
+                PolicyMeeting.resummarise_requested == True,  # noqa: E712
+                func.coalesce(PolicyMeeting.retry_count, 0) < MAX_RETRIES,
+            )
+            if key:
+                uq = uq.filter_by(committee_key=key)
+            rows = rows + uq.all()
         # Priority + enabled live on the committee row; read them once and order in Python.
         coms = {c.committee_key: c for c in session.query(PolicyCommittee).all()}
         if only_enabled:
@@ -725,14 +986,22 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         if breadth_first:
             by_com: dict[str, list[PolicyMeeting]] = {}
             for m in rows:
+                if m.state == "done":
+                    continue  # an upgrade is not backlog depth: it must not push a new meeting back
                 by_com.setdefault(m.committee_key, []).append(m)
             for ms in by_com.values():
                 for r, m in enumerate(sorted(ms, key=lambda x: -x.meeting_num)):
                     depth[m.id] = r
 
+        def _tier(m: PolicyMeeting) -> float:
+            """Backlog depth for a pending meeting; a fixed slot for an update (see docstring)."""
+            if m.state == "done":
+                return UPDATE_DEPTH if breadth_first else 1
+            return depth.get(m.id, 0)
+
         rows.sort(key=lambda m: (
             0 if m.gen_requested else 1,  # user-requested ("Generate summary") first
-            depth.get(m.id, 0),           # breadth-first: newest-of-each committee first
+            _tier(m),                     # breadth-first: newest-of-each committee, updates, deeper…
             _prio(m.committee_key),
             m.committee_key,
             -m.meeting_num,
@@ -746,9 +1015,111 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
                 "has_minutes": m.has_minutes,
                 "has_torimatome": m.has_torimatome,
                 "gen_requested": bool(m.gen_requested),
+                "resummarise": m.state == "done",
             }
             for m in rows
         ]
+
+
+def queue_snapshot(
+    db_path: str | None = None,
+    *,
+    cap: int = DAILY_RUN_CAP,
+    now: datetime | None = None,
+    recent_days: int = 7,
+    max_items: int = 100,
+    max_recent: int = 40,
+) -> dict:
+    """What the daily run will work through next, and what it has just worked through.
+
+    ``items`` is :func:`pending_meetings` exactly as ``policy run --committee all`` calls
+    it (tracked committees, breadth-first, upgrades included) — the same function, so the
+    view cannot drift from the run — numbered from 1. The first *cap* are what one daily
+    run takes. Each carries a ``kind``: ``update`` (summarised; a late paper means it is
+    being written again), ``retry`` (errored, under the retry cap) or ``new`` (no briefing
+    yet), plus ``requested`` when someone moved it to the front.
+
+    It is the *expected* order: a run also skips a committee whose host is cooling down and
+    stops early on a rate limit. ``totals`` count the whole worklist. ``items`` holds the
+    first *max_items* by rank **plus every update, retry and moved-to-front meeting whatever
+    its rank** — a long backlog of ordinary new meetings is a count, not a list, but the rare
+    ones an operator filters for must not be cut off behind it (an update can rank well past
+    a plain cap, and the "Update" filter would then find nothing). Ranks are kept, so they
+    can be non-contiguous; ``truncated`` is how many new meetings are left out.
+
+    ``recent`` is what left the queue in the last *recent_days*, newest first, with
+    ``kind`` ``update`` or ``new``. Rows summarised before ``summarised_at`` existed fall
+    back to a done meeting touched recently with a recorded generation time, and carry
+    ``kind: None`` — "summarised", but not known to be first or repeat.
+    """
+    now = now or _now()
+    work = pending_meetings(db_path=db_path, only_enabled=True, breadth_first=True,
+                            include_resummarise=True)
+    with session_scope(db_path, commit=False) as session:
+        def _kind(w: dict) -> str:
+            return "update" if w["state"] == "done" else "retry" if w["state"] == "error" else "new"
+
+        ranked = list(enumerate(work, start=1))
+        listed = [(r, w) for r, w in ranked if r <= max_items or _kind(w) != "new" or w["gen_requested"]]
+        ids = [w["id"] for _, w in listed]
+        extra = {
+            m.id: m for m in session.query(PolicyMeeting).filter(PolicyMeeting.id.in_(ids)).all()
+        } if ids else {}
+        items = []
+        for rank, w in listed:
+            m = extra[w["id"]]
+            kind = _kind(w)
+            items.append({
+                "rank": rank, "com": w["committee_key"], "num": w["meeting_num"],
+                "date": str(m.meeting_date)[:10] if m.meeting_date else None,
+                "kind": kind, "requested": bool(w["gen_requested"]),
+                "state": w["state"], "retries": m.retry_count or 0,
+            })
+
+        cutoff = now - timedelta(days=recent_days)
+        rows = (
+            session.query(PolicyMeeting)
+            .filter(PolicyMeeting.state == "done")
+            .filter(or_(
+                PolicyMeeting.summarised_at >= cutoff,
+                (PolicyMeeting.summarised_at.is_(None))
+                & (PolicyMeeting.updated_at >= cutoff)
+                & (PolicyMeeting.gen_seconds.isnot(None)),
+            ))
+            .all()
+        )
+
+        def _when(m: PolicyMeeting) -> datetime:
+            return m.summarised_at or m.updated_at or datetime.min  # both set for any row selected above
+
+        rows.sort(key=_when, reverse=True)
+        recent = [{
+            "com": m.committee_key, "num": m.meeting_num, "at": str(_when(m)),
+            "kind": ("update" if m.resummarised_at else "new") if m.summarised_at else None,
+        } for m in rows[:max_recent]]
+
+    totals = {"new": 0, "update": 0, "retry": 0, "requested": 0}
+    by_com: dict[str, dict[str, int]] = {}
+    for w in work:
+        kind = "update" if w["state"] == "done" else "retry" if w["state"] == "error" else "new"
+        totals[kind] += 1
+        totals["requested"] += int(bool(w["gen_requested"]))
+        c = by_com.setdefault(w["committee_key"], {"new": 0, "update": 0, "retry": 0, "requested": 0})
+        c[kind] += 1
+        c["requested"] += int(bool(w["gen_requested"]))
+    return {
+        "cap": cap,
+        "total": len(work),
+        "totals": totals,
+        # Over the whole worklist, not the capped `items`: "which committees are queued"
+        # must not depend on how far down the list happens to be cut. Biggest first.
+        "byCom": dict(sorted(
+            by_com.items(), key=lambda kv: (-sum(kv[1][k] for k in ("new", "update", "retry")), kv[0]))),
+        "items": items,
+        "truncated": max(0, len(work) - len(items)),
+        "recent": recent,
+        "recentDays": recent_days,
+    }
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:

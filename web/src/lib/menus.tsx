@@ -6,6 +6,8 @@ import { AUTOMATED_RUNS, COMMANDS_GUIDE, POLICY_GUIDE, SCREENS_GUIDE, type Guide
 import { BADGE, LevelBadge } from './LevelBadge'
 import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import { parseDbTs } from './policyActivity'
+import { QueueView } from './QueueView'
+import { indexQueue, KIND_META, positionLabel, type QueuePayload } from './policyQueue'
 import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s, press } from './style'
 import { orgColor } from './chartkit'
@@ -750,6 +752,8 @@ interface MeetingStatus {
   errorAt: string | null
   retries: number
   requested: boolean
+  /** Summarised, but a paper arrived afterwards: queued to be written again. Still `done`. */
+  resummarise?: boolean
   minutes: boolean
   tori: boolean
   docs: number
@@ -766,6 +770,11 @@ interface StatusPayload {
   meetings: MeetingStatus[]
   /** committee_key → meetings trimmed from its list (quiet backlog only). */
   truncated?: Record<string, number>
+  /** committee_key → summarised meetings queued to be written again (a paper arrived
+   *  after the summary). Counted over every meeting, so it survives `truncated`. */
+  updateQueued?: Record<string, number>
+  /** The summarisation queue in the order the next daily run takes it, and what has drained. */
+  queue?: QueuePayload
 }
 
 const MSTATE: Record<string, { en: string; ja: string; color: string }> = {
@@ -843,6 +852,8 @@ function MeetingRows({
   running,
   onRunMeeting,
   onQueueMeeting,
+  qIndex,
+  qCap,
 }: {
   meetings: MeetingStatus[]
   trimmed: number
@@ -852,6 +863,10 @@ function MeetingRows({
   running: boolean
   onRunMeeting: (key: string, num: number) => void
   onQueueMeeting: (key: string, num: number, queued: boolean) => void
+  /** `committee:num` → queue position; absent = not queued. */
+  qIndex: ReturnType<typeof indexQueue>
+  /** Meetings one daily run takes (0 = queue data not loaded). */
+  qCap: number
 }) {
   const L = lang
   const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
@@ -934,7 +949,27 @@ function MeetingRows({
               style={s(`font-size:11px;color:${isErr ? 'var(--dn)' : warn ? 'var(--warnTx)' : 'var(--mut)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`)}
               title={detail + (m.retries ? pick(` · ${m.retries} retries`, ` · 再試行 ${m.retries}回`) : '')}
             >
-              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : '—')}
+              {(() => {
+                const q = qIndex.get(`${committee}:${m.num}`)
+                if (!q) return null
+                const meta = KIND_META[q.kind]
+                const pos = positionLabel(q, qCap, L === 'ja')
+                return (
+                  <span
+                    style={s(`font-size:9px;font-weight:700;letter-spacing:.04em;border-radius:5px;padding:1px 5px;margin-right:6px;background:${meta.bg};color:${meta.fg}`)}
+                    title={
+                      (L === 'ja' ? meta.tipJa : meta.tipEn) +
+                      '\n' +
+                      (pos.soon
+                        ? pick(`Position ${q.rank}: inside the daily cap of ${qCap}, so the next run takes it.`, `順位 ${q.rank}: 日次上限(${qCap})内。次回の実行で処理されます。`)
+                        : pick(`Position ${q.rank} in the queue (the daily run takes the first ${qCap}).`, `キュー内の順位 ${q.rank}（日次の処理は先頭${qCap}件）。`))
+                    }
+                  >
+                    {L === 'ja' ? meta.ja : meta.en} {qCap && pos.soon ? pos.text : `#${q.rank}`}
+                  </span>
+                )
+              })()}
+              {detail || (m.requested ? pick('queued by request', 'リクエスト済み') : m.resummarise ? pick('update queued — a paper arrived after it was summarised', '更新待ち — 要約後に資料が追加されました') : '—')}
               {m.retries ? ` (${m.retries}×)` : ''}
             </span>
             <span style={s(TD)} title={m.updatedAt || ''}>{ago(m.updatedAt, L === 'ja')}</span>
@@ -1030,6 +1065,9 @@ function StatusTable({
   const dark = app.theme === 'dark'
   const pick = (en: string, ja: string) => (L === 'ja' ? ja : en)
   const [open, setOpen] = useState<Record<string, boolean>>({})
+  // Where each meeting sits in the summarisation queue (absent = not queued).
+  const qIndex = useMemo(() => indexQueue(status?.queue), [status])
+  const qCap = status?.queue?.cap ?? 0
 
   // Meetings grouped per committee, each already newest-activity-first from the
   // backend. Built once per payload rather than per expanded row.
@@ -1282,6 +1320,8 @@ function StatusTable({
                   running={running}
                   onRunMeeting={onRunMeeting}
                   onQueueMeeting={onQueueMeeting}
+                  qIndex={qIndex}
+                  qCap={qCap}
                 />
               ))}
           </div>
@@ -1304,14 +1344,15 @@ function CommitteesManage() {
   // Cards (manage the tracked set) vs Status table (what the pipeline did, and
   // what broke). Remembered per browser: whichever one you work in is the one
   // you keep coming back to.
-  const [view, setView] = useState<'cards' | 'table'>(() => {
+  const [view, setView] = useState<'cards' | 'table' | 'queue'>(() => {
     try {
-      return localStorage.getItem(VIEW_KEY) === 'table' ? 'table' : 'cards'
+      const v = localStorage.getItem(VIEW_KEY)
+      return v === 'table' || v === 'queue' ? v : 'cards'
     } catch {
       return 'cards'
     }
   })
-  const [scope, setScope] = useState<'all' | 'tracked' | 'failing'>('all')
+  const [scope, setScope] = useState<'all' | 'tracked' | 'failing' | 'update'>('all')
   const [status, setStatus] = useState<StatusPayload | null>(null)
   const [statusLoading, setStatusLoading] = useState(false)
 
@@ -1335,8 +1376,15 @@ function CommitteesManage() {
       ? fetch('/api/policy/status').then((r) => r.json())
       : getSnapshot<StatusPayload>('policy/status.json')
     return p
-      .then((d: StatusPayload) => setStatus({ meetings: d.meetings || [], truncated: d.truncated || {} }))
-      .catch(() => setStatus({ meetings: [], truncated: {} }))
+      .then((d: StatusPayload) =>
+        setStatus({
+          meetings: d.meetings || [],
+          truncated: d.truncated || {},
+          updateQueued: d.updateQueued || {},
+          queue: d.queue,
+        }),
+      )
+      .catch(() => setStatus({ meetings: [], truncated: {}, updateQueued: {} }))
       .finally(() => setStatusLoading(false))
   }
 
@@ -1355,7 +1403,7 @@ function CommitteesManage() {
   }, [app.interactive])
 
   useEffect(() => {
-    if (view === 'table' && !status && !statusLoading) loadStatus()
+    if ((view === 'table' || view === 'queue') && !status && !statusLoading) loadStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, app.interactive])
 
@@ -1485,7 +1533,7 @@ function CommitteesManage() {
           // (crosscheck/discover add discovered committees; detect updates latest)
           // — and the per-meeting status, which is what the job just rewrote.
           loadCatalog()
-          if (view === 'table') loadStatus()
+          if (view !== 'cards') loadStatus()
           // …and refetch the Policy Deep Dive screen behind this modal: the same
           // job wrote new meetings/dates/summaries to the DB that the screen's
           // usePolicyLive must pick up (it subscribes to this refresh signal).
@@ -1627,7 +1675,7 @@ function CommitteesManage() {
           onDone: () => {
             setChecking(false)
             loadCatalog()
-            if (view === 'table') loadStatus()
+            if (view !== 'cards') loadStatus()
           },
         })
         app.toast(pick('Checking for updates…', '更新を確認中…'))
@@ -1649,13 +1697,25 @@ function CommitteesManage() {
     c.fetchStatus === 'error' || (c.error || 0) > 0 || c.lastUpdateState === 'error'
   const nTracked = rows.filter((c) => c.tracked).length
   const nFailing = rows.filter(failing).length
+  // Committees with a summarised meeting waiting to be written again (a late paper —
+  // usually the minutes). Not an error and not backlog, so neither of the chips above
+  // shows it. Only known once the status payload has loaded.
+  const queuedFor = (c: CatalogCommittee) => status?.updateQueued?.[c.key] || 0
+  const nUpdate = rows.filter((c) => queuedFor(c) > 0).length
+  const nUpdateMeetings = rows.reduce((n, c) => n + queuedFor(c), 0)
 
   // Tracked first, then newest meeting held (chronological, not scrape order;
   // committees with no dated meeting sink to the bottom of their group), then
   // most recently touched by the pipeline, then key for a stable tie-break.
   const tableRows = useMemo(() => {
     const inScope = (c: CatalogCommittee) =>
-      scope === 'all' ? true : scope === 'tracked' ? c.tracked : failing(c)
+      scope === 'all'
+        ? true
+        : scope === 'tracked'
+          ? c.tracked
+          : scope === 'update'
+            ? queuedFor(c) > 0
+            : failing(c)
     return rows
       .filter((c) => match(c) && inScope(c))
       .slice()
@@ -1667,9 +1727,9 @@ function CommitteesManage() {
           a.key.localeCompare(b.key),
       )
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rows, needle, scope])
+  }, [rows, needle, scope, status])
 
-  const setViewMode = (v: 'cards' | 'table') => {
+  const setViewMode = (v: 'cards' | 'table' | 'queue') => {
     setView(v)
     try {
       localStorage.setItem(VIEW_KEY, v)
@@ -1680,7 +1740,7 @@ function CommitteesManage() {
 
   return (
     <Modal onClose={app.closeOverlay}>
-      <div style={s(view === 'table' ? PANEL_TABLE : PANEL_WIDE)}>
+      <div style={s(view !== 'cards' ? PANEL_TABLE : PANEL_WIDE)}>
         <div style={s('flex-shrink:0;display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--bd)')}>
           {icon(I_LIST, 17, 'var(--ac)')}
           <span style={s('font-size:16px;font-weight:700;color:var(--tx);margin-left:9px')}>{pick('Committees', '委員会管理')}</span>
@@ -1691,6 +1751,11 @@ function CommitteesManage() {
             {([
               ['cards', pick('Cards', 'カード'), pick('Manage the tracked set', '追跡対象の管理')],
               ['table', pick('Status', '状態'), pick('Per-meeting pipeline status, errors and recency', '会合ごとの処理状態・エラー・更新時刻')],
+              [
+                'queue',
+                `${pick('Queue', 'キュー')}${status?.queue ? ` ${status.queue.total}` : ''}`,
+                pick('What the daily run takes next, in order, and what it has just worked through', '次回の日次実行が処理する順番と、直近の処理済み'),
+              ],
             ] as const).map(([v, label, tip]) => (
               <Hoverable
                 as="span"
@@ -1796,13 +1861,22 @@ function CommitteesManage() {
         {view === 'table' && (
           <div style={s('flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:6px 20px 6px')}>
             {([
-              ['all', pick(`All ${rows.length}`, `全 ${rows.length}`)],
-              ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`)],
-              ['failing', pick(`Needs attention ${nFailing}`, `要対応 ${nFailing}`)],
-            ] as const).map(([v, label]) => (
+              ['all', pick(`All ${rows.length}`, `全 ${rows.length}`), ''],
+              ['tracked', pick(`Tracked ${nTracked}`, `追跡 ${nTracked}`), ''],
+              ['failing', pick(`Needs attention ${nFailing}`, `要対応 ${nFailing}`), ''],
+              [
+                'update',
+                pick(`Update queued ${nUpdate}`, `更新待ち ${nUpdate}`),
+                pick(
+                  `${nUpdateMeetings} summarised meeting(s) in ${nUpdate} committee(s) will be written again: a paper (usually the minutes) arrived after they were summarised. They still show their current summary meanwhile.`,
+                  `要約後に資料（多くは議事録）が追加された ${nUpdateMeetings} 件（${nUpdate} 委員会）が再要約待ちです。それまでは現在の要約が表示されます。`,
+                ),
+              ],
+            ] as const).map(([v, label, tip]) => (
               <Hoverable
                 as="span"
                 key={v}
+                title={tip || undefined}
                 base={`font-size:11.5px;font-weight:600;border-radius:999px;padding:3px 12px;white-space:nowrap;cursor:pointer;${
                   scope === v
                     ? 'background:var(--acTint);border:1px solid var(--ac);color:var(--acT)'
@@ -1824,7 +1898,7 @@ function CommitteesManage() {
           </div>
         )}
 
-        <div style={s(`flex:1 1 auto;min-height:120px;overflow:auto;padding:${view === 'table' ? '0 16px 12px' : '4px 16px 16px'}`)}>
+        <div style={s(`flex:1 1 auto;min-height:120px;overflow:auto;padding:${view !== 'cards' ? '0 16px 12px' : '4px 16px 16px'}`)}>
           {loading && (
             <div style={s('padding:26px;text-align:center;color:var(--mut);font-size:13px')}>{pick('Loading…', '読み込み中…')}</div>
           )}
@@ -1842,6 +1916,18 @@ function CommitteesManage() {
               onRunLatest={runLatest}
               onBackfill={backfill}
               onRunMeeting={runMeeting}
+              onQueueMeeting={queueMeeting}
+            />
+          )}
+          {!loading && view === 'queue' && (
+            <QueueView
+              queue={status?.queue}
+              loading={statusLoading || !status}
+              nameOf={(k) => {
+                const c = rows.find((r) => r.key === k)
+                return c ? (L === 'ja' ? c.ja : c.en) : k
+              }}
+              interactive={app.interactive}
               onQueueMeeting={queueMeeting}
             />
           )}

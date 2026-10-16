@@ -253,7 +253,10 @@ export function CommandsPane() {
     <>
     {drawer && <div style={s(RAIL)}></div> /* keeps the layout the width of the collapsed rail */}
     <div style={s(drawer ? PANE + DRAWER : PANE)}>
-      <div style={s('display:flex;align-items:center;gap:8px;padding:0 4px')}>
+      {/* Sticky, and cancelling the pane's own padding so the bar spans its full width: the collapse
+          control lives here, at the top (where the collapsed rail's button is), and stays in reach
+          however far the command list has been scrolled. */}
+      <div style={s('display:flex;align-items:center;gap:8px;padding:22px 16px 6px 20px;margin:-22px -16px 0;position:sticky;top:-22px;z-index:2;background:var(--bg1)')}>
         {icon(I_TERMINAL, 20, 'var(--ac)')}
         <span style={s('font-size:17px;font-weight:700')}>{pick('Commands', 'コマンド')}</span>
         <span style={s('font-size:11px;color:var(--mut)')}>コマンド</span>
@@ -265,8 +268,17 @@ export function CommandsPane() {
           {...press(openGuide)}
           title={pick('Open the guide to these commands', 'コマンドのガイドを開く')}
         >{icon(I_INFO, 13, 'currentColor')}{pick('Guide', 'ガイド')}</Hoverable>
+        <Hoverable
+          base="width:30px;height:30px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:var(--mut);cursor:pointer;flex-shrink:0"
+          hover="background:var(--bg2);color:var(--tx2)"
+          onClick={toggle}
+          title={pick('Collapse · 折りたたむ', 'Collapse · 折りたたむ')}
+          aria-label={pick('Collapse the commands pane', 'コマンドパネルを折りたたむ')}
+        >
+          {icon(I_COLLAPSE_R, 17, 'currentColor')}
+        </Hoverable>
       </div>
-      <div style={s('font-size:11.5px;color:var(--mut);margin:4px 4px 0;line-height:1.5')}>
+      <div style={s('font-size:11.5px;color:var(--mut);margin:0 4px;line-height:1.5')}>
         {pick('Runs on this machine only — the public site has no such buttons.', 'この端末でのみ実行されます。公開サイトにはこのボタンはありません。')}
       </div>
 
@@ -322,15 +334,6 @@ export function CommandsPane() {
           )}
         </>
       )}
-
-      <div style={s('flex:1;min-height:14px')}></div>
-      <Hoverable
-        base="display:flex;align-items:center;gap:8px;padding:6px 12px;color:var(--mut);font-size:12px;cursor:pointer;border-radius:10px"
-        hover="background:var(--bg2);color:var(--tx2)"
-        {...press(toggle)}
-      >
-        {icon(I_COLLAPSE_R, 16, 'currentColor')}<span>{pick('Collapse · 折りたたむ', 'Collapse · 折りたたむ')}</span>
-      </Hoverable>
 
       {confirm && (
         <Modal onClose={() => setConfirm(null)}>

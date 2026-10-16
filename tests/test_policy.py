@@ -228,7 +228,51 @@ def test_classify_material():
     assert classify_material("資料1 制度設計", "x/079_01.pdf") == "handout"
     assert classify_material("別紙2", "x/besshi02.pdf") == "appendix"
     assert classify_material("議事次第", "x/shidai.pdf") == "agenda"
-    assert classify_material("その他", "x/random.pdf") == "other"
+
+
+def test_classify_material_unrecognised_documents_are_content():
+    """The default is ``handout``: OCCTO links a numbered paper as just its topic, and
+    typing that ``other`` (never ingested) summarised whole meetings from the agenda."""
+    url = "https://www.occto.or.jp/assets/iinkai/chousei_jukyu/122/chousei_122_01.pdf"
+    assert classify_material("補完オークションについて (1193KB)", url) == "handout"
+    assert classify_material("その他", "x/random.pdf") == "handout"
+    # a revised paper (…_02r) is still the paper
+    assert classify_material("電力需給検証報告書(案)について", "x/chousei_91_02r.pdf") == "handout"
+    # a title that merely *contains* a boilerplate-looking word is still a paper
+    assert classify_material("異常時（電源脱落）対応調整力の取扱いについて", "x/jukyu_shijyo_55_03.pdf") == "handout"
+    assert classify_material("一般送配電事業者による非公開情報の情報漏えいに係る再発防止策の検討",
+                             "x/096_05_00.pdf") == "handout"
+
+
+@pytest.mark.parametrize("title,url", [
+    ("委員名簿 (85KB)", "x/seibi_97_00_02.pdf"),
+    ("委員等名簿（PDF形式：247KB）", "x/072_00_03.pdf"),
+    ("資料2　委員名簿（PDF形式：85KB）", "x/002_02.pdf"),  # 資料 prefix must not rescue it
+    ("調整力及び需給バランス評価等に関する委員会 定義集 (389KB)", "x/chousei_66_01_02.pdf"),
+    ("配布資料一覧（PDF形式：89KB）", "x/072_00_01.pdf"),
+    ("合同会議の一部非公開について（PDF形式：108KB）", "x/036_00_04.pdf"),
+    ("議事の取り扱い等について（PDF形式：45KB）", "x/012_00_03.pdf"),
+    ("議事の公表について (159KB)", "x/renkeisen_kentoukai_01_04.pdf"),
+    ("MAP", "x/Toyosu_Map_r3.pdf"),
+    ("map", "x/Toyosu_Map_r3.pdf"),
+    ("", "x/Toyosu_Map_r3.pdf"),  # filename alone is enough
+])
+def test_classify_material_flags_boilerplate_as_other(title, url):
+    assert classify_material(title, url) == "other"
+
+
+def test_classify_material_combined_agenda_and_document_list_is_still_the_agenda():
+    # METI publishes "議事次第・配布資料一覧" as one file; the list wording is not junk here
+    assert classify_material("議事次第・配布資料一覧（PDF形式：79KB）", "x/028_00_01.pdf") == "agenda"
+    assert classify_material("配布資料一覧（PDF形式：89KB）", "x/072_00_01.pdf") == "other"
+
+
+def test_classify_material_data_sheets_and_attachments_are_appendices():
+    assert classify_material("苫東厚真1号機運転データ", "x/hokkaido_kensho_03_data1.pdf") == "appendix"
+    assert classify_material("こちら", "x/jukyu_shijyo_59_03_bessi_shinkyu.pdf") == "appendix"
+    assert classify_material("欧米における調査", "x/chousei_06_03_tenpu.pdf") == "appendix"
+    # …but a paper that is only *named* data is not
+    assert classify_material("データ集", "x/database_01.pdf") == "handout"
 
 
 def test_extract_meeting_number():
@@ -2298,3 +2342,274 @@ def test_occto_json_is_trusted_when_it_matches_what_we_know(monkeypatch):
     disc = scraper.discover_meetings(_occto(), known_latest=80)
 
     assert disc.meeting_nums == [80]
+
+
+# ── Late-published documents (refresh of recent known meetings) ──────────────
+def _mat(n: int, name: str, kind: str, title: str = "") -> Material:
+    return Material(n, f"{n:03d}_{name}", f"https://x/{n}/{name}.pdf", title or name, kind)
+
+
+def _summarised(db: str, key: str, n: int, mats: list[Material],
+                held: datetime.date | None = None) -> None:
+    """A meeting that has been through a run: done, briefing + synthesis flag set."""
+    store.record_meeting(key, n, mats, db_path=db)
+    store.update_meeting(pipeline._meeting_id(key, n, db), db_path=db, state="done",
+                         briefing_md="# 要約", synth_done=True, meeting_date=held)
+
+
+def _row(db: str, key: str, n: int):
+    from repower.db import PolicyMeeting
+    with store.session_scope(db, commit=False) as s:
+        m = s.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=n).one()
+        s.expunge(m)
+        return m
+
+
+def test_add_late_materials_requeues_a_done_meeting(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "gijishidai", "agenda")], datetime.date(2026, 9, 29))
+    before = _row(db, key, 122).updated_at
+
+    got = store.add_late_materials(
+        key, 122, [_mat(122, "gijishidai", "agenda"), _mat(122, "01", "handout")], db_path=db,
+    )
+
+    assert got == {"added": 1, "requeued": True}
+    m = _row(db, key, 122)
+    assert m.state == "done"                 # still shown…
+    assert m.briefing_md == "# 要約"         # …with its briefing, until the re-run replaces it
+    assert m.resummarise_requested is True
+    assert m.updated_at == before            # "when it was summarised" has not moved
+    assert m.materials_checked_at is not None
+    assert {r["pdf_id"] for r in store.meeting_materials(key, 122, db_path=db)} == {
+        "122_gijishidai", "122_01"}
+    # Not "pending": a status count of backlog keeps meaning "no briefing yet"…
+    assert store.pending_meetings(key, db_path=db) == []
+    # …but the run's worklist has it.
+    assert [(p["meeting_num"], p["resummarise"]) for p in
+            store.pending_meetings(key, db_path=db, include_resummarise=True)] == [(122, True)]
+
+
+def test_add_late_materials_is_a_noop_when_nothing_is_new(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "01", "handout")])
+    before = _row(db, key, 122).updated_at
+
+    got = store.add_late_materials(key, 122, [_mat(122, "01", "handout")], db_path=db)
+
+    assert got == {"added": 0, "requeued": False}
+    m = _row(db, key, 122)
+    assert m.state == "done" and m.updated_at == before
+
+
+def test_add_late_materials_appendix_alone_does_not_requeue(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "01", "handout")])
+    before = _row(db, key, 122).updated_at
+
+    got = store.add_late_materials(key, 122, [_mat(122, "01_besshi", "appendix")], db_path=db)
+
+    assert got == {"added": 1, "requeued": False}
+    m = _row(db, key, 122)
+    assert m.state == "done" and m.synth_done is True
+    assert m.updated_at == before  # "when it was summarised" must not move
+    assert len(store.meeting_materials(key, 122, db_path=db)) == 2
+
+
+def test_add_late_materials_junk_alone_does_not_requeue(policy_db):
+    db, key = policy_db, "santeii"
+    _summarised(db, key, 116, [_mat(116, "01", "handout")])
+    got = store.add_late_materials(key, 116, [_mat(116, "00_03", "other", "委員名簿")], db_path=db)
+    assert got == {"added": 1, "requeued": False}
+    assert _row(db, key, 116).state == "done"
+
+
+def test_add_late_materials_minutes_set_flag_and_requeue(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 121, [_mat(121, "01", "handout")])
+    got = store.add_late_materials(key, 121, [_mat(121, "gijiroku", "minutes")], db_path=db)
+    assert got["requeued"] is True
+    assert _row(db, key, 121).has_minutes is True
+
+
+def test_add_late_materials_leaves_a_pending_meeting_in_its_state(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    store.record_meeting(key, 123, [_mat(123, "gijishidai", "agenda")], db_path=db)
+    got = store.add_late_materials(key, 123, [_mat(123, "01", "handout")], db_path=db)
+    assert got == {"added": 1, "requeued": False}
+    assert _row(db, key, 123).state == "detected"
+
+
+def test_recent_meeting_nums_windows_by_date_and_state(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    today = datetime.date(2026, 10, 14)
+    _summarised(db, key, 120, [_mat(120, "01", "handout")], held=today - datetime.timedelta(days=40))
+    _summarised(db, key, 121, [_mat(121, "01", "handout")], held=today - datetime.timedelta(days=6))
+    _summarised(db, key, 122, [_mat(122, "01", "handout")], held=today - datetime.timedelta(days=1))
+    store.record_meeting(key, 123, [_mat(123, "gijishidai", "agenda")], db_path=db)  # undated, just detected
+    store.record_meeting(key, 124, [_mat(124, "gijishidai", "agenda")], db_path=db)
+    # in flight: a notebook is being built from this meeting's list as it stands
+    store.update_meeting(pipeline._meeting_id(key, 124, db), db_path=db, state="generating",
+                         meeting_date=today)
+
+    got = store.recent_meeting_nums(key, today - datetime.timedelta(days=7), db_path=db)
+
+    assert got == [123, 122, 121]  # newest first; 120 too old, 124 in flight
+
+
+def _recent_committee_setup(monkeypatch, db, key="chousei_jukyu"):
+    """A reachable committee whose index shows no new meeting."""
+    monkeypatch.setattr(detect_mod, "discover_meetings", lambda c, **kw: Discovery("unchanged", []))
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(detect_mod, "budget_exhausted", lambda url: False)
+
+
+def test_detect_refreshes_recent_meetings_and_requeues_the_summarised(monkeypatch, policy_db):
+    """第122回 was recorded with only its agenda and summarised from it; the papers
+    went up afterwards. Detection re-reads the page and sends it back."""
+    db, key = policy_db, "chousei_jukyu"
+    today = datetime.date(2026, 10, 3)
+    _summarised(db, key, 122, [_mat(122, "gijishidai", "agenda")], held=datetime.date(2026, 9, 29))
+    _summarised(db, key, 100, [_mat(100, "gijishidai", "agenda")], held=datetime.date(2026, 1, 5))
+    _recent_committee_setup(monkeypatch, db)
+    listed: list[int] = []
+
+    def fake_list(c, n, **kw):
+        listed.append(n)
+        return [_mat(n, "gijishidai", "agenda"), _mat(n, "01", "handout"), _mat(n, "02", "handout")]
+
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+
+    res = detect_mod.detect([key], db_path=db, today=today)
+
+    # 122 is inside the 7-day window; 100 is far outside it, but has no minutes/brief
+    # and was never re-read, so the watch tier looks at it once.
+    assert sorted(listed) == [100, 122]
+    assert (res[0]["refreshed"], res[0]["requeued"]) == (4, 2)
+    assert _row(db, key, 122).resummarise_requested is True
+    assert _row(db, key, 122).state == "done"
+
+
+def test_detect_refresh_does_not_re_read_meetings_it_just_listed(monkeypatch, policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    today = datetime.date(2026, 10, 3)
+    monkeypatch.setattr(detect_mod, "discover_meetings", lambda c, **kw: Discovery("ok", [5]))
+    monkeypatch.setattr(detect_mod.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(detect_mod, "budget_exhausted", lambda url: False)
+    calls: list[int] = []
+
+    def fake_list(c, n, **kw):
+        calls.append(n)
+        return [_mat(n, "gijishidai", "agenda")]
+
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+
+    detect_mod.detect([key], db_path=db, today=today)
+
+    assert calls == [5]  # enumerated once as new, not again by the refresh
+
+
+def test_detect_refresh_is_off_for_dry_run_and_when_disabled(monkeypatch, policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "gijishidai", "agenda")], held=datetime.date(2026, 9, 29))
+    _recent_committee_setup(monkeypatch, db)
+    monkeypatch.setattr(detect_mod, "list_materials",
+                        lambda c, n, **kw: pytest.fail("must not fetch"))
+
+    today = datetime.date(2026, 10, 3)
+    detect_mod.detect([key], db_path=db, today=today, dry_run=True)
+    detect_mod.detect([key], db_path=db, today=today,
+                      refresh_window_days=None, watch_horizon_days=None)
+    detect_mod.detect([key], db_path=db, today=today,
+                      refresh_window_days=0, watch_horizon_days=0)
+    assert _row(db, key, 122).resummarise_requested in (None, False)
+
+
+def test_detect_refresh_skips_committees_that_were_not_reachable(monkeypatch, policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "gijishidai", "agenda")], held=datetime.date(2026, 9, 29))
+    monkeypatch.setattr(detect_mod, "discover_meetings",
+                        lambda c, **kw: Discovery("error", [], error_kind="blocked"))
+    monkeypatch.setattr(detect_mod, "list_materials",
+                        lambda c, n, **kw: pytest.fail("host is blocked; must not fetch"))
+
+    res = detect_mod.detect([key], db_path=db, today=datetime.date(2026, 10, 3))
+
+    assert res[0]["status"] == "error" and res[0]["refreshed"] == 0
+
+
+def test_detect_refresh_stops_when_the_host_budget_is_spent(monkeypatch, policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    for n in (120, 121, 122):
+        _summarised(db, key, n, [_mat(n, "gijishidai", "agenda")], held=datetime.date(2026, 9, 29))
+    _recent_committee_setup(monkeypatch, db)
+    seen: list[int] = []
+    spent = {"v": False}
+
+    def fake_list(c, n, **kw):
+        seen.append(n)
+        spent["v"] = True  # the first fetch uses the last of the allowance
+        return [_mat(n, "gijishidai", "agenda"), _mat(n, "01", "handout")]
+
+    monkeypatch.setattr(detect_mod, "list_materials", fake_list)
+    monkeypatch.setattr(detect_mod, "budget_exhausted", lambda url: spent["v"])
+
+    detect_mod.detect([key], db_path=db, today=datetime.date(2026, 10, 3))
+
+    assert seen == [122]  # newest first, then it stopped
+
+
+def test_detect_refresh_keeps_an_unreachable_page_from_emptying_a_meeting(monkeypatch, policy_db):
+    """``list_materials`` returns [] for an unreachable page; that must be read as
+    "don't know", never as "the documents were withdrawn"."""
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "01", "handout")], held=datetime.date(2026, 9, 29))
+    _recent_committee_setup(monkeypatch, db)
+    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
+
+    res = detect_mod.detect([key], db_path=db, today=datetime.date(2026, 10, 3))
+
+    assert res[0]["refreshed"] == 0
+    assert _row(db, key, 122).state == "done"
+    assert len(store.meeting_materials(key, 122, db_path=db)) == 1
+
+
+def test_detect_refresh_failure_never_fails_detection(monkeypatch, policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    _summarised(db, key, 122, [_mat(122, "01", "handout")], held=datetime.date(2026, 9, 29))
+    _recent_committee_setup(monkeypatch, db)
+
+    def boom(c, n, **kw):
+        raise RuntimeError("page layout changed")
+
+    monkeypatch.setattr(detect_mod, "list_materials", boom)
+
+    res = detect_mod.detect([key], db_path=db, today=datetime.date(2026, 10, 3))
+
+    assert res[0]["status"] == "unchanged" and res[0]["refreshed"] == 0
+
+
+def test_reclassify_materials_reports_and_applies(policy_db):
+    db, key = policy_db, "chousei_jukyu"
+    # stored by the old classifier: a paper typed other, a roster typed handout
+    store.record_meeting(key, 122, [
+        _mat(122, "01", "other", "補完オークションについて (1193KB)"),
+        _mat(122, "meibo", "handout", "資料2 委員名簿 (85KB)"),
+        _mat(122, "gijishidai", "agenda", "議事次第 (81KB)"),
+    ], db_path=db)
+    store.update_meeting(pipeline._meeting_id(key, 122, db), db_path=db, state="done")
+
+    dry = store.reclassify_materials(db_path=db, dry_run=True)
+
+    assert {(c["pdf_id"], c["old"], c["new"], c["state"]) for c in dry} == {
+        ("122_01", "other", "handout", "done"),
+        ("122_meibo", "handout", "other", "done"),
+    }
+    assert {r["pdf_id"]: r["kind"] for r in store.meeting_materials(key, 122, db_path=db)}[
+        "122_01"] == "other"  # dry run wrote nothing
+
+    store.reclassify_materials(db_path=db)
+
+    kinds = {r["pdf_id"]: r["kind"] for r in store.meeting_materials(key, 122, db_path=db)}
+    assert kinds == {"122_01": "handout", "122_meibo": "other", "122_gijishidai": "agenda"}
+    assert store.reclassify_materials(db_path=db, dry_run=True) == []  # idempotent

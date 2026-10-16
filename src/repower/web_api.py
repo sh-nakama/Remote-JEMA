@@ -601,7 +601,8 @@ class _Handler(BaseHTTPRequestHandler):
                 if not request_generation(key, num, db_path=self.db_path):
                     return self._send(404, {"error": "no such meeting"})
             else:
-                clear_generation_request(key, num, db_path=self.db_path)
+                clear_generation_request(key, num, db_path=self.db_path,
+                                         withdraw_resummarise=True)
             return self._send(200, {"ok": True, "key": key, "meeting_num": num, "queued": queued})
         if path == "/api/policy/priority":
             from repower.policy.store import set_committee_priority

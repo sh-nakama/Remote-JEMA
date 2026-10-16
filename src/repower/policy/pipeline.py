@@ -296,6 +296,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
 
     work = _scratch() / committee.key / str(meeting_num)
     started = time.monotonic()
+    had_briefing = _has_briefing(meeting_row, db_path)  # a re-run replaces it: an *update*, not a first summary
     notebook_id: str | None = None
     # Documents already fetched are kept when a meeting is left pending, so the next
     # attempt only asks for what is missing (see the `finally` below).
@@ -484,6 +485,7 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         if quality_flag is None and len(briefing) < 400:
             quality_flag = "short_output"
 
+        finished = datetime.now(UTC)
         update_meeting(
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
             digest_en_json=digest_json, citations_json=citations_json, quality_flag=quality_flag,
@@ -492,7 +494,10 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             # longer describes the meeting — clear it rather than leave the status
             # table reporting a resolved error against a summarised meeting.
             last_error=None, last_error_at=None,
-            summarised_at=datetime.now(UTC),
+            # A re-run replaces the briefing: it answers a queued upgrade, and the copy
+            # folded into the committee synthesis is now stale (so synthesis re-reads it).
+            resummarise_requested=False, synth_done=False,
+            summarised_at=finished, **({"resummarised_at": finished} if had_briefing else {}),
         )
         regenerate_running_doc(committee.key, db_path=db_path)
         if llm_tags is not None:
@@ -716,7 +721,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         reset_synthesized(keys[0], meeting_num, db_path=db_path)
     else:
         work = pending_meetings(db_path=db_path, only_enabled=(not keys),
-                                breadth_first=breadth_first)
+                                breadth_first=breadth_first, include_resummarise=True)
         if keys:
             work = [m for m in work if m["committee_key"] in keys]
         if states:
@@ -757,13 +762,18 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             host = urlsplit(committee.url).hostname or "?"
             skipped_hosts[host] = skipped_hosts.get(host, 0) + 1
             continue
+        upgrade = bool(item.get("resummarise"))
         try:
             state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
         except _HALTING as e:
+            if upgrade:
+                _keep_briefing_visible(item["committee_key"], item["meeting_num"], db_path)
             stop_reason = _stop_reason(e)
             logger.warning("NotebookLM %s — stopping run after %d meeting(s); the rest stay "
                            "pending: %s", stop_reason, charged, e)
             break
+        if upgrade and state in ("error", "blocked"):
+            _keep_briefing_visible(item["committee_key"], item["meeting_num"], db_path)
         if state == "blocked":
             # Host trouble, not quota. Leave any queued dashboard request in place
             # so the meeting stays at the front of the next round's worklist.
@@ -820,6 +830,31 @@ def resume(*, db_path: str | None = None) -> dict:
     return run(db_path=db_path, states=("downloading", "ingesting", "generating"))
 
 
+def _keep_briefing_visible(key: str, meeting_num: int, db_path: str | None) -> None:
+    """Put a re-run that did not finish back to ``done``.
+
+    A re-run walks the meeting through ``downloading`` → ``ingesting`` → …, and its
+    failure paths leave it ``error``/``detected``. For a first summary that is right —
+    there is nothing else to show. For an upgrade there is a good briefing already, and
+    a failed attempt to improve it must not take it off the page. The flag stays set
+    (the retry cap in ``pending_meetings`` bounds it), as does ``last_error``, so the
+    status table still says why the upgrade has not landed. A meeting left
+    ``generating`` is deliberately not touched: ``resume`` finishes it.
+    """
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        row = (session.query(PolicyMeeting)
+               .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
+        if row is not None and row.briefing_md and row.state not in ("done", "generating"):
+            row.state = "done"
+            session.commit()
+    finally:
+        session.close()
+
+
 # ── small DB helpers kept local to avoid widening store's surface ────────────
 def _meeting_id(key: str, meeting_num: int, db_path: str | None) -> int | None:
     from repower.db import PolicyMeeting, get_session, init_db
@@ -829,6 +864,18 @@ def _meeting_id(key: str, meeting_num: int, db_path: str | None) -> int | None:
     try:
         row = session.query(PolicyMeeting.id).filter_by(committee_key=key, meeting_num=meeting_num).one_or_none()
         return row[0] if row else None
+    finally:
+        session.close()
+
+
+def _has_briefing(meeting_id: int, db_path: str | None) -> bool:
+    from repower.db import PolicyMeeting, get_session, init_db
+
+    init_db(db_path)
+    session = get_session(db_path)
+    try:
+        row = session.get(PolicyMeeting, meeting_id)
+        return bool(row is not None and row.briefing_md)
     finally:
         session.close()
 

@@ -802,6 +802,102 @@ fixed.
   committee payload is shared, so missing one silently exports `tags: []` for that path. The
   retag step is wrapped (`cli._retag_policy`) so a tagging bug can never fail the scrape or the
   HF push — keep it that way, it is derived data.
+- **A briefing can be written from an agenda alone, twice over.** `chousei_jukyu` 第119–122回
+  were each "summarised" from their 議事次第 only, and read as complete (出席者：資料に記載なし).
+  Two independent causes, both fixed, either of which reproduces it:
+  - *The document list went stale.* `detect` lists a meeting's documents once, when the meeting is
+    first seen (the agenda is up before the meeting; handouts and 議事録 come later), and
+    `summarize_meeting` trusts that list. `detect` now re-reads the list of every known meeting
+    held in the last 7 days (`--refresh-days`, newest 5 per committee, METI via one index fetch)
+    and `store.add_late_materials` adds what is new. A `done` meeting that gains a
+    minutes/brief/compilation/handout/agenda paper gets `resummarise_requested` (see the
+    next bullet); a late appendix alone does not — it is only ingested when the budget has
+    room.
+  - *The classifier dropped the papers.* `classify_material` used to default to `other`, which
+    `_select_materials` never ingests, so OCCTO's numbered papers (`chousei_122_01.pdf`, linked as
+    just their topic) were typed `other` and skipped even when listed. The default is now
+    `handout`; `other` is only recognised boilerplate (`is_junk_material`: 名簿, 定義集, 配布資料一覧,
+    …非公開について, 議事の取り扱い/公表, the venue map). Keep those patterns specific — a bare
+    `非公開` or `取扱い` matches real papers ("非公開情報の…", "…の取扱いについて").
+- **Where an update sits in the daily order: after every committee's newest pending meeting,
+  before anyone's second-newest** (`store.UPDATE_DEPTH = 0.5`, a backlog depth between 0 and 1;
+  moved-to-front still outranks it). It was *behind every never-summarised meeting* and measured at
+  rank 291 of 291 — ~37 daily runs — behind a historical backlog (some of it from 2017), so a meeting
+  that had just published its minutes waited weeks to be refreshed. Two limits on the rule: it
+  applies to **breadth-first only** (the daily run, `--committee all`); a depth-first
+  single-committee run — a backfill draining history — keeps updates after every pending meeting.
+  And it is a single sort key (`_tier` in `pending_meetings`), so the Queue view, the run and the
+  tests all agree; don't add a second ordering rule beside it.
+- **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
+  separate column, not a state change: the meeting stays `done` and its briefing stays on the
+  page while the re-run waits for quota (a minutes upgrade makes a *valid* briefing better, so
+  hiding it for days would be a regression). `pending_meetings` leaves flagged meetings out by
+  default — "pending" is also a count meaning *no briefing yet* — and `run` asks for them with
+  `include_resummarise=True`, slotting them in by the rule in the next bullet and not counting them
+  as breadth-first backlog depth. They share the `MAX_RETRIES` cap, so an upgrade
+  that keeps failing cannot burn quota daily. Things that must stay true:
+  - The run restores `done` after a failed/blocked/rate-limited re-run
+    (`_keep_briefing_visible`) because the pipeline's failure paths set `error`/`detected`;
+    a new failure path that skips this takes a good briefing off the page.
+  - Success clears the flag **and** `synth_done`, so the committee synthesis re-reads the new
+    briefing. `clear_generation_request` deliberately does not clear the flag (the pipeline
+    calls it after failed attempts too); only a person un-queuing does (`withdraw_resummarise`).
+  - `request_generation` ("queue to front") on a `done` meeting sets the flag too — a bare
+    `gen_requested` on a done meeting is outside the worklist and would never be read.
+- **Minutes land weeks late; a second, slower tier re-reads for them.** The 7-day window above
+  has closed by then. `detect` also re-reads summarised, tracked meetings with **neither minutes
+  nor a brief** (`store.watch_meeting_nums`): once at any age (lists were frozen at first sight,
+  so an old meeting may already have minutes), then about weekly until 90 days after the meeting
+  (`--watch-days`, 0 = off; 5 per committee per pass, after the recent tier). A committee that
+  never publishes minutes therefore costs ~13 fetches per meeting, once, not a daily poll.
+  `materials_checked_at` stamps every successful listing (found-nothing included) and
+  `policy_material.first_seen_at` records when each document appeared, so publication lag per
+  committee can be measured rather than guessed — rows recorded before the column are NULL.
+- **A document is typed once, when first seen.** `record_meeting` skips a `pdf_id` it already has,
+  so changing `classify_material` never changes stored rows. `policy reclassify` reports (and with
+  `--apply` writes) what would change, and lists the summarised meetings that would gain a paper;
+  it queues nothing unless `--queue` is given (that is a quota decision). It is also a
+  Commands-pane entry (`reclassify`, backflow step 5, Apply and Queue both **off** by default): the
+  first click is the report, the second is the write. Its log breaks the changes down by committee
+  and names the meetings that would gain a paper (list capped at 60, alphabetical — so read the
+  per-committee line, not the list, to see how far a run reached).
+  - **`--queue` only acts on the run that re-types the documents.** The old kinds are gone after
+    an apply, so a later run has nothing to diff and would queue nothing. Tick Apply and Queue
+    together; if you applied without it, queue meetings one at a time (`policy queue`, which now
+    works on a `done` meeting). `--queue` without `--apply` is refused (also in the pane's argv
+    builder), and it flags tracked committees only — an untracked one's flag would light the
+    "update queued" chip for work no run ever starts.
+- **The Queue view is `pending_meetings`, not a second opinion.** `store.queue_snapshot` calls the
+  very function `policy run --committee all` uses (tracked, breadth-first, upgrades included), so the
+  order cannot drift from the run; a test pins that. Things that must stay true:
+  - `DAILY_RUN_CAP` (8) mirrors the `policy.yml` default; `test_daily_run_cap_matches_the_workflow_default`
+    fails if either changes alone. The real limiter is usually the NotebookLM daily quota, so the view
+    says "first 8", never "will run".
+  - `items` is the first 100 by rank **plus every update/retry/moved-to-front meeting wherever it
+    ranks**. A plain cap hid the one `Update` meeting — it ranked 291 of 291 then — so the chip said 1
+    and the filtered list said nothing (found in the running app, not by a test).
+    Ranks are therefore non-contiguous; `withGaps` renders the "… N more …" marker.
+  - "Drained" reads `summarised_at` / `resummarised_at`, stamped only on a *successful* summarise
+    (`updated_at` is touched by other writes). Rows finished before the columns existed fall back to
+    "done, touched recently, has a generation time" and carry `kind: null` (shown `SUMMARISED`).
+  - A meeting is an *update* (not new) when it already had a briefing when the run started.
+- **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
+  `docs/USER-GUIDE.md`, and the "steps 5, 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
+  Only the *presence* of each command in the guide is tested, so inserting a step (as
+  `reclassify` did at 5) silently leaves the table numbering wrong unless you renumber it.
+- **The Status table's "Update queued" chip needs the flagged meeting to be in the list it
+  expands to.** `build_policy_status` therefore pins `resummarise_requested` meetings like errored
+  ones (the 20-per-committee cap would trim an old flagged meeting first), and the chip's count
+  comes from `updateQueued`, computed over every row — not from the capped `meetings` list.
+- **The Commands pane draws its Backflow section from the selected *flow's steps*, not from the
+  command group.** A `BACKFLOW` command that no `RECIPES` entry names exists in the API and the
+  CLI but is never rendered — `reclassify` was merged that way and looked "missing" from the pane.
+  `test_every_backflow_command_is_a_step_of_some_flow` guards it; a maintenance command that
+  should not be in the guided order goes in the full flow's `optional=`.
+- **`position:sticky` inside the padded, scrolling Commands pane offsets from the content box,
+  not the pane's top edge.** With the pane's 22px top padding, `top:0` parks a sticky header 22px
+  down at scrollTop 0, over the line below it. The header cancels the padding with a negative
+  margin and uses `top:-22px`; change the pane's padding and both numbers move together.
 - **`policy_upcoming` is no longer only the future.** `replace_upcoming` rewrites rows dated
   today-or-later (the calendar snapshot) but *keeps* past rows for `UPCOMING_HISTORY_DAYS`
   (90): they are the only record of untracked METI meetings that were held, and the weekly
@@ -810,10 +906,10 @@ fixed.
   reader that does `SELECT … FROM policy_upcoming` unfiltered will show held meetings as
   scheduled.
 - **"Summarised this week" means `summarised_at`, never `updated_at`.** `summarised_at` is
-  stamped only when `pipeline.summarize_meeting` sets `state="done"`. The migration
-  backfilled old done rows from `updated_at`, which detection bumps, so the first weekly email
-  after it shipped could list a few older meetings under "Summaries now available" once.
-  Any new done-writer must set it too, or that meeting never shows up as newly summarised.
+  stamped only when `pipeline.summarize_meeting` sets `state="done"`. The migration does *not*
+  backfill it, so meetings summarised before the column existed carry NULL and never appear
+  under "Summaries now available" — they are only visible to the Queue view's fallback. Any new
+  done-writer must set it too, or that meeting never shows up as newly summarised.
 - **The weekly email is keyed on `meeting_date`.** Undated meetings never appear (the footer
   counts them instead), so meeting-date coverage (`policy dates`, OCCTO JSON, energy-board)
   is what decides what the email can show. A skipped Friday run is not caught up: the

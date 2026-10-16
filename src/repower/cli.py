@@ -510,19 +510,41 @@ def policy_detect(
     committee: str = typer.Option("all", help="Committee key or 'all'"),
     window: int = typer.Option(8, help="Enumerate materials for the newest N new meetings"),
     dry_run: bool = typer.Option(False, help="Report new meetings without writing to the DB"),
+    refresh_days: int = typer.Option(
+        7,
+        help="Also re-read the document list of known meetings held in the last N days, "
+             "and flag summarised ones that gained a paper for a new briefing (0 = off)",
+    ),
+    watch_days: int = typer.Option(
+        90,
+        help="Also re-check summarised meetings with no minutes yet, about weekly, for N "
+             "days after the meeting (each is also looked at once at any age; 0 = off)",
+    ),
 ):
     """Detect new committee meetings (no NotebookLM auth required)."""
     from repower.policy.detect import detect
 
     keys = None if committee == "all" else [committee]
-    results = detect(keys, enumerate_window=window, dry_run=dry_run)
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}")
+    results = detect(
+        keys, enumerate_window=window, dry_run=dry_run,
+        refresh_window_days=(refresh_days or None),
+        watch_horizon_days=(watch_days or None),
+    )
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'STATUS':<10}{'ONLINE':>7}{'KNOWN':>7}{'NEW':>5}{'DOCS+':>6}{'REQ':>5}")
     for r in results:
         typer.echo(
             f"{r['key']:<28}{r['source']:<6}{r['status']:<10}"
             f"{str(r['latest_online'] or '-'):>7}{str(r['known_latest'] or '-'):>7}{r['new']:>5}"
+            f"{r.get('refreshed', 0):>6}{r.get('requeued', 0):>5}"
         )
     typer.echo(f"── {sum(r['new'] for r in results)} new meeting(s) total ──")
+    refreshed = sum(r.get("refreshed", 0) for r in results)
+    requeued = sum(r.get("requeued", 0) for r in results)
+    if refreshed or requeued:
+        typer.echo(
+            f"── {refreshed} late document(s) found for known meetings; "
+            f"{requeued} summarised meeting(s) queued for a new briefing ──"
+        )
     _report_deferred(sum(1 for r in results if r["status"] == "deferred"), "committee")
     if not dry_run:
         _retag_policy()
@@ -593,6 +615,80 @@ def policy_materials(
             total += r["materialised"]
     typer.echo(f"-- {total} meeting(s) populated with materials --")
     _report_deferred(sum(r["deferred"] for r in results), "meeting")
+
+
+_RECLASSIFY_LIST_CAP = 60
+_RECLASSIFY_TOP_COMMITTEES = 8
+
+
+@policy_app.command("reclassify")
+def policy_reclassify(
+    apply: bool = typer.Option(False, "--apply", help="Write the new kinds (default: report only)"),
+    queue: bool = typer.Option(
+        False, "--queue",
+        help="With --apply: also queue the summarised meetings that gain a paper for a new "
+             "briefing (tracked committees; they run behind new meetings). Acts only on the "
+             "documents this run re-types, so use it on the same run as --apply.",
+    ),
+):
+    """Re-type stored documents with the current classifier (no network, no auth).
+
+    Documents are typed once, when first seen, so rows recorded by an earlier
+    classifier keep a stale kind — notably numbered papers stored as ``other``
+    (never ingested) and rosters stored as ``handout``. Report-only unless --apply.
+    A summarised meeting that gains an ingestable paper is listed, per committee and by
+    meeting, so it can be re-run with ``policy run --committee K --meeting N``. Nothing is
+    queued unless --queue is given (which needs --apply): that flags those meetings for a
+    new briefing, drained behind never-summarised meetings by the normal run.
+    """
+    from collections import Counter
+
+    from repower.policy.store import INGEST_KINDS, queue_resummarise, reclassify_materials
+
+    if queue and not apply:
+        raise typer.BadParameter("--queue needs --apply: queueing changes data, so it is not "
+                                 "part of the report-only run", param_hint="--queue")
+    changes = reclassify_materials(dry_run=not apply)
+    moves: dict[tuple[str | None, str], int] = {}
+    for c in changes:
+        moves[(c["old"], c["new"])] = moves.get((c["old"], c["new"]), 0) + 1
+    for (old, new), n in sorted(moves.items(), key=lambda kv: -kv[1]):
+        typer.echo(f"{n:>5}  {old} -> {new}")
+    gained = sorted({
+        (c["committee_key"], c["meeting_num"]) for c in changes
+        if c["state"] == "done" and c["new"] in INGEST_KINDS and c["old"] not in INGEST_KINDS
+    })
+    by_com = Counter(c["committee_key"] for c in changes)
+    typer.echo(f"-- {len(changes)} document(s) {'re-typed' if apply else 'would change'} "
+               f"across {len(by_com)} committee(s); "
+               f"{len(gained)} summarised meeting(s) gain a paper they were never given --")
+    # Per committee, because the meeting list below is capped and alphabetical: one big
+    # committee fills it, and a run that touched 66 committees read as touching one.
+    if by_com:
+        top = by_com.most_common(_RECLASSIFY_TOP_COMMITTEES)
+        more = len(by_com) - len(top)
+        typer.echo("   documents by committee: " + ", ".join(f"{k} {n}" for k, n in top)
+                   + (f" (+{more} more committee(s))" if more > 0 else ""))
+    gain_by = Counter(k for k, _ in gained)
+    if gain_by:
+        typer.echo("   meetings gaining a paper: "
+                   + ", ".join(f"{k} {n}" for k, n in sorted(gain_by.items(), key=lambda kv: (-kv[1], kv[0]))))
+    # Name them: a count alone leaves nothing to act on. Capped so a first run stays readable.
+    for key, num in gained[:_RECLASSIFY_LIST_CAP]:
+        typer.echo(f"   {key} 第{num}回   (policy run --committee {key} --meeting {num})")
+    if len(gained) > _RECLASSIFY_LIST_CAP:
+        typer.echo(f"   ... and {len(gained) - _RECLASSIFY_LIST_CAP} more")
+    if queue:
+        res = queue_resummarise(gained)
+        typer.echo(f"-- queued {len(res['queued'])} meeting(s) for a new briefing"
+                   + (f"; skipped {len(res['untracked'])} in untracked committee(s)" if res["untracked"] else "")
+                   + " --")
+    elif apply and gained:
+        # After an apply the old kinds are gone, so a later run has nothing left to diff.
+        typer.echo("   not queued. --queue only acts on the run that re-types the documents; from "
+                   "here queue one meeting with `policy queue --committee K --meeting N`.")
+    elif not apply and changes:
+        typer.echo("   re-run with --apply to write them (add --queue to also queue the meetings above)")
 
 
 @policy_app.command("run")
@@ -840,21 +936,28 @@ def policy_notebooks():
 
 @policy_app.command("status")
 def policy_status():
-    """Show per-committee state: enabled flag, priority, latest meeting, pending counts."""
+    """Show per-committee state: enabled flag, priority, latest meeting, pending counts.
+
+    PENDING is meetings with no briefing yet. UPDATE is summarised meetings queued to be
+    written again because a paper (e.g. the minutes) arrived after the summary.
+    """
     from collections import Counter
 
     from repower.policy.store import list_committees, pending_meetings, sync_committees
 
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}  {'FETCH':<22}")
+    upd = Counter(m["committee_key"] for m in pending_meetings(include_resummarise=True)
+                  if m["resummarise"])
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}{'UPDATE':>8}  {'FETCH':<22}")
     for c in list_committees():
         latest = c["latest_meeting"] if c["latest_meeting"] else "-"
         on = "y" if c["enabled"] else "-"
         tag = "*" if c["user_added"] else ""
         typer.echo(
             f"{c['committee_key'] + tag:<28}{c['source']:<6}{on:>3}{c['priority']:>5}"
-            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}  {_fetch_label(c):<22}"
+            f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}"
+            f"{upd.get(c['committee_key'], 0):>8}  {_fetch_label(c):<22}"
         )
 
 

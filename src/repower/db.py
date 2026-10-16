@@ -277,15 +277,27 @@ class PolicyMeeting(Base):
     # Set when a user asks the dashboard to summarise this meeting but auth was stale
     # (or they queued it): the next `policy run` drains requested meetings first.
     gen_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # A ``done`` meeting whose briefing is stale and should be written again — a paper
+    # (minutes, handout…) turned up after it was summarised. Unlike a state change this
+    # keeps the existing briefing in view while the re-run waits for quota; the run
+    # clears it when the new briefing lands. In the daily run it follows each
+    # committee's newest pending meeting but precedes deeper backlog (store.UPDATE_DEPTH).
+    resummarise_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
+    # When this meeting's document list was last re-read from its page (NULL = never
+    # since it was first recorded). Drives the sparse re-check for late minutes.
+    materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    # When the pipeline last finished writing this meeting's briefing, and — when that
+    # replaced an existing briefing rather than writing the first — when. ``updated_at``
+    # cannot say this: other writes touch it. They are what the Queue view's "recently
+    # drained" list reads, so an operator can see what the daily run actually worked through.
+    summarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    resummarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # Topic tags for *this* meeting (not inherited from the committee) — same encoding
     # as ``PolicyCommittee.tags``; source is rule | llm | manual.
     tags: Mapped[str | None] = mapped_column(Text)
     tags_source: Mapped[str | None] = mapped_column(String(8))
     detected_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
     updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime, default=lambda: datetime.now(UTC))
-    # When the summary landed (state → done). Not ``updated_at``: detection, retries
-    # and materials backfills bump that, so it cannot say "summarised this week".
-    summarised_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     __table_args__ = (
         UniqueConstraint("committee_key", "meeting_num", name="uq_policy_meeting"),
     )
@@ -329,6 +341,7 @@ class PolicyMaterial(Base):
     meeting_num: Mapped[int] = mapped_column(Integer, nullable=False)
     pdf_id: Mapped[str] = mapped_column(String(128), nullable=False)  # stable per-committee dedup key
     # minutes | brief | compilation | appendix | handout | agenda | other
+    # ("other" = recognised boilerplate - roster, map, glossary - never ingested)
     kind: Mapped[str | None] = mapped_column(String(16))
     url: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)  # link text
@@ -336,6 +349,10 @@ class PolicyMaterial(Base):
     sha256: Mapped[str | None] = mapped_column(String(64))
     # detected | downloaded | ingested | error
     status: Mapped[str | None] = mapped_column(String(16), default="detected")
+    # When this document first appeared on the meeting page. NULL on rows recorded before
+    # this column existed. With the meeting date it gives the publication lag per
+    # committee — what the late-minutes re-check schedule should be tuned to.
+    first_seen_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     __table_args__ = (
         UniqueConstraint("committee_key", "pdf_id", name="uq_policy_material"),
     )
@@ -386,7 +403,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_meeting_error(engine)
             _migrate_add_policy_tags(engine)
             _migrate_add_policy_citations(engine)
-            _migrate_add_policy_summarised_at(engine)
+            _migrate_add_policy_minutes_watch(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -569,25 +586,37 @@ def _migrate_add_policy_citations(engine) -> None:
             conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
 
 
-def _migrate_add_policy_summarised_at(engine) -> None:
-    """Add ``summarised_at`` to ``policy_meeting`` (additive).
+def _migrate_add_policy_minutes_watch(engine) -> None:
+    """Add the late-document tracking columns (additive; all NULL/0 = "not yet").
 
-    Existing ``done`` rows are backfilled from ``updated_at`` — the closest record of
-    when they finished. It can be later than the real moment (detection bumps it), so
-    a meeting summarised long ago may show once as "summary now available" in the
-    first weekly email after this runs; every summary written afterwards is exact.
+    ``policy_meeting.resummarise_requested`` / ``materials_checked_at`` and
+    ``policy_material.first_seen_at``. Pulled production DBs predate them.
     """
     from sqlalchemy import inspect
     from sqlalchemy import text as sql_text
     insp = inspect(engine)
-    if "policy_meeting" not in insp.get_table_names():
-        return
-    if "summarised_at" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
-        with engine.begin() as conn:
-            conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"))
-            conn.execute(sql_text(
-                "UPDATE policy_meeting SET summarised_at = updated_at WHERE state = 'done'"
-            ))
+    names = insp.get_table_names()
+    adds = {
+        "policy_meeting": [
+            ("resummarise_requested",
+             "ALTER TABLE policy_meeting ADD COLUMN resummarise_requested BOOLEAN DEFAULT 0"),
+            ("materials_checked_at",
+             "ALTER TABLE policy_meeting ADD COLUMN materials_checked_at DATETIME"),
+            ("summarised_at", "ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"),
+            ("resummarised_at", "ALTER TABLE policy_meeting ADD COLUMN resummarised_at DATETIME"),
+        ],
+        "policy_material": [
+            ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),
+        ],
+    }
+    with engine.begin() as conn:
+        for table, cols_ddl in adds.items():
+            if table not in names:
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for col, ddl in cols_ddl:
+                if col not in have:
+                    conn.execute(sql_text(ddl))
 
 
 def _migrate_add_fetch_observability(engine) -> None:

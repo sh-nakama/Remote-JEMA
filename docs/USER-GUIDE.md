@@ -163,7 +163,7 @@ This is a personal filter only.
 committee "gear"). Toggling *Track* here changes what the backend summarises; the
 screen behind refetches so the change is reflected immediately.
 
-**See what the pipeline actually did (Status view).** Manage has two views,
+**See what the pipeline actually did (Status view).** Manage has three views,
 switched from the toggle in its header:
 
 - **Cards** — the three-org grid. This is where you *manage the tracked set*.
@@ -173,7 +173,21 @@ switched from the toggle in its header:
   summarised / pending / errored, and whether the committee's pages could be
   fetched at all. Click any row to expand it into that committee's individual
   meetings — each with its raw lifecycle state, **the message it failed with**, its
-  document count and when it was last written.
+  document count and when it was last written. A meeting that is waiting to be
+  summarised carries a chip with its place in the queue (`NEW next run #5`,
+  `UPDATE #291`).
+- **Queue** — what the daily run will work through, **in the order it takes it**, and
+  what it has just worked through. Filter chips count the whole queue by kind: **New**
+  (never summarised), **Update** (already summarised and still showing that summary,
+  but a paper — usually the minutes — arrived afterwards, so it is written again),
+  **Retry** (an earlier attempt failed) and **Moved to front** (set with the ↑ button
+  or `policy queue`). A chip per committee narrows the list to it. A dashed line marks
+  where one daily run stops by count (`--max-per-run`, 8) — an **Update** is placed after every committee's newest pending meeting and ahead of deeper backlog, so it is normally inside that first 8: rows below the line carry a rough
+  `~day N`. That is a floor — NotebookLM's daily quota usually stops a run sooner, and
+  a committee whose source site is blocked that day is skipped. **Drained** lists the
+  meetings summarised in the last 7 days, marked `NEW` or `UPDATE` (or `SUMMARISED`
+  for those finished before that was recorded). Updates, retries and moved-to-front
+  meetings are always listed; a long run of ordinary new meetings is shown as a count.
 
 Two independent kinds of failure show up there, and it's worth keeping them apart:
 the **Fetch** column is whether we could *reach* the committee's pages (`blocked_403`,
@@ -496,21 +510,22 @@ only if this copy was pulled recently.
 | # | Command | What it does |
 | --- | --- | --- |
 | 1 | `repower pull-hf` | **Dangerous.** Replace the local database and Parquet files with the shared dataset's. Start every session here; push first if you have local work to keep. |
-| 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates). Auth-free. |
+| 2 | `repower policy detect` | Find new meetings on the committee pages (also records their dates), and re-read the document list of meetings held in the last 7 days (`--refresh-days`): papers published after a meeting was first seen are added, and an already-summarised meeting that gains one stays as it is on screen and is queued for a new briefing behind any never-summarised meeting. Summarised meetings still without minutes are re-checked about weekly for 90 days (`--watch-days`). Auth-free. |
 | 3 | `repower policy dates` | Repair meetings that have no meeting date yet. |
 | 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
-| 5 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 7–9. |
-| 6 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
-| 7 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
-| 8 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
-| 9 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |
-| 10 | `repower policy resolve-citations` | Find the document and page behind each digest citation for meetings summarised before pages were tracked. Auth-free and resumable; needs PyMuPDF (`pip install -e ".[pdf]"`). |
-| 11 | `repower policy tag` | Apply rule-based topic tags (a dry run unless `--apply`). Hand-set and NotebookLM tags are never overwritten. |
-| 12 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
-| 13 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
+| 5 | `repower policy reclassify` | Re-type stored documents with the current classifier — numbered papers once filed as `other` (never summarised), rosters and glossaries filed as handouts. No network, no login; report-only unless `--apply`. The report breaks the changes down by committee and names the summarised meetings that would gain a paper. `--queue` (needs `--apply`, and acts only on the documents that same run re-types) flags those meetings for a new briefing, drained behind never-summarised meetings; without it nothing is queued (re-run one with `policy run --committee <key> --meeting <N>`). |
+| 6 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 8–10. |
+| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
+| 8 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
+| 9 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
+| 10 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |
+| 11 | `repower policy resolve-citations` | Find the document and page behind each digest citation for meetings summarised before pages were tracked. Auth-free and resumable; needs PyMuPDF (`pip install -e ".[pdf]"`). |
+| 12 | `repower policy tag` | Apply rule-based topic tags (a dry run unless `--apply`). Hand-set and NotebookLM tags are never overwritten. |
+| 13 | `repower export-web` | Rebuild the static JSON snapshots the read-only site serves. |
+| 14 | `repower push-hf` | **Dangerous.** Replace the shared dataset with your local database. Do this last, after a pull. |
 
-Two flows are offered in the pane: **Backflow — full** (all of the above; steps 5, 6, 8, 9, 11
-and 12 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
+Two flows are offered in the pane: **Backflow — full** (all of the above; steps 5, 6, 7, 9, 10,
+12 and 13 are optional) and **Citations only** (`pull-hf` → `resolve-citations` → `push-hf`).
 
 #### Inspect — read-only
 
