@@ -847,10 +847,17 @@ fixed.
 - **A document is typed once, when first seen.** `record_meeting` skips a `pdf_id` it already has,
   so changing `classify_material` never changes stored rows. `policy reclassify` reports (and with
   `--apply` writes) what would change, and lists the summarised meetings that would gain a paper;
-  it does not re-queue them — that is a quota decision (`policy run --meeting`). It is also a
-  Commands-pane entry (`reclassify`, backflow step 5, apply **off** by default): the first click is
-  the report, the second is the write. Its log names the summarised meetings that would gain a
-  paper (capped at 60) so there is something to act on.
+  it queues nothing unless `--queue` is given (that is a quota decision). It is also a
+  Commands-pane entry (`reclassify`, backflow step 5, Apply and Queue both **off** by default): the
+  first click is the report, the second is the write. Its log breaks the changes down by committee
+  and names the meetings that would gain a paper (list capped at 60, alphabetical — so read the
+  per-committee line, not the list, to see how far a run reached).
+  - **`--queue` only acts on the run that re-types the documents.** The old kinds are gone after
+    an apply, so a later run has nothing to diff and would queue nothing. Tick Apply and Queue
+    together; if you applied without it, queue meetings one at a time (`policy queue`, which now
+    works on a `done` meeting). `--queue` without `--apply` is refused (also in the pane's argv
+    builder), and it flags tracked committees only — an untracked one's flag would light the
+    "update queued" chip for work no run ever starts.
 - **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
   `docs/USER-GUIDE.md`, and the "steps 5, 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
   Only the *presence* of each command in the guide is tested, so inserting a step (as

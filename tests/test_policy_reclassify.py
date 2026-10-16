@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from repower import cli, commands
@@ -36,9 +37,21 @@ def test_reclassify_sits_between_materials_and_the_summarising_steps():
     assert "reclassify" in full.steps and "reclassify" in full.optional
 
 
-def test_reclassify_form_has_one_unticked_checkbox_and_no_committee_scope():
+def test_reclassify_form_has_two_unticked_checkboxes_and_no_committee_scope():
     info = next(c for c in commands.catalog()["commands"] if c["id"] == "reclassify")
-    assert [(p["name"], p["kind"], p["default"]) for p in info["params"]] == [("apply", "bool", False)]
+    assert [(p["name"], p["kind"], p["default"]) for p in info["params"]] == [
+        ("apply", "bool", False), ("queue", "bool", False)]
+
+
+def test_reclassify_queue_rides_an_apply_run_and_nothing_else():
+    k = _known("system_review")
+    assert commands.build_argv("reclassify", {"apply": True, "queue": True}, k) == [
+        "policy", "reclassify", "--apply", "--queue"]
+    assert commands.build_argv("reclassify", {"apply": True, "queue": False}, k) == [
+        "policy", "reclassify", "--apply"]
+    # a report-only run cannot queue: refused before anything runs
+    with pytest.raises(ValueError, match="Queue needs Apply"):
+        commands.build_argv("reclassify", {"queue": True}, k)
 
 
 # ── CLI report ───────────────────────────────────────────────────────────────
@@ -66,7 +79,8 @@ def test_reclassify_report_names_the_meetings_that_would_gain_a_paper(monkeypatc
     assert "2 summarised meeting(s) gain a paper" in out
     assert "chousei_jukyu 第121回" in out and "chousei_jukyu 第122回" in out
     assert "policy run --committee chousei_jukyu --meeting 122" in out
-    assert "doji_shijo" not in out and "santeii 第" not in out
+    # a pending meeting and a roster leaving are not "gaining a paper": never named as a meeting
+    assert "doji_shijo 第" not in out and "santeii 第" not in out
     assert "re-run with --apply" in out
 
 
