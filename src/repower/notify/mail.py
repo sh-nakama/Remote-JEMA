@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 TIMEOUT_S = 30.0
 ATTEMPTS = 3
+IMPLICIT_TLS_PORT = 465
 BACKOFF_S = 5.0
 
 
@@ -62,6 +63,15 @@ def _describe(e: Exception, stage: str) -> str:
         f" — {detail}" if detail else "")
 
 
+def _connect() -> smtplib.SMTP:
+    """Implicit TLS on 465 (Gmail's default), STARTTLS on any other port (e.g. 587)."""
+    if config.SMTP_PORT == IMPLICIT_TLS_PORT:
+        return smtplib.SMTP_SSL(
+            config.SMTP_HOST, config.SMTP_PORT, timeout=TIMEOUT_S, context=ssl.create_default_context(),
+        )
+    return smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=TIMEOUT_S)
+
+
 def send_email(subject: str, text: str, html: str) -> bool:
     """Send to ``MAIL_TO``. Returns False (no-op) when SMTP/recipients are unset.
 
@@ -74,14 +84,19 @@ def send_email(subject: str, text: str, html: str) -> bool:
     to = recipients()
     sender = config.MAIL_FROM or config.SMTP_USER
     msg = build_message(subject, text, html, sender=sender, to=to)
+    user, password = config.SMTP_USER.strip(), config.SMTP_PASSWORD.strip()  # a pasted secret often ends in a newline
     for attempt in range(1, ATTEMPTS + 1):
         stage = "connect"
         try:
-            with smtplib.SMTP_SSL(
-                config.SMTP_HOST, config.SMTP_PORT, timeout=TIMEOUT_S, context=ssl.create_default_context(),
-            ) as smtp:
+            with _connect() as smtp:
+                if config.SMTP_PORT != IMPLICIT_TLS_PORT:
+                    stage = "starttls"
+                    smtp.ehlo()
+                    smtp.starttls(context=ssl.create_default_context())
+                stage = "ehlo"
+                smtp.ehlo()
                 stage = "login"
-                smtp.login(config.SMTP_USER, config.SMTP_PASSWORD)
+                smtp.login(user, password)
                 stage = "send"
                 smtp.send_message(msg)
             break

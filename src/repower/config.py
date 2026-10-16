@@ -30,7 +30,8 @@ HF_DATASET_REPO: str = os.getenv("HF_DATASET_REPO", "")
 WEBHOOK_URL: str = os.getenv("WEBHOOK_URL", "")
 
 # ── Email (weekly summary) ─────────────────────────────────────────────────
-# SMTP over implicit TLS. Defaults suit Gmail with an App Password; any provider
+# SMTP over implicit TLS on port 465, STARTTLS on any other port (e.g. 587). Defaults
+# suit Gmail with an App Password; any provider
 # works by overriding host/port. MAIL_TO is comma-separated and lives only in a
 # secret / .env — never in the repo.
 SMTP_HOST: str = os.getenv("SMTP_HOST") or "smtp.gmail.com"

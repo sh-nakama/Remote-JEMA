@@ -274,6 +274,9 @@ def test_send_logs_in_and_sends_a_multipart_message(monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def ehlo(self):
+            pass
+
         def login(self, user, pw):
             sent["login"] = (user, pw)
 
@@ -333,6 +336,9 @@ def test_a_transient_disconnect_then_success_sends(monkeypatch):
         def __exit__(self, *a):
             return False
 
+        def ehlo(self):
+            pass
+
         def login(self, *a):
             pass
 
@@ -355,6 +361,39 @@ def test_a_smtp_reply_is_not_retried_and_is_redacted(monkeypatch):
     with pytest.raises(mail.EmailError) as e:
         mail.send_email("s", "t", "h")
     assert len(calls) == 1 and "hunter2" not in str(e.value) and "bot@example.test" not in str(e.value)
+
+
+def test_a_non_465_port_uses_starttls_and_strips_pasted_whitespace(monkeypatch):
+    _configure(monkeypatch, SMTP_PORT=587, SMTP_PASSWORD="pw\n", SMTP_USER=" bot@example.test ")
+    steps = []
+
+    class Plain:
+        def __init__(self, host, port, **kw):
+            steps.append(("connect", host, port))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def ehlo(self):
+            steps.append("ehlo")
+
+        def starttls(self, context=None):
+            steps.append("starttls")
+
+        def login(self, user, pw):
+            steps.append(("login", user, pw))
+
+        def send_message(self, msg):
+            steps.append("send")
+
+    monkeypatch.setattr(mail.smtplib, "SMTP", Plain)
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", lambda *a, **k: pytest.fail("587 must not be implicit TLS"))
+    assert mail.send_email("s", "t", "h") is True
+    assert steps == [("connect", "smtp.example.test", 587), "ehlo", "starttls", "ehlo",
+                     ("login", "bot@example.test", "pw"), "send"]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
