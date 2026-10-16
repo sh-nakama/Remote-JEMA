@@ -9,6 +9,7 @@ is nothing left to diff.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -22,6 +23,13 @@ from repower.policy.scraper import Material
 def _change(key: str, num: int, old: str, new: str, state: str = "done") -> dict:
     return {"committee_key": key, "meeting_num": num, "pdf_id": f"{num}_x", "old": old,
             "new": new, "state": state}
+
+
+def _readable(output: str) -> str:
+    """Terminal output as read: no colour codes, no panel borders, whitespace collapsed."""
+    output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    output = re.sub(r"[│╭╮╰╯─┌┐└┘├┤]", " ", output)
+    return " ".join(output.split())
 
 
 def _run(monkeypatch, changes, *args, queue_result=None):
@@ -78,7 +86,10 @@ def test_queue_needs_apply_and_runs_nothing_without_it(monkeypatch):
 
     result = CliRunner().invoke(cli.app, ["policy", "reclassify", "--queue"])
 
-    assert result.exit_code != 0 and "--queue needs --apply" in result.output
+    # A usage error is drawn by Rich as a boxed panel: on CI (forced colour, 80 columns) it
+    # wraps the sentence across lines and wraps each word in colour codes, so compare the text
+    # a person reads, not the raw bytes.
+    assert result.exit_code != 0 and "--queue needs --apply" in _readable(result.output)
     assert ran == []  # not even the report ran
 
 
