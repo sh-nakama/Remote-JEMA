@@ -852,13 +852,22 @@ fixed.
   the report, the second is the write. Its log names the summarised meetings that would gain a
   paper (capped at 60) so there is something to act on.
 - **Backflow step numbers live in three places.** `commands.py` `order`, the numbered table in
-  `docs/USER-GUIDE.md`, and the "steps 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
+  `docs/USER-GUIDE.md`, and the "steps 5, 6, 7, 9, 10, 12 and 13 are optional" sentence under it.
   Only the *presence* of each command in the guide is tested, so inserting a step (as
   `reclassify` did at 5) silently leaves the table numbering wrong unless you renumber it.
 - **The Status table's "Update queued" chip needs the flagged meeting to be in the list it
   expands to.** `build_policy_status` therefore pins `resummarise_requested` meetings like errored
   ones (the 20-per-committee cap would trim an old flagged meeting first), and the chip's count
   comes from `updateQueued`, computed over every row — not from the capped `meetings` list.
+- **The Commands pane draws its Backflow section from the selected *flow's steps*, not from the
+  command group.** A `BACKFLOW` command that no `RECIPES` entry names exists in the API and the
+  CLI but is never rendered — `reclassify` was merged that way and looked "missing" from the pane.
+  `test_every_backflow_command_is_a_step_of_some_flow` guards it; a maintenance command that
+  should not be in the guided order goes in the full flow's `optional=`.
+- **`position:sticky` inside the padded, scrolling Commands pane offsets from the content box,
+  not the pane's top edge.** With the pane's 22px top padding, `top:0` parks a sticky header 22px
+  down at scrollTop 0, over the line below it. The header cancels the padding with a negative
+  margin and uses `top:-22px`; change the pane's padding and both numbers move together.
 
 ## Streamlit dashboard
 

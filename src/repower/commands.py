@@ -377,9 +377,9 @@ RECIPES: tuple[Recipe, ...] = (
         ("Pull, find what is missing, summarise it, resolve citations, then push. Pull first and push last: both "
          "overwrite a whole database and the daily runs write to the same one.",
          "pull → 不足の検出 → 要約 → 引用解決 → push。pullは最初、pushは最後。どちらもDB全体を上書きし、日次実行も同じDBに書き込むためです。"),
-        ("pull-hf", "detect", "dates", "materials", "auth", "login", "backfill", "resume", "run",
-         "resolve-citations", "tag", "export-web", "push-hf"),
-        optional=("auth", "login", "resume", "run", "tag", "export-web"),
+        ("pull-hf", "detect", "dates", "materials", "reclassify", "auth", "login", "backfill", "resume",
+         "run", "resolve-citations", "tag", "export-web", "push-hf"),
+        optional=("reclassify", "auth", "login", "resume", "run", "tag", "export-web"),
     ),
     Recipe(
         "citations", ("Citations only", "引用の解決のみ"),
