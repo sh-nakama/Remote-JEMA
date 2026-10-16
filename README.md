@@ -103,6 +103,7 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `policy tags` / `policy tag` / `policy tag-set` | Topic tags (renewable technology + grid infrastructure) for committees and meetings. `tags` lists the vocabulary; `tag` applies the keyword rules (**dry run unless `--apply`**, no auth); `tag-set` pins a committee's or one meeting's tags by hand. The daily run keeps them current. |
 | `policy coverage` | How much each committee covers each topic, 0-100% (recency-weighted share of its meetings, shrunk on thin evidence). Options: `--topic <tag>` (rank committees), `--committee <key>` (rank its topics), `--committee <key> --meetings` (that committee's meetings with date, tags and document titles — the audit view). Read-only, no auth. |
 | `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--dry-run`. |
+| `policy weekly` | Email the weekly summary of committee meetings *held* in the last 7 days (tracked + summarised with a brief, summaries now available for the 3 weeks before, everything else held). Options: `--days`, `--dry-run`, `--out <file.html>`, `--no-board`. Needs `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_TO`. |
 
 Examples:
 
@@ -216,6 +217,38 @@ and synthesis are sized correctly (default `standard` = 50 sources/notebook):
 gh variable set NOTEBOOKLM_TIER --body plus   # standard | plus | pro | ultra
 ```
 
+### Weekly summary email
+
+`weekly-summary.yml` emails a summary every Friday at 17:00 JST. Everything in it is
+keyed on when a meeting was **held** (`meeting_date`), not when it was summarised, so the
+backlog catch-up never floods it:
+
+1. **Tracked & summarised** — tracked committees' meetings held in the last 7 days that
+   already have a summary, each with a brief (the first "Key decisions" bullets of its
+   English digest, citations removed — a deterministic extract, no model call).
+2. **Summaries now available** — tracked meetings held in the 3 weeks before that window
+   whose summary landed this week (materials publish days to weeks after a meeting).
+3. **Also held this week** — every other meeting held, tracked or not: detected meetings
+   across the whole catalog, the METI calendar history (past `policy_upcoming` rows, kept
+   90 days) and the energy-board feed. Untracked OCCTO/EGC meetings appear only once
+   detection has seen them — neither body publishes a calendar.
+
+It sends from the project Gmail account over SMTP with an
+[App Password](https://myaccount.google.com/apppasswords) (needs 2-Step Verification on
+that account). Set three repo secrets — the recipient lives only in its secret:
+
+```bash
+gh secret set SMTP_USER --body "the-sending-account@gmail.com"
+gh secret set SMTP_PASSWORD          # paste the 16-character App Password at the prompt
+gh secret set MAIL_TO                # one address, or several separated by commas
+```
+
+Then run the workflow once by hand (Actions → Weekly Summary Email → Run workflow) to
+check delivery — a corporate mail filter may quarantine the first message. Other SMTP
+providers work by also setting the repo variables `SMTP_HOST` / `SMTP_PORT` (implicit
+TLS, default `smtp.gmail.com:465`) and optionally `MAIL_FROM` (`gh variable set …`). Locally, `repower policy weekly --dry-run
+--out weekly.html` previews it.
+
 ### Backfilling history (throttled)
 
 `policy detect` records that every historical meeting exists, but summarisation is
@@ -267,6 +300,11 @@ behind one another instead of racing. A push from your own machine is not in tha
   Cross-checks the committees the energy-board aggregator lists against our catalog,
   adds any energy committees we lack as discovered / untracked rows, posts the report
   to the webhook and pushes the DB. No NotebookLM login needed.
+- **`weekly-summary.yml`** — Fridays 17:00 JST (08:00 UTC) + `workflow_dispatch`
+  (with a `dry_run` input). Pulls the DB and runs `policy weekly`, which emails the
+  committee meetings held in the last 7 days — see [Weekly summary email](#weekly-summary-email).
+  Read only: it never pushes, so it is not in the `hf-dataset` queue. The HTML email
+  is kept as a run artifact for 30 days.
 - **`backfill.yml`** — manual (`workflow_dispatch`) historical backfill with
   `since` and `area` inputs.
 - **`web-deploy.yml`** — rebuilds the JEMA site (`export-web` from a freshly pulled DB)

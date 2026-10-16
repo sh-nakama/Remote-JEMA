@@ -898,6 +898,22 @@ fixed.
   not the pane's top edge.** With the pane's 22px top padding, `top:0` parks a sticky header 22px
   down at scrollTop 0, over the line below it. The header cancels the padding with a negative
   margin and uses `top:-22px`; change the pane's padding and both numbers move together.
+- **`policy_upcoming` is no longer only the future.** `replace_upcoming` rewrites rows dated
+  today-or-later (the calendar snapshot) but *keeps* past rows for `UPCOMING_HISTORY_DAYS`
+  (90): they are the only record of untracked METI meetings that were held, and the weekly
+  email reads them via `calendar_entries`. Every "upcoming" reader must filter
+  `meeting_date >= today_jst()` — `list_upcoming` and the `export_web` SELECT do. A new
+  reader that does `SELECT … FROM policy_upcoming` unfiltered will show held meetings as
+  scheduled.
+- **"Summarised this week" means `summarised_at`, never `updated_at`.** `summarised_at` is
+  stamped only when `pipeline.summarize_meeting` sets `state="done"`. The migration does *not*
+  backfill it, so meetings summarised before the column existed carry NULL and never appear
+  under "Summaries now available" — they are only visible to the Queue view's fallback. Any new
+  done-writer must set it too, or that meeting never shows up as newly summarised.
+- **The weekly email is keyed on `meeting_date`.** Undated meetings never appear (the footer
+  counts them instead), so meeting-date coverage (`policy dates`, OCCTO JSON, energy-board)
+  is what decides what the email can show. A skipped Friday run is not caught up: the
+  windows are rolling 7 days, not "since the last email".
 
 ## Streamlit dashboard
 

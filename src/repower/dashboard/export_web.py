@@ -1134,6 +1134,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text("SELECT committee_key, meeting_num, kind, url, title FROM policy_material")
         ).mappings().all()
         # Scheduled (future) meetings from the external calendars (may be empty).
+        # The table also keeps past calendar rows as history (for the weekly email),
+        # so only today-or-later rows are "upcoming".
         # The table is created by init_db()/create_all, so a failure here is a real
         # problem — log it (don't silently hide it) but keep the rest of the export
         # working rather than aborting every other snapshot for one optional feed.
@@ -1141,8 +1143,9 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             upcoming = con.execute(
                 text(
                     "SELECT meeting_date, name_ja, org, committee_key, meeting_num, source, source_url "
-                    "FROM policy_upcoming ORDER BY meeting_date ASC"
-                )
+                    "FROM policy_upcoming WHERE meeting_date >= :today ORDER BY meeting_date ASC"
+                ),
+                {"today": today_jst().isoformat()},
             ).mappings().all()
         except Exception as e:  # noqa: BLE001
             logger.warning("policy_upcoming read failed; exporting no upcoming meetings: %s", e)

@@ -161,13 +161,16 @@ def test_replace_and_list_upcoming(tmp_path):
             "OCCTO", "meti", "http://y", 106, "chousei_jukyu",
         ),
     ]
-    assert store.replace_upcoming(rows, db_path=db) == 2
-    got = store.list_upcoming(db_path=db)
+    today = datetime.date(2026, 7, 1)
+    assert store.replace_upcoming(rows, db_path=db, today=today) == 2
+    got = store.list_upcoming(db_path=db, today=today)
     assert [g["date"] for g in got] == ["2026-07-07", "2026-07-10"]  # soonest first
     assert got[1]["committee_key"] == "chousei_jukyu"
-    # replace is a full rewrite, not an append
-    assert store.replace_upcoming(rows[:1], db_path=db) == 1
-    assert len(store.list_upcoming(db_path=db)) == 1
+    # the future part is a full rewrite, not an append
+    assert store.replace_upcoming(rows[:1], db_path=db, today=today) == 1
+    assert len(store.list_upcoming(db_path=db, today=today)) == 1
+    # once its date passes, a meeting leaves the upcoming list (it stays as history)
+    assert store.list_upcoming(db_path=db, today=datetime.date(2026, 7, 8)) == []
 
 
 # The METI site's HTTP-200 overload/failover holding page (no calendar). It must be
