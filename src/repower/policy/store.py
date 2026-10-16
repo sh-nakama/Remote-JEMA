@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 # transient failures (network/rate-limit) are retried by the next `policy run`.
 MAX_RETRIES = 3
 
+# Where a flagged *update* sits in the breadth-first order, as a backlog depth: after every
+# committee's newest pending meeting (depth 0), ahead of any committee's second-newest (depth 1).
+# See ``pending_meetings``.
+UPDATE_DEPTH = 0.5
+
 # Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
 # .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
 # account's daily NotebookLM quota, which stops a run sooner.
@@ -927,11 +932,16 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
     Includes everything not yet ``done``, plus ``error`` rows that have failed
     fewer than ``MAX_RETRIES`` times (so transient failures are retried). With
     ``include_resummarise`` it also returns ``done`` meetings flagged
-    ``resummarise_requested`` (``"resummarise": True``), ordered **behind** every
-    never-summarised meeting — a new meeting with no briefing outranks refining one
-    that has a briefing — and held to the same retry cap. Off by default because
-    "pending" is also a *count* (status tables, the backlog badge) that should keep
-    meaning "no briefing yet". With
+    ``resummarise_requested`` (``"resummarise": True``), held to the same retry cap.
+    Off by default because "pending" is also a *count* (status tables, the backlog
+    badge) that should keep meaning "no briefing yet".
+
+    **Where an update sits.** Breadth-first (the daily run): after every committee's
+    *newest* pending meeting, but **ahead of any committee's deeper backlog** — a
+    meeting that just got its minutes is worth more than the fifth-newest never-summarised
+    one, which at a few a day it would otherwise wait ~weeks behind (it ranked last of
+    ~290 when this was measured). Depth-first (a single committee): after every pending
+    meeting, unchanged — a backfill drains history, and an update is not part of it. With
     ``only_enabled`` the result is restricted to tracked (``enabled=1``) committees
     — used by ``policy run --committee all`` so disabling a committee removes it
     from the daily worklist.
@@ -982,10 +992,15 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
                 for r, m in enumerate(sorted(ms, key=lambda x: -x.meeting_num)):
                     depth[m.id] = r
 
+        def _tier(m: PolicyMeeting) -> float:
+            """Backlog depth for a pending meeting; a fixed slot for an update (see docstring)."""
+            if m.state == "done":
+                return UPDATE_DEPTH if breadth_first else 1
+            return depth.get(m.id, 0)
+
         rows.sort(key=lambda m: (
             0 if m.gen_requested else 1,  # user-requested ("Generate summary") first
-            1 if m.state == "done" else 0,  # briefing refinements after never-summarised
-            depth.get(m.id, 0),           # breadth-first: newest-of-each committee first
+            _tier(m),                     # breadth-first: newest-of-each committee, updates, deeper…
             _prio(m.committee_key),
             m.committee_key,
             -m.meeting_num,
@@ -1027,9 +1042,9 @@ def queue_snapshot(
     stops early on a rate limit. ``totals`` count the whole worklist. ``items`` holds the
     first *max_items* by rank **plus every update, retry and moved-to-front meeting whatever
     its rank** — a long backlog of ordinary new meetings is a count, not a list, but the rare
-    ones an operator filters for must not be cut off behind it (an update ranks last, so a
-    plain cap would hide exactly the meeting the "Update" filter is for). Ranks are kept, so
-    they can be non-contiguous; ``truncated`` is how many new meetings are left out.
+    ones an operator filters for must not be cut off behind it (an update can rank well past
+    a plain cap, and the "Update" filter would then find nothing). Ranks are kept, so they
+    can be non-contiguous; ``truncated`` is how many new meetings are left out.
 
     ``recent`` is what left the queue in the last *recent_days*, newest first, with
     ``kind`` ``update`` or ``new``. Rows summarised before ``summarised_at`` existed fall

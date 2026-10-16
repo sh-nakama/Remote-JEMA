@@ -280,7 +280,8 @@ class PolicyMeeting(Base):
     # A ``done`` meeting whose briefing is stale and should be written again — a paper
     # (minutes, handout…) turned up after it was summarised. Unlike a state change this
     # keeps the existing briefing in view while the re-run waits for quota; the run
-    # clears it when the new briefing lands. Ordered behind never-summarised meetings.
+    # clears it when the new briefing lands. In the daily run it follows each
+    # committee's newest pending meeting but precedes deeper backlog (store.UPDATE_DEPTH).
     resummarise_requested: Mapped[bool | None] = mapped_column(Boolean, default=False)
     # When this meeting's document list was last re-read from its page (NULL = never
     # since it was first recorded). Drives the sparse re-check for late minutes.

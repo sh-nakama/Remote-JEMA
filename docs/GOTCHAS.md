@@ -819,13 +819,22 @@ fixed.
     `handout`; `other` is only recognised boilerplate (`is_junk_material`: 名簿, 定義集, 配布資料一覧,
     …非公開について, 議事の取り扱い/公表, the venue map). Keep those patterns specific — a bare
     `非公開` or `取扱い` matches real papers ("非公開情報の…", "…の取扱いについて").
+- **Where an update sits in the daily order: after every committee's newest pending meeting,
+  before anyone's second-newest** (`store.UPDATE_DEPTH = 0.5`, a backlog depth between 0 and 1;
+  moved-to-front still outranks it). It was *behind every never-summarised meeting* and measured at
+  rank 291 of 291 — ~37 daily runs — behind a historical backlog (some of it from 2017), so a meeting
+  that had just published its minutes waited weeks to be refreshed. Two limits on the rule: it
+  applies to **breadth-first only** (the daily run, `--committee all`); a depth-first
+  single-committee run — a backfill draining history — keeps updates after every pending meeting.
+  And it is a single sort key (`_tier` in `pending_meetings`), so the Queue view, the run and the
+  tests all agree; don't add a second ordering rule beside it.
 - **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
   separate column, not a state change: the meeting stays `done` and its briefing stays on the
   page while the re-run waits for quota (a minutes upgrade makes a *valid* briefing better, so
   hiding it for days would be a regression). `pending_meetings` leaves flagged meetings out by
   default — "pending" is also a count meaning *no briefing yet* — and `run` asks for them with
-  `include_resummarise=True`, ordering them **behind every never-summarised meeting** and not
-  counting them as breadth-first backlog depth. They share the `MAX_RETRIES` cap, so an upgrade
+  `include_resummarise=True`, slotting them in by the rule in the next bullet and not counting them
+  as breadth-first backlog depth. They share the `MAX_RETRIES` cap, so an upgrade
   that keeps failing cannot burn quota daily. Things that must stay true:
   - The run restores `done` after a failed/blocked/rate-limited re-run
     (`_keep_briefing_visible`) because the pipeline's failure paths set `error`/`detected`;
@@ -865,8 +874,8 @@ fixed.
     fails if either changes alone. The real limiter is usually the NotebookLM daily quota, so the view
     says "first 8", never "will run".
   - `items` is the first 100 by rank **plus every update/retry/moved-to-front meeting wherever it
-    ranks**. A plain cap hid the one `Update` meeting — it ranks *last*, behind the whole new backlog —
-    so the chip said 1 and the filtered list said nothing (found in the running app, not by a test).
+    ranks**. A plain cap hid the one `Update` meeting — it ranked 291 of 291 then — so the chip said 1
+    and the filtered list said nothing (found in the running app, not by a test).
     Ranks are therefore non-contiguous; `withGaps` renders the "… N more …" marker.
   - "Drained" reads `summarised_at` / `resummarised_at`, stamped only on a *successful* summarise
     (`updated_at` is touched by other writes). Rows finished before the columns existed fall back to
