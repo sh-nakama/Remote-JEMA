@@ -104,7 +104,7 @@ def parse_jepx_csv(content: bytes) -> pd.DataFrame:
     return result[keep]
 
 
-def fetch_jepx_csv(year: int, db_path: str | None = None) -> pd.DataFrame | None:
+def fetch_jepx_csv(year: int, db_path: str | None = None, *, force: bool = False) -> pd.DataFrame | None:
     """Download one year's JEPX spot CSV via the conditional-GET cache and parse it.
 
     Returns the parsed DataFrame, or ``None`` if the file is unchanged since the
@@ -112,7 +112,7 @@ def fetch_jepx_csv(year: int, db_path: str | None = None) -> pd.DataFrame | None
     current-year file changes daily so it is re-fetched; past years 304-skip.
     """
     url = _csv_url(year)
-    status, content = conditional_get(url, db_path=db_path, timeout=60)
+    status, content = conditional_get(url, db_path=db_path, timeout=60, force=force)
     if status != "ok" or content is None:
         logger.info("JEPX %d: %s (%s) — skipping", year, status, url)
         return None
@@ -130,60 +130,58 @@ def upsert_jepx(df: pd.DataFrame, db_path: str | None = None) -> int:
 
     Returns the number of (date, time) rows processed (legacy table count).
     """
+    def num(v):
+        return None if v is None or pd.isna(v) else float(v)
+
+    # One executemany per table: a statement per row (a year is ~10k rows x 10 tables'
+    # worth) took ~40 s, every refresh, since the current year's file changes daily.
+    legacy, per_area = [], []
+    for row in df.to_dict("records"):
+        # Legacy wide table — system + tokyo only
+        legacy.append({"date": row["date"], "time": row["time"],
+                       "system_price": num(row["system_price"]),
+                       "tokyo_area_price": num(row["tokyo_area_price"])})
+        # New long table — one row per area
+        for slug in JEPX_AREA_KEYWORDS:
+            price = num(row.get(f"{slug}_price"))
+            if price is not None:
+                per_area.append({"area": slug, "date": row["date"], "time": row["time"], "price": price})
+    if not legacy:
+        return 0
+
     init_db(db_path)
     session = get_session(db_path)
-    rows_affected = 0
-
     try:
-        for _, row in df.iterrows():
-            # Legacy wide table — system + tokyo only
-            stmt = sqlite_upsert(JepxSpot30m).values(
-                date=row["date"],
-                time=row["time"],
-                system_price=None if pd.isna(row["system_price"]) else float(row["system_price"]),
-                tokyo_area_price=None if pd.isna(row["tokyo_area_price"]) else float(row["tokyo_area_price"]),
+        stmt = sqlite_upsert(JepxSpot30m)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["date", "time"],
+            set_={
+                "system_price": stmt.excluded.system_price,
+                "tokyo_area_price": stmt.excluded.tokyo_area_price,
+            },
+        )
+        session.execute(stmt, legacy)
+        if per_area:
+            a_stmt = sqlite_upsert(JepxAreaPrice30m)
+            a_stmt = a_stmt.on_conflict_do_update(
+                index_elements=["area", "date", "time"],
+                set_={"price": a_stmt.excluded.price},
             )
-            stmt = stmt.on_conflict_do_update(
-                index_elements=["date", "time"],
-                set_={
-                    "system_price": stmt.excluded.system_price,
-                    "tokyo_area_price": stmt.excluded.tokyo_area_price,
-                },
-            )
-            session.execute(stmt)
-            rows_affected += 1
-
-            # New long table — one row per area
-            for slug in JEPX_AREA_KEYWORDS:
-                price = row.get(f"{slug}_price")
-                if price is None or pd.isna(price):
-                    continue
-                a_stmt = sqlite_upsert(JepxAreaPrice30m).values(
-                    area=slug,
-                    date=row["date"],
-                    time=row["time"],
-                    price=float(price),
-                )
-                a_stmt = a_stmt.on_conflict_do_update(
-                    index_elements=["area", "date", "time"],
-                    set_={"price": a_stmt.excluded.price},
-                )
-                session.execute(a_stmt)
-
+            session.execute(a_stmt, per_area)
         session.commit()
     finally:
         session.close()
 
-    return rows_affected
+    return len(legacy)
 
 
-def scrape_jepx(year: int | None = None, db_path: str | None = None) -> int:
+def scrape_jepx(year: int | None = None, db_path: str | None = None, *, force: bool = False) -> int:
     """Scrape JEPX for the given year (default: current year). Returns rows upserted."""
     if year is None:
         year = today_jst().year
 
     try:
-        df = fetch_jepx_csv(year, db_path)
+        df = fetch_jepx_csv(year, db_path, force=force)
         if df is None:  # 304 unchanged or 404 — nothing to upsert
             return 0
         n = upsert_jepx(df, db_path)

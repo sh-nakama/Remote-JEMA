@@ -1053,11 +1053,18 @@ def _do_get(
                 headers=httpx_headers,
             )
         except Exception:
-            if allow_curl_fallback:
-                r = _curl_get(url, headers, timeout, deadline)
-                if r is not None:
-                    _circuit_record_success(url)
-                    return r
+            # Unreachable on both transports (DNS gone, refused, timed out) counts against
+            # the host like a block does: a TSO that dropped its hostname otherwise cost
+            # every probe URL its full timeout, on every run.
+            try:
+                r = _curl_get(url, headers, timeout, deadline) if allow_curl_fallback else None
+            except Exception:
+                _circuit_record_failure(url)
+                raise
+            if r is not None:
+                _circuit_record_success(url)
+                return r
+            _circuit_record_failure(url)
             raise
         last_resp = resp
         # 403 = plain bot block; 202 = AWS WAF JavaScript challenge (meti.go.jp sits

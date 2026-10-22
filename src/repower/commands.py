@@ -239,8 +239,10 @@ COMMANDS: tuple[Command, ...] = (
         ("Rebuild web snapshots", "Webスナップショットを再生成"),
         ("Rewrites the static JSON the read-only site serves from the current database.",
          "現在のDBから、閲覧専用サイトが読む静的JSONを再生成します。"),
-        ("The local app reads the live API, so this matters only for what gets published. The daily deploy rebuilds it too.",
-         "ローカルのアプリはライブAPIを読むため、影響するのは公開内容のみ。日次デプロイでも再生成されます。"),
+        ("The charts read these snapshots, locally too (the policy views read the live API). web-api rebuilds "
+         "them on start when the synced data is newer; the daily deploy rebuilds the published ones.",
+         "チャートはローカルでもこのスナップショットを読みます（政策画面はライブAPI）。web-apiは起動時、同期した"
+         "データが新しければ再生成します。公開版は日次デプロイで再生成されます。"),
         timeout_s=900,
     ),
     Command(

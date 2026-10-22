@@ -45,6 +45,7 @@ DUAL_FORMAT = {20: LEGACY_20, 22: NEW_22}
 
 class TepcoScraper(BaseAreaScraper):
     AREA = "tepco"
+    AREA_CODE = "03"
     URL_TEMPLATES = [
         "https://www.tepco.co.jp/forecast/html/images/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -54,6 +55,7 @@ class TepcoScraper(BaseAreaScraper):
 
 class HokkaidoScraper(BaseAreaScraper):
     AREA = "hokkaido"
+    AREA_CODE = "01"
     URL_TEMPLATES = [
         "https://www.hepco.co.jp/network/con_service/public_document/supply_demand_results/csv/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -63,6 +65,7 @@ class HokkaidoScraper(BaseAreaScraper):
 
 class TohokuScraper(BaseAreaScraper):
     AREA = "tohoku"
+    AREA_CODE = "02"
     URL_TEMPLATES = [
         "https://setsuden.nw.tohoku-epco.co.jp/common/demand/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -81,6 +84,7 @@ class ChubuScraper(BaseAreaScraper):
     The framework auto-uses the archive for ``months_back >= 2``.
     """
     AREA = "chubu"
+    AREA_CODE = "04"
     URL_TEMPLATES = [
         "https://powergrid.chuden.co.jp/denki_yoho_content_data/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -96,6 +100,7 @@ class ChubuScraper(BaseAreaScraper):
 
 class HokurikuScraper(BaseAreaScraper):
     AREA = "hokuriku"
+    AREA_CODE = "05"
     URL_TEMPLATES = [
         "https://www.rikuden.co.jp/nw/denki-yoho/csv/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -105,6 +110,7 @@ class HokurikuScraper(BaseAreaScraper):
 
 class KansaiScraper(BaseAreaScraper):
     AREA = "kansai"
+    AREA_CODE = "06"
     URL_TEMPLATES = [
         "https://www.kansai-td.co.jp/interchange/denkiyoho/area-performance/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -129,6 +135,7 @@ class ChugokuScraper(BaseAreaScraper):
 
 class ShikokuScraper(BaseAreaScraper):
     AREA = "shikoku"
+    AREA_CODE = "08"
     URL_TEMPLATES = [
         "https://www.yonden.co.jp/nw/supply_demand/csv/eria_jukyu_{YYYY}{MM}_{V}.csv",
     ]
@@ -170,13 +177,14 @@ AREA_NAMES: dict[str, str] = {
 }
 
 
-def scrape_all_areas(months_back: int = 1, db_path: str | None = None) -> dict[str, int]:
+def scrape_all_areas(months_back: int = 1, db_path: str | None = None, *,
+                     force: bool = False) -> dict[str, int]:
     """Scrape every TSO sequentially. Returns {area: rows_upserted}."""
     results: dict[str, int] = {}
     for cls in ALL_SCRAPERS:
         scraper = cls()
         try:
-            results[scraper.AREA] = scraper.scrape(months_back=months_back, db_path=db_path)
+            results[scraper.AREA] = scraper.scrape(months_back=months_back, db_path=db_path, force=force)
         except Exception as e:  # noqa: BLE001
             import logging
             logging.getLogger(__name__).error("[%s] scraper crashed: %s", scraper.AREA, e)

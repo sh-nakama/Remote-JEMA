@@ -268,6 +268,63 @@ def pull_hf():
     typer.echo("Database pulled from Hugging Face")
 
 
+def _echo_sync(result) -> None:
+    """Print what a ``sync_from_hf`` did, and what it kept or left unpushed."""
+    verb = "Would download" if result.dry_run else "Downloaded"
+    if result.downloaded:
+        typer.echo(f"   {verb} {', '.join(result.downloaded)} (Hugging Face @ {result.commit[:8]})")
+    else:
+        typer.echo(f"   Up to date with Hugging Face @ {result.commit[:8]}")
+    if result.backup:
+        typer.echo(f"   Previous database kept as {result.backup.name}")
+    lines = result.edits.describe()
+    if lines:
+        state = "pushed" if result.pushed else ("kept, not yet on Hugging Face" if not result.dry_run
+                                                 else "would be kept")
+        typer.echo(f"   {len(lines)} local edit(s) {state}:")
+        for line in lines[:20]:
+            typer.echo(f"     - {line}")
+        if len(lines) > 20:
+            typer.echo(f"     … and {len(lines) - 20} more")
+    if result.edits.unpushed_summaries and not result.pushed:
+        typer.echo(f"   {len(result.edits.unpushed_summaries)} local summaries are not on Hugging Face yet: "
+                   + ", ".join(result.edits.unpushed_summaries[:8]))
+    if (lines or result.edits.unpushed_summaries) and not result.pushed:
+        typer.echo("   The daily runs do not see these until you push: `repower sync --push`.")
+    if result.pushed:
+        typer.echo(f"   Pushed to Hugging Face @ {result.pushed[:8]}")
+
+
+@app.command("sync")
+def sync_cmd(
+    push: bool = typer.Option(
+        False, "--push", help="Then push local edits the Hub lacks (refused if it moved meanwhile)"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Report what would change; write nothing"),
+    discard_local: bool = typer.Option(
+        False, "--discard-local",
+        help="Pull even if local summaries are not on the Hub (the old DB is kept as *.presync.db)"),
+):
+    """Pull the Hugging Face copy if it is newer, keeping local tracking edits.
+
+    Unlike ``pull-hf`` (a blind replace), this checks the Hub's commit first and downloads
+    only changed files, then re-applies the tracked set, priorities, archive flags,
+    queued summaries and hand-set tags you changed locally. ``web-api`` runs it on start.
+    """
+    from repower import command_log
+    from repower.hf_sync import SyncConflict, sync_from_hf
+
+    try:
+        result = sync_from_hf(push=push, discard_local=discard_local, dry_run=dry_run)
+    except (SyncConflict, RuntimeError) as e:  # a conflict, a locked DB, missing credentials
+        typer.echo(str(e), err=True)
+        raise typer.Exit(code=1) from e
+    if not dry_run:
+        command_log.record("pull-hf", True)
+        if result.pushed:
+            command_log.record("push-hf", True)
+    _echo_sync(result)
+
+
 @app.command("check-freshness")
 def check_freshness():
     """Exit 1 if any market-data source lags past its limit (the daily cron's outage alarm)."""
@@ -304,14 +361,21 @@ def refresh_web(
     months_back: int = typer.Option(2, help="TSO months to re-fetch (current + N previous)"),
     lookback: int = typer.Option(6, help="Completed months to scan for entirely-missing data to recover"),
     out: str = typer.Option("web/public/data/web", help="Web snapshot output dir"),
+    sync: bool = typer.Option(True, "--sync/--no-sync",
+                              help="First pull a newer Hugging Face copy (the daily run's scrape)"),
+    full: bool = typer.Option(False, "--full",
+                              help="Re-download every file in the window even if its validators say unchanged"),
 ):
-    """Full data refresh for the web app: recover gaps → scrape everything → export.
+    """Full data refresh for the web app: sync → recover gaps → scrape everything → export.
 
-    Backs the web app's interactive **Refresh** button (via ``web-api``). It first
-    recovers any completed months entirely missing from the DB (parse / stale-304
-    gaps), then re-scrapes every source, then regenerates the static JSON snapshots
-    the frontend reads. Each source is guarded so one failure can't block the
-    export of everything else.
+    Backs the web app's interactive **Refresh** button (via ``web-api``). It first pulls
+    a newer Hugging Face copy if there is one (``repower sync``: the daily run has
+    already scraped, and its ETags make everything it fetched 304 here), then recovers
+    any completed months entirely missing from the DB (parse / stale-304 gaps), then
+    re-scrapes every source, then regenerates the static JSON snapshots the frontend
+    reads. Each source is guarded so one failure can't block the export of everything
+    else. ``--full`` ignores the cached validators within the window (``--months-back``)
+    for when an upstream file is suspected to have changed without them changing.
     """
     from repower.dashboard.export_web import export_web as run_export
     from repower.scrapers.areas import AREA_NAMES, recover_missing_months, scrape_all_areas
@@ -322,6 +386,10 @@ def refresh_web(
         except Exception as e:  # noqa: BLE001 — a single source failure must not abort the refresh
             typer.echo(f"   {label} skipped: {e}", err=True)
 
+    if sync:
+        typer.echo("═══ SYNC ═══")
+        _refresh_sync()
+
     typer.echo("═══ RECOVER GAPS ═══")
     recovered = recover_missing_months(lookback=lookback)
     if recovered:
@@ -331,18 +399,18 @@ def refresh_web(
         typer.echo("   no missing months found")
 
     typer.echo("═══ SCRAPE ═══")
-    results = scrape_all_areas(months_back=months_back)
+    results = scrape_all_areas(months_back=months_back, force=full)
     for a, n in results.items():
         typer.echo(f"   {AREA_NAMES.get(a, a):<25} {n:>6} rows")
     from repower.scrapers.eprx import scrape_eprx, scrape_eprx_tieline
     from repower.scrapers.fuels_futures import scrape_fuels
     from repower.scrapers.jepx_spot import scrape_jepx
     from repower.scrapers.news_rss import scrape_news
-    _try("JEPX rows", lambda: scrape_jepx())
+    _try("JEPX rows", lambda: scrape_jepx(force=full))
     _try("fuel rows", lambda: scrape_fuels())
     _try("news items", lambda: scrape_news())
-    _try("EPRX rows", lambda: scrape_eprx())
-    _try("EPRX tieline rows", lambda: scrape_eprx_tieline())
+    _try("EPRX rows", lambda: scrape_eprx(force=full))
+    _try("EPRX tieline rows", lambda: scrape_eprx_tieline(force=full))
 
     typer.echo("═══ EXPORT ═══")
     manifest = run_export(out)
@@ -356,15 +424,66 @@ def refresh_web(
 def web_api(
     port: int = typer.Option(8787, help="Port to listen on"),
     host: str = typer.Option("127.0.0.1", help="Host to bind"),
+    sync: bool = typer.Option(True, "--sync/--no-sync",
+                              help="Pull a newer Hugging Face copy first, keeping local edits"),
 ):
     """Run the local API for the web app's interactive mode (Manage + Run catch-up).
 
     Start this alongside ``npm run dev`` in ``web/``; the Vite dev proxy forwards
     ``/api`` here. The deployed GitHub Pages build has no proxy and stays read-only.
+
+    On start it runs ``repower sync`` (one metadata call when nothing changed) and, when
+    the web snapshots predate the synced market data, rebuilds them in the background.
+    A failed sync never blocks the start: the server runs on the local copy.
     """
     from repower.web_api import serve
 
-    serve(port=port, host=host)
+    rebuild = False
+    if sync:
+        rebuild = _startup_sync()
+    serve(port=port, host=host, rebuild_snapshots=rebuild)
+
+
+def _refresh_sync() -> None:
+    """``refresh-web``'s first step: a failed or refused sync only means scraping from
+    the local copy, as before."""
+    from repower import command_log
+    from repower.config import HF_DATASET_REPO, HF_TOKEN
+    from repower.hf_sync import sync_from_hf
+
+    if not (HF_TOKEN and HF_DATASET_REPO):
+        typer.echo("   skipped: HF_TOKEN / HF_DATASET_REPO not set")
+        return
+    try:
+        result = sync_from_hf()
+    except Exception as e:  # noqa: BLE001 — offline / SyncConflict: scrape what we have
+        typer.echo(f"   skipped: {e}", err=True)
+        return
+    command_log.record("pull-hf", True)
+    _echo_sync(result)
+
+
+def _startup_sync() -> bool:
+    """``web-api``'s start-up sync. Returns whether the web snapshots need rebuilding."""
+    from repower import command_log
+    from repower.config import HF_DATASET_REPO, HF_TOKEN
+    from repower.hf_sync import SyncConflict, export_is_stale, sync_from_hf
+
+    if not (HF_TOKEN and HF_DATASET_REPO):
+        typer.echo("Sync skipped: HF_TOKEN / HF_DATASET_REPO not set — serving the local copy.")
+        return False
+    typer.echo("Checking Hugging Face for a newer copy…")
+    try:
+        result = sync_from_hf()
+    except SyncConflict as e:
+        typer.echo(f"Sync skipped: {e}", err=True)
+        return False
+    except Exception as e:  # noqa: BLE001 — offline / Hub outage: still serve what we have
+        typer.echo(f"Sync failed ({e}) — serving the local copy.", err=True)
+        return False
+    command_log.record("pull-hf", True)
+    _echo_sync(result)
+    return export_is_stale(Path("web/public/data/web/manifest.json"))
 
 
 @app.command()

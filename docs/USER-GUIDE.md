@@ -497,6 +497,16 @@ change stays local until you push it. *Dangerous* commands replace a whole datab
 `repower pull-hf` replaces the local copy with Hugging Face's, `repower push-hf` replaces
 the shared dataset with the local copy. Only those two are dangerous.
 
+**Starting the local app syncs it.** `repower web-api` first runs `repower sync`: one
+metadata call to Hugging Face, and if the shared dataset is newer, only the changed files are
+downloaded. Your tracked committees, priorities, archive flags, queued summaries and hand-set
+tags are re-applied on top, so they survive the pull, and the previous database is kept as
+`data/repower.presync.db`. If the newer data reaches the charts, the web snapshots are rebuilt
+in the background (about two minutes; reload when the job finishes). These edits stay
+local until you run `repower sync --push`, and the daily runs do not see them until then.
+`sync` refuses to pull over summaries written here but not yet pushed. If Hugging Face cannot
+be reached, the app starts on the local copy (`--no-sync` skips the check).
+
 **Order matters: pull → work → push.** Pull and push are last-write-wins with no merging,
 and the daily GitHub Actions write to the same dataset. Pulling while you hold un-pushed
 work discards that work; pushing from a copy older than the daily runs' latest write
@@ -560,6 +570,13 @@ per-committee admin commands (`repower policy enable` / `disable` / `track` / `u
 covers those), `repower policy queue --committee <key> --meeting <N>` (the ↑ button on a
 meeting; `--clear` removes it), `repower policy tag-set` (pin tags by hand), `repower
 refresh-web` (the sidebar's Refresh button) and `repower web-api` (starts the local backend).
+
+The Refresh button first syncs with Hugging Face (so the files the daily run already fetched
+come back *unchanged* instead of being downloaded again), then re-checks the current month and
+the two before it at every source; a file is downloaded only when the source says it changed.
+`repower refresh-web --full` re-downloads every file in that window regardless (widen it with
+`--months-back`), for when you suspect a source revised a file without saying so. Older months
+are re-checked by the weekly deep re-validation.
 
 ### Known constraints & troubleshooting
 

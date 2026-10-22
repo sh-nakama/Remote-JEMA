@@ -1358,3 +1358,28 @@ def test_a_missing_browser_leaves_the_old_behaviour_intact(monkeypatch):
 
     assert status == 200
     assert len(calls) == 1
+
+
+def test_an_unreachable_host_opens_the_circuit_too(monkeypatch):
+    """A TSO whose hostname stopped resolving must cost three requests, not its full
+    version probe x months x timeout on every run."""
+    gone = httpx.ConnectError("[Errno 11001] getaddrinfo failed")
+    _fake_httpx(monkeypatch, [gone] * http_cache._CIRCUIT_FAILURE_THRESHOLD)
+    _no_curl(monkeypatch)
+    _fake_clock(monkeypatch)
+
+    for _ in range(http_cache._CIRCUIT_FAILURE_THRESHOLD):
+        with pytest.raises(httpx.ConnectError):
+            http_cache._do_get("http://gone/f", {}, True, 30.0)
+
+    with pytest.raises(http_cache.CircuitOpenError):
+        http_cache._do_get("http://gone/other", {}, True, 30.0)
+
+
+def test_a_network_error_the_curl_fallback_recovers_is_a_success(monkeypatch):
+    _fake_httpx(monkeypatch, [httpx.ReadTimeout("slow")] * 4)
+    monkeypatch.setattr(http_cache, "_curl_get", lambda *a, **k: (200, b"ok", None, None))
+    _fake_clock(monkeypatch)
+
+    for _ in range(4):
+        assert http_cache._do_get("http://flaky/f", {}, True, 30.0)[0] == 200

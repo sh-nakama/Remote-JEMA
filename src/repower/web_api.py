@@ -667,12 +667,22 @@ class _Handler(BaseHTTPRequestHandler):
         return
 
 
-def serve(port: int = 8787, host: str = "127.0.0.1", db_path: str | None = None) -> None:
-    """Run the local web API until interrupted."""
+def serve(port: int = 8787, host: str = "127.0.0.1", db_path: str | None = None,
+          rebuild_snapshots: bool = False) -> None:
+    """Run the local web API until interrupted.
+
+    *rebuild_snapshots* starts an ``export-web`` job once the server is up (the start-up
+    sync pulled market data the snapshots predate). It takes the single-flight job slot,
+    so the app's job panel shows it and other jobs wait for it.
+    """
     _Handler.db_path = db_path
     httpd = ThreadingHTTPServer((host, port), _Handler)
     logger.info("JEMA web-api listening on http://%s:%d", host, port)
     print(f"JEMA web-api on http://{host}:{port} (Ctrl-C to stop)")
+    if rebuild_snapshots:
+        start_command("export-web", {}, db_path)
+        print("Rebuilding the web snapshots from the newer data in the background (~2 min); "
+              "reload the app when it finishes.")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
