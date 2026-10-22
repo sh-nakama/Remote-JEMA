@@ -75,6 +75,8 @@ def _file_id(sibling) -> str | None:
 def remote_revision(api: HfApi, revision: str | None = None) -> tuple[str, dict[str, str | None]]:
     """``(commit sha, {repo filename: content id})`` of the dataset — one metadata call."""
     info = api.dataset_info(HF_DATASET_REPO, revision=revision, files_metadata=True)
+    if not info.sha:
+        raise RuntimeError(f"HF returned no commit sha for {HF_DATASET_REPO}")
     return info.sha, {s.rfilename: _file_id(s) for s in info.siblings or ()}
 
 
@@ -347,6 +349,7 @@ def sync_from_hf(*, push: bool = False, discard_local: bool = False, dry_run: bo
         if db_stale:
             _quick_check(fetched[_DB_FILE])
             remote_state = user_state(fetched[_DB_FILE])
+        assert remote_state is not None  # set above for every path
         result.edits = local_edits(local_state, remote_state)
         result.downloaded = [name for _, name in stale]
         if db_stale and result.edits.unpushed_summaries and not discard_local:

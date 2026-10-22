@@ -86,7 +86,7 @@ def user_state(db: Path) -> dict[str, dict]:
     try:
         if not _columns(con, "policy_committee"):
             return state
-        cols = ("committee_key", *_COMMITTEE_FIELDS, *_TAG_FIELDS)
+        cols: tuple[str, ...] = ("committee_key", *_COMMITTEE_FIELDS, *_TAG_FIELDS)
         for row in con.execute(f"SELECT {', '.join(cols)} FROM policy_committee"):
             state["committees"][row[0]] = dict(zip(cols[1:], row[1:], strict=True))
         cols = ("committee_key", "meeting_num", "state", *_FLAG_FIELDS, *_SUMMARY_FIELDS, *_TAG_FIELDS)
@@ -122,7 +122,9 @@ class Edits:
 
 def _newer(local: str | None, remote: str | None) -> bool:
     # SQLite holds these as ISO text in one format, so text order is time order.
-    return bool(local) and (not remote or local > remote)
+    if not local:
+        return False
+    return not remote or local > remote
 
 
 def local_edits(local: dict[str, dict], remote: dict[str, dict]) -> Edits:
