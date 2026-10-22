@@ -330,3 +330,116 @@ def test_every_command_renders_its_help():
     for path in paths:
         result = CliRunner().invoke(cli.app, [*path, "--help"])
         assert result.exit_code == 0, (path, result.output)
+
+
+# ── web-api's start-up sync ──────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def web_api_start(monkeypatch):
+    """Stub the server and the Hub so `web-api` only runs its start-up sync."""
+    from types import SimpleNamespace
+
+    from repower.sync_merge import Edits
+
+    served = []
+    monkeypatch.setattr("repower.web_api.serve", lambda **kw: served.append(kw))
+    monkeypatch.setattr("repower.config.HF_TOKEN", "token")
+    monkeypatch.setattr("repower.config.HF_DATASET_REPO", "someone/dataset")
+    monkeypatch.setattr("repower.command_log.record", lambda *a, **k: None)
+    monkeypatch.setattr("repower.hf_sync.export_is_stale", lambda path: True)
+    result = SimpleNamespace(commit="abcdef0123", downloaded=["repower.db"], edits=Edits(),
+                             backup=None, pushed=None, dry_run=False)
+    monkeypatch.setattr("repower.hf_sync.sync_from_hf", lambda **kw: result)
+    return served
+
+
+def test_web_api_syncs_then_rebuilds_stale_snapshots(web_api_start):
+    result = CliRunner().invoke(cli.app, ["web-api"])
+
+    assert result.exit_code == 0, result.output
+    assert "Downloaded repower.db" in result.output
+    assert web_api_start[0]["rebuild_snapshots"] is True
+
+
+def test_web_api_still_starts_when_the_hub_is_unreachable(web_api_start, monkeypatch):
+    def offline(**_):
+        raise OSError("getaddrinfo failed")
+
+    monkeypatch.setattr("repower.hf_sync.sync_from_hf", offline)
+
+    result = CliRunner().invoke(cli.app, ["web-api"])
+
+    assert result.exit_code == 0, result.output
+    assert "serving the local copy" in result.output
+    assert web_api_start[0]["rebuild_snapshots"] is False
+
+
+def test_web_api_no_sync_skips_the_hub(web_api_start, monkeypatch):
+    monkeypatch.setattr("repower.hf_sync.sync_from_hf", lambda **kw: pytest.fail("synced"))
+
+    result = CliRunner().invoke(cli.app, ["web-api", "--no-sync"])
+
+    assert result.exit_code == 0, result.output
+    assert web_api_start == [{"port": 8787, "host": "127.0.0.1", "rebuild_snapshots": False}]
+
+
+# ── refresh-web: sync first, then scrape ─────────────────────────────────────────
+
+
+@pytest.fixture
+def refresh(monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def rec(name, value=0):
+        def fn(*a, **kw):
+            calls.append((name, kw))
+            return value
+        return fn
+
+    monkeypatch.setattr("repower.config.HF_TOKEN", "token")
+    monkeypatch.setattr("repower.config.HF_DATASET_REPO", "someone/dataset")
+    monkeypatch.setattr("repower.command_log.record", lambda *a, **k: None)
+    monkeypatch.setattr("repower.hf_sync.sync_from_hf", rec("sync", None))
+    monkeypatch.setattr(cli, "_echo_sync", lambda result: None)
+    monkeypatch.setattr("repower.scrapers.areas.recover_missing_months", rec("recover", []))
+    monkeypatch.setattr("repower.scrapers.areas.scrape_all_areas", rec("areas", {"tepco": 1}))
+    for target in ("jepx_spot.scrape_jepx", "fuels_futures.scrape_fuels", "news_rss.scrape_news",
+                   "eprx.scrape_eprx", "eprx.scrape_eprx_tieline"):
+        monkeypatch.setattr(f"repower.scrapers.{target}", rec(target.split(".")[1]))
+    monkeypatch.setattr("repower.dashboard.export_web.export_web", rec(
+        "export", {"datasets": {}, "anchor": "2026-10-31", "sources": {}}))
+    return calls
+
+
+def test_refresh_web_syncs_before_it_scrapes(refresh):
+    result = CliRunner().invoke(cli.app, ["refresh-web"])
+
+    assert result.exit_code == 0, result.output
+    assert [name for name, _ in refresh][:3] == ["sync", "recover", "areas"]
+    assert dict(refresh)["areas"]["force"] is False
+
+
+def test_refresh_web_still_scrapes_when_the_sync_fails(refresh, monkeypatch):
+    def offline(**_):
+        raise OSError("getaddrinfo failed")
+
+    monkeypatch.setattr("repower.hf_sync.sync_from_hf", offline)
+
+    result = CliRunner().invoke(cli.app, ["refresh-web"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped: getaddrinfo failed" in result.output
+    assert "areas" in dict(refresh)
+
+
+def test_refresh_web_full_forces_the_scrapers(refresh):
+    result = CliRunner().invoke(cli.app, ["refresh-web", "--full", "--no-sync"])
+
+    assert result.exit_code == 0, result.output
+    seen = dict(refresh)
+    assert "sync" not in seen
+    assert seen["areas"]["force"] is True
+    assert seen["scrape_jepx"]["force"] is True
+    assert seen["scrape_eprx"]["force"] is True
+    assert seen["scrape_eprx_tieline"]["force"] is True

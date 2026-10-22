@@ -250,17 +250,18 @@ def _render_sidebar(show_refresh: bool) -> dict:
     if show_refresh:
         if st.sidebar.button(
             "🔄 Refresh data",
-            help="Pull the latest DB + Parquet from Hugging Face (if configured), then reload.",
+            help="Pull the Hugging Face copy if it is newer (only the changed files; local "
+                 "tracking edits are kept), then reload.",
         ):
             from repower.config import HF_DATASET_REPO, HF_TOKEN
             hf_ready = bool(HF_TOKEN and HF_DATASET_REPO)
             if hf_ready:
                 try:
-                    with st.spinner("Pulling latest data from Hugging Face…"):
-                        from repower.hf_sync import pull_db_from_hf
-                        pull_db_from_hf()
-                except Exception as exc:  # noqa: BLE001
-                    st.sidebar.error(f"HF pull failed (reloading local data): {exc}")
+                    with st.spinner("Checking Hugging Face for newer data…"):
+                        from repower.hf_sync import sync_from_hf
+                        sync_from_hf()
+                except Exception as exc:  # noqa: BLE001 — incl. SyncConflict: keep the local copy
+                    st.sidebar.error(f"HF sync failed (reloading local data): {exc}")
             # ALWAYS clear caches + reload, so a fresh local scrape is picked up
             # even when Hugging Face is not configured.
             st.cache_resource.clear()

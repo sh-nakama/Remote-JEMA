@@ -7,6 +7,8 @@ upload that fragment over the full history.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import sqlite3
 from pathlib import Path
@@ -28,26 +30,42 @@ def hub(tmp_path, monkeypatch):
         local={name: tmp_path / name for name in _NAMES},
         hub_calls=[],  # every create_repo / create_commit, in order
         commits=[],  # {repo filename: bytes} per create_commit
+        parents=[],  # parent_commit passed to each create_commit
+        downloads=[],  # repo filenames, per hf_hub_download
     )
+    # The commit sha is a digest of the contents, so any change to `remote` moves the head.
+    state.head = lambda: hashlib.sha1(repr(sorted(state.remote.items())).encode()).hexdigest()
 
     class FakeApi:
         def __init__(self, token=None):
             pass
 
-        def list_repo_files(self, repo_id, *, repo_type=None, **_):
-            return list(state.remote)
+        def dataset_info(self, repo_id, *, revision=None, files_metadata=False, **_):
+            state.hub_calls.append("dataset_info")
+            return SimpleNamespace(sha=state.head(), siblings=[
+                SimpleNamespace(rfilename=n, blob_id=None,
+                                lfs=SimpleNamespace(sha256=hashlib.sha256(b).hexdigest()))
+                for n, b in state.remote.items()
+            ])
 
         def create_repo(self, **_):
             state.hub_calls.append("create_repo")
 
-        def create_commit(self, *, operations, **_):
+        def create_commit(self, *, operations, parent_commit=None, **_):
             state.hub_calls.append("create_commit")
+            if parent_commit is not None and parent_commit != state.head():
+                raise RuntimeError("412 Precondition Failed: the branch moved")
             # The DB snapshot lives in a temp dir that is gone once the push returns.
-            state.commits.append({op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations})
+            files = {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations}
+            state.commits.append(files)
+            state.remote.update(files)
+            state.parents.append(parent_commit)
+            return SimpleNamespace(oid=state.head())
 
-    def fake_download(*, repo_id, repo_type, filename, token, local_dir):
+    def fake_download(*, repo_id, repo_type, filename, token, local_dir, revision=None):
         if filename in state.failing:
             raise OSError("connection reset by peer")
+        state.downloads.append(filename)
         dest = Path(local_dir) / filename
         dest.write_bytes(state.remote[filename])
         return str(dest)
@@ -108,7 +126,7 @@ def test_a_pull_over_an_open_db_is_what_the_next_query_reads(hub, tmp_path, monk
     _make_db(fresh, ["new"])
     hub.remote = {"repower.db": fresh.read_bytes()}
 
-    def replacing_download(*, repo_id, repo_type, filename, token, local_dir):
+    def replacing_download(*, repo_id, repo_type, filename, token, local_dir, revision=None):
         # How hf_hub_download lands a file on Linux (the Space): rename over the target.
         part = Path(local_dir) / (filename + ".incomplete")
         part.write_bytes(hub.remote[filename])
@@ -180,3 +198,200 @@ def test_push_refuses_a_damaged_db_before_touching_the_hub(hub):
         hf_sync.push_db_to_hf()
 
     assert hub.hub_calls == []
+
+
+# ── sync_from_hf: pull only what changed, keep the local edits ───────────────────
+
+
+def _policy_db(path: Path) -> Path:
+    from repower.db import dispose_engines
+    from repower.policy import store
+
+    store.sync_committees(db_path=str(path))
+    store.record_meeting("doji_shijo", 10, None, db_path=str(path))
+    store.record_meeting("doji_shijo", 11, None, db_path=str(path))
+    dispose_engines()  # the tests edit these files with sqlite3 and swap them around
+    return path
+
+
+def _sql(db: Path, sql: str, *args) -> list[tuple]:
+    con = sqlite3.connect(db)
+    try:
+        with con:
+            return con.execute(sql, args).fetchall()
+    finally:
+        con.close()
+
+
+@pytest.fixture
+def synced(hub, tmp_path):
+    """Local and Hub hold the same policy DB, and the local copy has been synced once."""
+    remote = _policy_db(tmp_path / "remote-src.db")
+    hub.remote = {"repower.db": remote.read_bytes()}
+    hub.local["repower.db"].write_bytes(remote.read_bytes())
+    hf_sync.sync_from_hf()
+    hub.hub_calls.clear()
+    hub.downloads.clear()
+    hub.src = remote
+    return hub
+
+
+def _cron_writes(hub, sql: str, *args) -> None:
+    """A daily run changes the Hub's copy."""
+    _sql(hub.src, sql, *args)
+    hub.remote["repower.db"] = hub.src.read_bytes()
+
+
+def test_a_first_sync_downloads_nothing_whose_hash_already_matches(hub, tmp_path):
+    db = _policy_db(tmp_path / "remote-src.db")
+    hub.remote = {"repower.db": db.read_bytes(), "eprx_tieline.parquet": b"tie"}
+    hub.local["repower.db"].write_bytes(db.read_bytes())
+    hub.local["eprx_tieline.parquet"].write_bytes(b"tie")
+
+    result = hf_sync.sync_from_hf()
+
+    assert hub.downloads == [] and result.downloaded == []
+    assert not result.edits
+
+
+def test_an_up_to_date_copy_costs_one_metadata_call(synced):
+    result = hf_sync.sync_from_hf()
+
+    assert synced.hub_calls == ["dataset_info"]
+    assert synced.downloads == [] and result.downloaded == []
+
+
+def test_only_the_changed_file_is_downloaded(synced):
+    synced.remote["eprx_balancing.parquet"] = b"bal"
+
+    result = hf_sync.sync_from_hf()
+
+    assert synced.downloads == ["eprx_balancing.parquet"]
+    assert result.downloaded == ["eprx_balancing.parquet"]
+    assert synced.local["eprx_balancing.parquet"].read_bytes() == b"bal"
+
+
+def test_a_newer_hub_copy_is_pulled_with_the_local_tracking_edits_reapplied(synced):
+    local = synced.local["repower.db"]
+    _sql(local, "UPDATE policy_committee SET enabled = 1 - enabled, priority = 4 WHERE committee_key = 'santeii'")
+    _sql(local, "UPDATE policy_committee SET archived = 1 WHERE committee_key = 'saisei_kano'")
+    _sql(local, "UPDATE policy_meeting SET gen_requested = 1 WHERE meeting_num = 10")
+    _sql(local, "INSERT INTO policy_committee (committee_key, name_ja, url, source, enabled, user_added, "
+                "archived, consecutive_failures) VALUES ('my_wg', 'WG', 'https://x', 'METI', 1, 1, 0, 0)")
+    _sql(local, "INSERT INTO policy_meeting (committee_key, meeting_num, state) VALUES ('my_wg', 1, 'detected')")
+    tracked = _sql(local, "SELECT enabled FROM policy_committee WHERE committee_key = 'santeii'")[0][0]
+    _cron_writes(synced, "UPDATE policy_meeting SET title = 'from the cron' WHERE meeting_num = 11")
+
+    result = hf_sync.sync_from_hf()
+
+    assert result.downloaded == ["repower.db"]
+    assert result.backup is not None and result.backup.exists()
+    assert _sql(local, "SELECT title FROM policy_meeting WHERE meeting_num = 11") == [("from the cron",)]
+    assert _sql(local, "SELECT enabled, priority FROM policy_committee WHERE committee_key = 'santeii'") == [
+        (tracked, 4)]
+    assert _sql(local, "SELECT archived FROM policy_committee WHERE committee_key = 'saisei_kano'") == [(1,)]
+    assert _sql(local, "SELECT gen_requested FROM policy_meeting WHERE meeting_num = 10") == [(1,)]
+    assert _sql(local, "SELECT meeting_num FROM policy_meeting WHERE committee_key = 'my_wg'") == [(1,)]
+    assert result.edits.new_committees == ["my_wg"]
+    assert set(result.edits.committees) == {"santeii", "saisei_kano"}
+    # Still not on the Hub: the next start reports them again, without downloading.
+    synced.downloads.clear()
+    again = hf_sync.sync_from_hf()
+    assert synced.downloads == []
+    assert again.edits.describe() == result.edits.describe()
+
+
+def test_a_request_the_hub_has_since_summarised_is_dropped(synced):
+    local = synced.local["repower.db"]
+    _sql(local, "UPDATE policy_meeting SET gen_requested = 1 WHERE meeting_num = 10")
+    _cron_writes(synced, "UPDATE policy_meeting SET state = 'done', summarised_at = '2026-10-22 01:00:00' "
+                         "WHERE meeting_num = 10")
+
+    result = hf_sync.sync_from_hf()
+
+    assert _sql(local, "SELECT state, gen_requested FROM policy_meeting WHERE meeting_num = 10") == [("done", 0)]
+    assert not result.edits
+
+
+def test_a_flag_the_hub_raised_survives_an_unchanged_local_copy(synced):
+    _cron_writes(synced, "UPDATE policy_meeting SET resummarise_requested = 1 WHERE meeting_num = 11")
+
+    hf_sync.sync_from_hf()
+
+    local = synced.local["repower.db"]
+    assert _sql(local, "SELECT resummarise_requested FROM policy_meeting WHERE meeting_num = 11") == [(1,)]
+
+
+def test_local_summaries_the_hub_lacks_stop_the_pull(synced):
+    local = synced.local["repower.db"]
+    _sql(local, "UPDATE policy_meeting SET state = 'done', briefing_md = 'mine', "
+                "summarised_at = '2026-10-22 03:00:00' WHERE meeting_num = 11")
+    before = local.read_bytes()
+    _cron_writes(synced, "UPDATE policy_meeting SET title = 'x' WHERE meeting_num = 10")
+
+    with pytest.raises(hf_sync.SyncConflict, match="doji_shijo #11"):
+        hf_sync.sync_from_hf()
+
+    assert local.read_bytes() == before
+    result = hf_sync.sync_from_hf(discard_local=True)
+    assert _sql(local, "SELECT briefing_md FROM policy_meeting WHERE meeting_num = 11") == [(None,)]
+    assert _sql(result.backup, "SELECT briefing_md FROM policy_meeting WHERE meeting_num = 11") == [("mine",)]
+
+
+def test_a_dry_run_changes_nothing(synced):
+    local = synced.local["repower.db"]
+    _sql(local, "UPDATE policy_committee SET priority = 2 WHERE committee_key = 'santeii'")
+    before = local.read_bytes()
+    _cron_writes(synced, "UPDATE policy_meeting SET title = 'x' WHERE meeting_num = 10")
+
+    result = hf_sync.sync_from_hf(dry_run=True)
+
+    assert result.downloaded == ["repower.db"] and set(result.edits.committees) == {"santeii"}
+    assert local.read_bytes() == before
+
+
+def test_push_publishes_the_edits_only_onto_the_commit_it_synced_to(synced):
+    local = synced.local["repower.db"]
+    _sql(local, "UPDATE policy_committee SET priority = 2 WHERE committee_key = 'santeii'")
+    head = synced.head()
+
+    result = hf_sync.sync_from_hf(push=True)
+
+    assert synced.parents == [head]
+    assert result.pushed == synced.head()
+    assert hf_sync.sync_from_hf().edits.describe() == []  # the Hub has them now
+
+
+def test_push_does_nothing_without_edits(synced):
+    hf_sync.sync_from_hf(push=True)
+
+    assert "create_commit" not in synced.hub_calls
+
+
+def test_the_snapshots_are_stale_until_exported_from_the_synced_data(synced, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    assert hf_sync.export_is_stale(manifest)  # never exported
+    stamp = hf_sync.read_stamp(hf_sync.stamp_path(synced.local["repower.db"]))
+    manifest.write_text(json.dumps({"data_rev": stamp["data_commit"]}), encoding="utf-8")
+    assert not hf_sync.export_is_stale(manifest)
+
+    _cron_writes(synced, "UPDATE policy_meeting SET title = 'x' WHERE meeting_num = 10")
+    hf_sync.sync_from_hf()
+    assert hf_sync.export_is_stale(manifest)
+
+
+def test_a_sync_lands_under_another_process_holding_the_db_open(synced):
+    """A running web-api keeps the DB open; Windows will not rename over it, so the pull
+    has to go in through SQLite, and the open connection must see the new rows."""
+    local = synced.local["repower.db"]
+    reader = sqlite3.connect(local)
+    try:
+        assert reader.execute("SELECT title FROM policy_meeting WHERE meeting_num = 11").fetchall() == [(None,)]
+        _cron_writes(synced, "UPDATE policy_meeting SET title = 'from the cron' WHERE meeting_num = 11")
+
+        hf_sync.sync_from_hf()
+
+        assert reader.execute("SELECT title FROM policy_meeting WHERE meeting_num = 11").fetchall() == [
+            ("from the cron",)]
+    finally:
+        reader.close()

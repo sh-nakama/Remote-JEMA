@@ -490,16 +490,21 @@ def _scrape_products(
                 csvs = _fetch_zip_csvs(url, db_path=db_path, force=force)
                 if not csvs:
                     continue
+                # One merge per ZIP, not per CSV: each merge reads, de-duplicates and
+                # rewrites the whole Parquet, so per-CSV cost ~10 min a refresh. Rows keep
+                # _select_csvs order, so last-write-wins resolves exactly as before.
+                rows: list[dict] = []
                 for name, data in _select_csvs(csvs):
                     try:
-                        rows = parse_product_csv(data, info["code"], product, name)
-                        if not rows:
+                        parsed = parse_product_csv(data, info["code"], product, name)
+                        if not parsed:
                             logger.warning("EPRX %s %s: 0 rows parsed from %s",
                                            product, jfy, name)
                             continue
-                        total += upsert_eprx(rows)
+                        rows.extend(parsed)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("EPRX parse %s (%s): %s", name, product, e)
+                total += upsert_eprx(rows)
             except Exception as e:  # noqa: BLE001
                 logger.warning("EPRX fetch %s (%s): %s", url, product, e)
     return total
@@ -517,16 +522,18 @@ def _scrape_tieline(
                 csvs = _fetch_zip_csvs(url, db_path=db_path, force=force)
                 if not csvs:
                     continue
+                rows: list[dict] = []  # one merge per ZIP — see _scrape_products
                 for name, data in _select_csvs(csvs):
                     try:
-                        rows = parse_tieline_csv(data, market, name)
-                        if not rows:
+                        parsed = parse_tieline_csv(data, market, name)
+                        if not parsed:
                             logger.warning("EPRX tieline %s %s: 0 rows parsed from %s",
                                            market, jfy, name)
                             continue
-                        total += upsert_eprx_tieline(rows)
+                        rows.extend(parsed)
                     except Exception as e:  # noqa: BLE001
                         logger.warning("EPRX tieline parse %s (%s): %s", name, market, e)
+                total += upsert_eprx_tieline(rows)
             except Exception as e:  # noqa: BLE001
                 logger.warning("EPRX tieline fetch %s (%s): %s", url, market, e)
     return total

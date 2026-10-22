@@ -30,7 +30,10 @@ fixed.
   merge-dedup last-write-wins). It syncs to HF alongside the DB — a workflow that pushes the DB
   but not the parquets desyncs them. `_merge_parquet` writes a temp file and `os.replace`s it in;
   keep it that way — an in-place write that dies midway truncates the only copy, and push-hf
-  uploads the wreck.
+  uploads the wreck. Each merge reads, de-duplicates and rewrites the **whole** file, so the
+  scrapers merge once per ZIP, never per CSV (per-CSV cost ~10 min a refresh). Don't batch
+  wider than a ZIP either: its validators are stored when it downloads, so rows held back
+  past a crash are lost until the file changes upstream.
 - `db.py::_migrate_add_area_column` rebuilds the table from a **hardcoded `old_cols` list** —
   adding a column to `DemandSupply30m` requires updating that list or pre-`area` DBs silently
   drop it on migration.
@@ -39,6 +42,21 @@ fixed.
 
 ## Scraping & HTTP
 
+- **The TSO CSV `{V}` suffix is the OCCTO area number** (`_01` Hokkaido … `_09` Kyushu), so
+  `AREA_CODE` is tried first and the descending `_12…_01` probe is the fallback for the
+  **current month only** (where a renamed scheme would first show; a past month missing at its
+  area code is just not hosted live — Chubu keeps two months). 404s are not cached and
+  same-host requests are paced 2 s apart: probing from `_12` cost ~20 s per month per area.
+- **Upserts are one `executemany` per table**, never a statement per row: JEPX's daily-changing
+  year file (~10k rows into two tables) took 35 s row-by-row, 1.2 s batched.
+- **An unreachable host trips the circuit breaker like a block does.** Network errors used to
+  bypass it, so a TSO whose hostname stopped resolving (Tohoku's `setsuden.` subdomain, 2026-10)
+  cost every probe URL its timeout, 48 URLs per refresh.
+- **A 200 can be an HTML page.** During its 2026-10-21/22 maintenance Kyuden answered every CSV
+  URL with a 200 お知らせ page, and the daily run cached that page's ETag as the month's;
+  `fetch_csv` now rejects and `invalidate()`s any body starting with `<`. Separately, Chubu
+  serves only the current and previous month live (older ones are in its yearly ZIP), so a
+  `--full` re-fetch can only re-validate what upstream still serves; our DB is the history.
 - **All fetches go through `scrapers/http_cache.conditional_get`** (ETag/Last-Modified persisted
   in the synced DB). If a cached 200 body turns out unparseable, you MUST call `invalidate()` —
   otherwise the bad body 304-skips forever. Existing scrapers do this; keep the pattern.
@@ -259,6 +277,27 @@ fixed.
   `hf_hub_download` falls back to overwriting the file in place. `pull_db_from_hf` therefore
   calls `db.dispose_engines()` before and after downloading. That only covers this process —
   stop `web-api` (or anything else holding the DB) before a local `pull-hf`.
+- **`repower sync` (run by `web-api` on start) is the merge-aware pull; `pull-hf` stays a blind
+  replace.** It reads the Hub commit + per-file LFS sha256 in one `dataset_info` call and compares
+  them with `data/.hf_sync.json` (written by `pull-hf`, `push-hf` and `sync`; no stamp = hash the
+  local files). A newer DB is downloaded to a temp dir, the local **user-owned** policy fields are
+  re-applied (`repower/sync_merge.py`: committee `enabled`/`priority`/`archived` local-wins, local-only
+  committees copied whole, raised `gen_requested`/`resummarise_requested` unless the Hub summarised
+  that meeting since, `manual` tags), then it is written *into* the live DB via SQLite's backup API.
+  Rules to keep:
+  - **Never swap the DB by rename on Windows.** A running `web-api` holds the file open and
+    `os.replace` fails; the backup API goes through SQLite's locking and open connections see the
+    new pages at their next read.
+  - **Only *raised* request flags travel.** The daily `detect` sets `resummarise_requested` itself,
+    so a local `False` is not an edit. A new user-owned column needs adding to `sync_merge` or a
+    pull silently reverts it.
+  - **Local summaries the Hub lacks stop the pull (`SyncConflict`).** Merging them would also need
+    the committee's synthesis state reconciled; `--discard-local` overrides (old DB kept as
+    `*.presync.db`).
+  - `sync --push` passes `parent_commit`, so the Hub rejects it if a cron pushed in between; plain
+    `push-hf` still does not.
+  - The snapshots' `manifest.json` records `data_rev` (the stamp's `data_commit`); `web-api` rebuilds
+    them when it differs. A push keeps `data_commit`, so pushing alone never forces a rebuild.
 - The Space pulls once per **process** (`st.cache_resource`, re-checked hourly), not once per
   visitor — it used to key the pull on `st.session_state`, so every new browser session
   re-downloaded the dataset under the sessions already reading it.

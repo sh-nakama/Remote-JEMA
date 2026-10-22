@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 import pandas as pd  # noqa: E402
 from sqlalchemy import RowMapping, func, select, text  # noqa: E402
 
-from repower.config import EPRX_BALANCING_PARQUET  # noqa: E402
+from repower.config import DB_PATH, EPRX_BALANCING_PARQUET  # noqa: E402
 from repower.dashboard import read  # noqa: E402
 from repower.db import (  # noqa: E402
     DemandSupply30m,
@@ -45,6 +45,7 @@ from repower.db import (  # noqa: E402
 )
 from repower.policy import citations as policy_citations  # noqa: E402
 from repower.policy import tags as policy_tags  # noqa: E402
+from repower.sync_merge import read_stamp, stamp_path  # noqa: E402
 from repower.timeutil import JST, today_jst  # noqa: E402
 
 # Geographic ordering, matching the frontend area keys (``tepco`` == Tokyo).
@@ -1393,6 +1394,9 @@ def export_web(out_dir: str | Path = "web/public/data/web", db_path: str | None 
         "areas": AREAS,
         "levels": LEVELS,
         "sources": maxes,
+        # The Hub commit whose market data these snapshots hold (None if this copy was
+        # never synced) — how a local web-api start knows the snapshots are behind.
+        "data_rev": (read_stamp(stamp_path(Path(db_path) if db_path else DB_PATH)) or {}).get("data_commit"),
         "datasets": {},
     }
     # Each dataset is isolated: a failure (e.g. an empty/partial DB on a deploy

@@ -60,6 +60,13 @@ class BaseAreaScraper:
     ARCHIVE_URL_TEMPLATE: ClassVar[str] = ""
     # If a template contains {V}, the scraper probes _01.._09 (descending) at that slot.
     VERSION_RANGE: ClassVar[tuple[int, int]] = (1, 12)
+    # The {V} slot is in practice the OCCTO area number (01 Hokkaido … 09 Kyushu): every
+    # file each TSO has served used its own code. It is tried first, and the full probe is
+    # kept only for the *current* month — where a renamed scheme would first show; a past
+    # month missing at its area code is simply not hosted (Chubu serves two months live).
+    # 404s are not cached and same-host requests are paced, so probing from _12 down cost
+    # ~20 s per month per area on every run.
+    AREA_CODE: ClassVar[str] = ""
     ENCODING: ClassVar[str] = "utf-8-sig"
     SKIP_ROWS: ClassVar[int] = 1
     HEADER_ROW: ClassVar[int] = 0
@@ -75,25 +82,33 @@ class BaseAreaScraper:
         for tpl in self.URL_TEMPLATES:
             if "{V}" in tpl:
                 lo, hi = self.VERSION_RANGE
-                for v in range(hi, lo - 1, -1):
-                    urls.append(tpl.format(V=f"{v:02d}", **ym))
+                versions = [f"{v:02d}" for v in range(hi, lo - 1, -1)]
+                if self.AREA_CODE in versions:
+                    versions.remove(self.AREA_CODE)
+                    versions.insert(0, self.AREA_CODE)
+                urls.extend(tpl.format(V=v, **ym) for v in versions)
             else:
                 urls.append(tpl.format(**ym))
         return urls
 
-    def fetch_csv(self, year: int, month: int, db_path: str | None = None):
+    def fetch_csv(self, year: int, month: int, db_path: str | None = None, *, force: bool = False):
         """Fetch a month's CSV via the conditional-GET cache.
 
         Returns a DataFrame on a fresh 200, the ``_UNCHANGED`` sentinel if the
         winning URL is unchanged since last run (304), or None if no URL yields
         data. Probes the version-suffixed URLs in order; the curl_cffi fallback
-        handles anti-bot 403s (e.g. Kyuden).
+        handles anti-bot 403s (e.g. Kyuden). ``force`` skips the validators, so an
+        unchanged file is downloaded and re-parsed anyway.
         """
         last_err: Exception | None = None
-        for url in self.csv_urls(year, month):
+        urls = self.csv_urls(year, month)
+        today = today_jst()
+        if self.AREA_CODE and (year, month) != (today.year, today.month):
+            urls = [u for u in urls if u.endswith(f"_{self.AREA_CODE}.csv")]  # see AREA_CODE
+        for url in urls:
             try:
                 status, content = conditional_get(
-                    url, db_path=db_path, allow_curl_fallback=True
+                    url, db_path=db_path, allow_curl_fallback=True, force=force
                 )
             except Exception as e:  # noqa: BLE001
                 last_err = e
@@ -105,6 +120,14 @@ class BaseAreaScraper:
                 logger.info("[%s] %s: 304 unchanged", self.AREA, url)
                 return _UNCHANGED
             if content is None:  # conditional_get pairs "ok" with a body
+                continue
+            if content.lstrip()[:1] == b"<":
+                # A maintenance/notice page served as 200 (Kyuden, 2026-10-21/22, on every
+                # CSV URL). pandas parses it into a frame and only the column mapping
+                # fails, in scrape() — after its validators were cached, so the real file
+                # would then 304-skip against the notice's ETag.
+                logger.warning("[%s] %s: HTML page instead of a CSV", self.AREA, url)
+                invalidate(url, db_path=db_path)
                 continue
             try:
                 df = self._bytes_to_df(content)
@@ -141,7 +164,8 @@ class BaseAreaScraper:
         """
         return year
 
-    def fetch_archive_year(self, year: int, db_path: str | None = None) -> dict[tuple[int, int], pd.DataFrame]:
+    def fetch_archive_year(self, year: int, db_path: str | None = None, *,
+                           force: bool = False) -> dict[tuple[int, int], pd.DataFrame]:
         """Download the yearly ZIP archive and return ``{(year, month): df}``.
 
         Returns an empty dict if ``ARCHIVE_URL_TEMPLATE`` is unset, the archive
@@ -153,7 +177,7 @@ class BaseAreaScraper:
         url = self.ARCHIVE_URL_TEMPLATE.format(YYYY=str(year))
         try:
             status, raw = conditional_get(
-                url, db_path=db_path, allow_curl_fallback=True, timeout=60
+                url, db_path=db_path, allow_curl_fallback=True, timeout=60, force=force
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("[%s] archive %s -> %s", self.AREA, url, e)
@@ -250,29 +274,34 @@ class BaseAreaScraper:
     def upsert(self, df: pd.DataFrame, db_path: str | None = None) -> int:
         if df.empty:
             return 0
+        cols = [c for c in SUPPLY_FIELDS if c in df.columns]
+        rows = [
+            {"area": self.AREA, "date": r["date"], "time": r["time"],
+             **{c: None if pd.isna(r[c]) else float(r[c]) for c in cols}}
+            for r in df.to_dict("records")
+        ]
         init_db(db_path)
         session = get_session(db_path)
-        n = 0
         try:
-            for _, row in df.iterrows():
-                values = {"area": self.AREA, "date": row["date"], "time": row["time"]}
-                for col in SUPPLY_FIELDS:
-                    if col in df.columns:
-                        v = row[col]
-                        values[col] = None if pd.isna(v) else float(v)
-                stmt = sqlite_upsert(DemandSupply30m).values(**values)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["area", "date", "time"],
-                    set_={k: stmt.excluded[k] for k in values if k not in {"area", "date", "time"}},
-                )
-                session.execute(stmt)
-                n += 1
+            # One executemany, not a statement per row.
+            stmt = sqlite_upsert(DemandSupply30m)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["area", "date", "time"],
+                set_={c: stmt.excluded[c] for c in cols},
+            )
+            session.execute(stmt, rows)
             session.commit()
         finally:
             session.close()
-        return n
+        return len(rows)
 
-    def scrape(self, months_back: int = 1, db_path: str | None = None) -> int:
+    def scrape(self, months_back: int = 1, db_path: str | None = None, *, force: bool = False) -> int:
+        """Fetch the current month and *months_back* before it; return rows upserted.
+
+        Unchanged files 304 and are skipped. ``force`` re-downloads and re-upserts every
+        month in the window regardless — for when upstream revised a file without
+        changing its validators, or the DB is suspected to disagree with it.
+        """
         today = today_jst()
         targets: list[tuple[int, int]] = []
         for off in range(months_back + 1):
@@ -291,7 +320,7 @@ class BaseAreaScraper:
         if self.ARCHIVE_URL_TEMPLATE and months_back >= 2:
             years_needed = sorted({self._archive_year_for(y, m) for y, m in targets})
             for yr in years_needed:
-                archive_dfs.update(self.fetch_archive_year(yr, db_path=db_path))
+                archive_dfs.update(self.fetch_archive_year(yr, db_path=db_path, force=force))
 
         # Live months override archive content for the trailing 2 months.
         live_months = set(targets[: min(2, len(targets))])
@@ -300,14 +329,14 @@ class BaseAreaScraper:
         for y, m in targets:
             df = None
             if (y, m) in live_months:
-                df = self.fetch_csv(y, m, db_path=db_path)
+                df = self.fetch_csv(y, m, db_path=db_path, force=force)
                 if df is None and (y, m) in archive_dfs:  # fetch failed → archive
                     df = archive_dfs[(y, m)]
                     logger.info("[%s] %04d-%02d: using archive copy", self.AREA, y, m)
             else:
                 df = archive_dfs.get((y, m))
                 if df is None:
-                    df = self.fetch_csv(y, m, db_path=db_path)
+                    df = self.fetch_csv(y, m, db_path=db_path, force=force)
             if df is _UNCHANGED:  # 304 — data already in DB, skip
                 logger.info("[%s] %04d-%02d: unchanged, skipped", self.AREA, y, m)
                 continue

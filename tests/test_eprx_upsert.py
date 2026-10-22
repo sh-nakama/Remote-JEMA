@@ -93,3 +93,32 @@ def test_upsert_eprx_crash_mid_write_keeps_the_existing_file(tmp_path, monkeypat
 
     assert _tepco_demand(str(path)) == 10.0
     assert [p.name for p in tmp_path.iterdir()] == ["bal.parquet"]
+
+
+def test_a_zip_is_merged_once_and_its_later_csv_still_wins(tmp_path, monkeypatch):
+    """Each merge rewrites the whole Parquet, so a ZIP's CSVs go in as one batch —
+    in _select_csvs order, so a later file still overrides an earlier one."""
+    from repower.scrapers import eprx
+
+    def csv(value: int) -> bytes:
+        lines = ["H,EPRX,Primary,prompt", "P,,,,48,extra",
+                 "T,block_id,metric,北海道,東北,東京,中部,北陸,関西,中国,四国,九州,合計",
+                 f"20260401B01,募集量（TSO別）[MW],1,2,{value},4,5,6,7,8,9,99"]
+        return ("\n".join(lines) + "\n").encode("cp932")
+
+    zips = {"1-0": [("202604_a.csv", csv(30)), ("202604_b.csv", csv(31))]}
+    monkeypatch.setattr(eprx, "_build_urls", lambda code, jfy_since=None: [(2026, code)])
+    monkeypatch.setattr(eprx, "_fetch_zip_csvs", lambda url, **_: zips.get(url))
+    path = tmp_path / "bal.parquet"
+    merges = []
+
+    def counting_upsert(rows, path_=None):
+        merges.append(len(rows))
+        return upsert_eprx(rows, path)
+
+    monkeypatch.setattr(eprx, "upsert_eprx", counting_upsert)
+
+    eprx._scrape_products(jfy_since=2026)
+
+    assert merges == [18]  # 9 areas x 2 CSVs, in one merge
+    assert _tepco_demand(str(path)) == 31.0

@@ -90,6 +90,7 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `run-all` | Full pipeline: scrape → analyze → notify. Options: `--months-back` (default `2`), `--dry-run`. |
 | `push-hf` | Push the local database to the Hugging Face Dataset. |
 | `pull-hf` | Pull the database from the Hugging Face Dataset. |
+| `sync` | Pull the Hugging Face copy only if it is newer, downloading just the changed files and keeping local tracking edits (tracked set, priorities, archive flags, queued summaries, hand-set tags). `web-api` runs it on start. Options: `--push` (then push those edits, refused if the dataset moved meanwhile), `--dry-run`, `--discard-local`. |
 | `init-db-cmd` | Initialize the database (create tables). |
 | `policy detect` | Detect new committee meetings (**no NotebookLM auth**). Options: `--committee` (key or `all`), `--window` (enumerate materials for the newest N), `--refresh-days` (re-read the document list of meetings held in the last N days, default 7, and flag summarised ones that gained a paper for a new briefing; `0` = off), `--watch-days` (also re-check summarised meetings still without minutes, about weekly, for N days after the meeting, default 90; `0` = off), `--dry-run`. |
 | `policy run` | Summarise pending meetings via NotebookLM (**requires auth**). Options: `--committee`, `--max-per-run`, `--breadth`/`--depth-first`, `--meeting N` (exactly that meeting of `--committee`, bypassing the queue — works on an already-summarised meeting, so it doubles as the repair path). |
@@ -120,7 +121,8 @@ repower policy run --committee emissions_trading --max-per-run 5   # needs `note
 repower export-web              # write the JSON snapshots the app reads (web/public/data/)
 npm --prefix web ci
 npm --prefix web run dev        # http://localhost:5173 (this machine only)
-repower web-api                 # optional: live policy data and committee management
+repower web-api                 # optional: live policy data and committee management;
+                                #   on start it syncs a newer HF copy and rebuilds stale snapshots
 ```
 
 `npm run lint`, `npm test` and `npm run build` in `web/` are what CI runs. The

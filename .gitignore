@@ -6,6 +6,8 @@ build/
 .venv/
 .env
 data/*.db
+# Which Hugging Face commit this local copy matches (repower sync); machine-specific.
+data/.hf_sync.json
 data/*.parquet
 *.db-journal
 
@@ -30,3 +32,4 @@ test-runs/
 # committed and start competing with pyproject.toml. If the project ever adopts
 # uv properly, drop this line — lockfiles belong in version control.
 uv.lock
+package-lock.json
