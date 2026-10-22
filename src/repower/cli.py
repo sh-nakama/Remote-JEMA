@@ -1568,7 +1568,7 @@ def policy_digest(
 
 @policy_app.command("weekly")
 def policy_weekly(
-    days: int = typer.Option(7, min=1, max=31, help="Rolling window of days held, ending today (JST)"),
+    days: int = typer.Option(7, min=1, max=31, help="Days held, ending yesterday (JST)"),
     dry_run: bool = typer.Option(False, help="Print the summary without sending the email"),
     out: Path | None = typer.Option(None, help="Also write the HTML email to this file"),
     board: bool = typer.Option(True, help="Include the energy-board feed (one network fetch)"),

@@ -912,8 +912,10 @@ fixed.
   done-writer must set it too, or that meeting never shows up as newly summarised.
 - **The weekly email is keyed on `meeting_date`.** Undated meetings never appear (the footer
   counts them instead), so meeting-date coverage (`policy dates`, OCCTO JSON, energy-board)
-  is what decides what the email can show. A skipped Friday run is not caught up: the
-  windows are rolling 7 days, not "since the last email".
+  is what decides what the email can show. The window is the 7 complete days ending
+  *yesterday* (JST), so the Monday 08:00 JST run covers Monday–Sunday and never counts that
+  morning's meetings as held; a manual run mid-week covers the 7 days before it. A skipped
+  Monday run is not caught up: windows are relative to the run date, not "since the last email".
 - **`smtplib.SMTPException` is an `OSError`.** In `notify/mail.py` the server-reply branch
   (`SMTPResponseException`: bad credentials, rejected recipient — never retried) must come
   *before* the generic `(SMTPException, OSError)` branch (no reply: disconnect, DNS, timeout —
