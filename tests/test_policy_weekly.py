@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import smtplib
 import sqlite3
 from datetime import UTC, date, datetime, timedelta
 
@@ -260,35 +262,103 @@ def test_send_is_a_no_op_when_unconfigured(monkeypatch):
     assert mail.send_email("s", "t", "<p>h</p>") is False
 
 
-def test_send_logs_in_and_sends_a_multipart_message(monkeypatch):
+class GmailLike(smtplib.SMTP):
+    """A real ``smtplib.SMTP`` with the socket replaced: Gmail's capabilities, and Gmail's
+    habit of hanging up after rejecting a login. Drives smtplib's own AUTH code."""
+
+    accept = True
+    offers = "LOGIN PLAIN XOAUTH2 PLAIN-CLIENTTOKEN OAUTHBEARER XOAUTH"
+    log: list = []
+
+    def __init__(self, host, port, **kw):
+        super().__init__()  # no host → no connection
+        self.closed = False
+        type(self).log.append(("connect", host, port))
+
+    def ehlo(self, name=""):
+        type(self).log.append("ehlo")
+        self.does_esmtp = True
+        self.esmtp_features = {"auth": self.offers, "starttls": ""} if self.offers else {"starttls": ""}
+        return 250, b"smtp.gmail.com at your service"
+
+    def starttls(self, *a, **k):
+        type(self).log.append("starttls")
+        return 220, b"ready"
+
+    def docmd(self, cmd, args=""):
+        if self.closed:
+            raise smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
+        if cmd == "AUTH":
+            mech, _, blob = args.partition(" ")
+            type(self).log.append(("auth", mech, base64.b64decode(blob).split(b"\0")[1:]))
+            if self.accept:
+                return 235, b"2.7.0 Accepted"
+            self.closed = True
+            return 535, (b"5.7.8 Username and Password not accepted. For more information, go to\n"
+                         b"5.7.8  https://support.google.com/mail/?p=BadCredentials")
+        return 221, b"bye"
+
+    def send_message(self, msg, *a, **k):
+        type(self).log.append(("send", msg))
+
+    def close(self):
+        pass
+
+
+@pytest.fixture
+def gmail(monkeypatch):
+    monkeypatch.setattr(GmailLike, "log", [])
+    monkeypatch.setattr(GmailLike, "accept", True)
+    monkeypatch.setattr(GmailLike, "offers", GmailLike.offers)
+    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", GmailLike)
+    monkeypatch.setattr(mail.smtplib, "SMTP", GmailLike)
+    monkeypatch.setattr(mail.time, "sleep", lambda s: None)
+    return GmailLike
+
+
+def test_send_logs_in_and_sends_a_multipart_message(monkeypatch, gmail):
     _configure(monkeypatch)
-    sent = {}
-
-    class FakeSMTP:
-        def __init__(self, host, port, **kw):
-            sent["host"] = (host, port)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def ehlo(self):
-            pass
-
-        def login(self, user, pw):
-            sent["login"] = (user, pw)
-
-        def send_message(self, msg):
-            sent["msg"] = msg
-
-    monkeypatch.setattr(mail.smtplib, "SMTP_SSL", FakeSMTP)
     assert mail.send_email("Subject", "plain", "<p>rich</p>") is True
-    msg = sent["msg"]
-    assert sent["host"] == ("smtp.example.test", 465) and sent["login"] == ("bot@example.test", "pw")
+    assert gmail.log[0] == ("connect", "smtp.example.test", 465)
+    assert ("auth", "PLAIN", [b"bot@example.test", b"pw"]) in gmail.log
+    msg = gmail.log[-1][1]
     assert msg["To"] == "a@example.test, b@example.test" and "bot@example.test" in msg["From"]
     assert {p.get_content_type() for p in msg.iter_parts()} == {"text/plain", "text/html"}
+
+
+def test_a_gmail_rejection_reports_its_reply_not_the_hang_up(monkeypatch, gmail):
+    """smtplib's login() falls back PLAIN → LOGIN after a rejection; Gmail has hung up by
+    then, so all it ever reported was SMTPServerDisconnected. One mechanism, real reply."""
+    _configure(monkeypatch, SMTP_PASSWORD="hunter2")
+    gmail.accept = False
+    with pytest.raises(smtplib.SMTPServerDisconnected):  # the masking this guards against
+        s = GmailLike("h", 465)
+        s.ehlo()
+        s.login("bot@example.test", "hunter2")
+    gmail.log.clear()
+
+    with pytest.raises(mail.EmailError) as e:
+        mail.send_email("s", "t", "h")
+    msg = str(e.value)
+    assert "at login" in msg and "SMTPAuthenticationError (535)" in msg and "BadCredentials" in msg
+    assert "App Password" in msg and "hunter2" not in msg and "bot@example.test" not in msg
+    assert sum(1 for x in gmail.log if x[0] == "connect") == 1  # a rejection is not retried
+
+
+def test_an_app_password_pasted_with_its_display_spaces_is_joined(monkeypatch, gmail):
+    _configure(monkeypatch, SMTP_PASSWORD="abcd efgh ijkl mnop\n")
+    assert mail.send_email("s", "t", "h") is True
+    assert ("auth", "PLAIN", [b"bot@example.test", b"abcdefghijklmnop"]) in gmail.log
+
+
+def test_a_server_offering_no_auth_fails_once_and_says_so(monkeypatch, gmail):
+    """What an SMTP-intercepting network (a corporate proxy) looks like from the client."""
+    _configure(monkeypatch)
+    gmail.offers = ""
+    with pytest.raises(mail.EmailError) as e:
+        mail.send_email("s", "t", "h")
+    assert "intercepting" in str(e.value)
+    assert sum(1 for x in gmail.log if x[0] == "connect") == 1
 
 
 def test_send_failure_raises_without_leaking_the_password(monkeypatch):
@@ -319,34 +389,20 @@ def test_dropped_connection_is_retried_then_names_the_stage(monkeypatch):
     assert "at connect" in str(e.value) and "Connection unexpectedly closed" in str(e.value)
 
 
-def test_a_transient_disconnect_then_success_sends(monkeypatch):
+def test_a_transient_disconnect_then_success_sends(monkeypatch, gmail):
     _configure(monkeypatch)
-    monkeypatch.setattr(mail.time, "sleep", lambda s: None)
-    state = {"n": 0, "sent": False}
+    state = {"n": 0}
 
-    class Flaky:
+    class Flaky(GmailLike):
         def __init__(self, *a, **k):
             state["n"] += 1
             if state["n"] == 1:
                 raise mail.smtplib.SMTPServerDisconnected("Connection unexpectedly closed")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def ehlo(self):
-            pass
-
-        def login(self, *a):
-            pass
-
-        def send_message(self, msg):
-            state["sent"] = True
+            super().__init__(*a, **k)
 
     monkeypatch.setattr(mail.smtplib, "SMTP_SSL", Flaky)
-    assert mail.send_email("s", "t", "h") is True and state["sent"] and state["n"] == 2
+    assert mail.send_email("s", "t", "h") is True and state["n"] == 2
+    assert gmail.log[-1][0] == "send"
 
 
 def test_a_smtp_reply_is_not_retried_and_is_redacted(monkeypatch):
@@ -363,37 +419,13 @@ def test_a_smtp_reply_is_not_retried_and_is_redacted(monkeypatch):
     assert len(calls) == 1 and "hunter2" not in str(e.value) and "bot@example.test" not in str(e.value)
 
 
-def test_a_non_465_port_uses_starttls_and_strips_pasted_whitespace(monkeypatch):
+def test_a_non_465_port_uses_starttls_and_strips_pasted_whitespace(monkeypatch, gmail):
     _configure(monkeypatch, SMTP_PORT=587, SMTP_PASSWORD="pw\n", SMTP_USER=" bot@example.test ")
-    steps = []
-
-    class Plain:
-        def __init__(self, host, port, **kw):
-            steps.append(("connect", host, port))
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-        def ehlo(self):
-            steps.append("ehlo")
-
-        def starttls(self, context=None):
-            steps.append("starttls")
-
-        def login(self, user, pw):
-            steps.append(("login", user, pw))
-
-        def send_message(self, msg):
-            steps.append("send")
-
-    monkeypatch.setattr(mail.smtplib, "SMTP", Plain)
     monkeypatch.setattr(mail.smtplib, "SMTP_SSL", lambda *a, **k: pytest.fail("587 must not be implicit TLS"))
     assert mail.send_email("s", "t", "h") is True
-    assert steps == [("connect", "smtp.example.test", 587), "ehlo", "starttls", "ehlo",
-                     ("login", "bot@example.test", "pw"), "send"]
+    assert [x if isinstance(x, str) else x[:3] if x[0] != "send" else "send" for x in gmail.log] == [
+        ("connect", "smtp.example.test", 587), "ehlo", "starttls", "ehlo",
+        ("auth", "PLAIN", [b"bot@example.test", b"pw"]), "send"]
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

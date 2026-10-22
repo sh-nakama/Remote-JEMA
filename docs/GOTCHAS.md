@@ -920,6 +920,14 @@ fixed.
   retried), or an auth failure is retried three times. The error names the stage
   (connect/login/send) because a bare `SMTPServerDisconnected` otherwise says nothing about
   where the connection died; credentials are redacted from the server text.
+- **Never use `smtp.login()` against Gmail.** It tries each advertised AUTH mechanism in
+  turn and swallows every rejection but the last. Gmail rejects AUTH PLAIN (e.g. `535 5.7.8
+  BadCredentials`) and then hangs up, so the AUTH LOGIN fallback raises
+  `SMTPServerDisconnected` at login and the reply saying *why* is lost. The first weekly-email
+  runs failed exactly like that on both 465 and 587, and port/TLS changes could not fix it.
+  `mail._authenticate` sends one mechanism through `smtp.auth()`, so the reply comes through
+  (with a Gmail hint per code). Also: SMTP from the office network is intercepted (no AUTH or
+  STARTTLS advertised), so test sending from Actions, not locally.
 
 ## Streamlit dashboard
 
