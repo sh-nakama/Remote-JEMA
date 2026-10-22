@@ -18,8 +18,8 @@ from repower.policy import schedule as sched
 from repower.policy import store, weekly
 from repower.policy.energy_board import BoardEntry
 
-TODAY = date(2026, 10, 9)  # a Friday
-NOW = datetime(2026, 10, 9, 8, 0, tzinfo=UTC)  # 17:00 JST, when the cron fires
+TODAY = date(2026, 10, 9)  # the last day of the window under test
+NOW = datetime(2026, 10, 9, 8, 0, tzinfo=UTC)
 
 DIGEST = """### **Key decisions**
 
@@ -50,7 +50,7 @@ def _meeting(db, key, num, day, *, state="detected", digest=None, summarised_at=
 
 
 def _build(db, **kw):
-    return weekly.build_report(db, today=TODAY, now=NOW, **kw)
+    return weekly.build_report(db, end=TODAY, now=NOW, **kw)
 
 
 # ── The brief ────────────────────────────────────────────────────────────────
@@ -75,6 +75,19 @@ def test_brief_truncates_long_bullets_on_a_word_boundary():
 
 
 # ── What goes in which section ───────────────────────────────────────────────
+def test_by_default_the_window_is_the_previous_monday_to_sunday(policy_db, monkeypatch):
+    """Sent Monday 08:00 JST: the window is the 7 complete days before it, never that morning."""
+    monday = date(2026, 10, 12)
+    monkeypatch.setattr(weekly, "yesterday_jst", lambda: monday - timedelta(days=1))
+    _meeting(policy_db, "system_review", 50, monday)  # today: not held yet
+    _meeting(policy_db, "system_review", 49, monday - timedelta(days=1))  # Sunday
+    _meeting(policy_db, "system_review", 48, monday - timedelta(days=7))  # last Monday
+    _meeting(policy_db, "system_review", 47, monday - timedelta(days=8))  # in last week's email
+    r = weekly.build_report(policy_db, now=NOW)
+    assert (r.start, r.end) == (date(2026, 10, 5), date(2026, 10, 11))
+    assert sorted(i.meeting_num for i in r.held) == [48, 49]
+
+
 def test_sections_are_keyed_on_when_the_meeting_was_held(policy_db):
     db = policy_db
     store.set_committee_enabled("santeii", False, db_path=db)
@@ -219,7 +232,7 @@ def test_html_escapes_scraped_text_and_skips_an_empty_catch_up_section():
     assert "Committee &lt;A&gt; 第5回" in out and "Body &amp; more" in out
     assert 'href="https://x/?a=1&amp;b=2"' in out
     assert "Summaries now available" not in out
-    assert "Also held this week (0)" in out
+    assert "Also held last week (0)" in out
 
 
 def test_text_and_subject():
@@ -230,7 +243,7 @@ def test_text_and_subject():
     assert "  • Title: Body & more" in text
     empty = _report(summarised=[])
     assert "no meetings held" in weekly.subject(empty)
-    assert "No tracked meeting held this week has a summary yet." in weekly.render_text(empty)
+    assert "No tracked meeting held last week has a summary yet." in weekly.render_text(empty)
 
 
 def test_label_does_not_repeat_a_number_already_in_a_raw_name():

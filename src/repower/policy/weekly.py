@@ -9,7 +9,7 @@ when it was summarised, so the backlog catch-up cannot flood the email:
    the window whose summary landed during the last week. Materials publish days to
    weeks after a meeting, so these were "pending" in an earlier email; without this
    section their brief would never be sent.
-3. **Also held this week** — every other meeting held in the window, tracked or not:
+3. **Also held last week** — every other meeting held in the window, tracked or not:
    from detection (all catalog committees), the METI calendar history and the
    energy-board feed, deduplicated.
 
@@ -29,9 +29,9 @@ from types import SimpleNamespace
 
 from repower.policy import store
 from repower.policy.energy_board import committee_meti_dir
-from repower.timeutil import today_jst
+from repower.timeutil import yesterday_jst
 
-WINDOW_DAYS = 7  # rolling: today (JST) and the six days before it
+WINDOW_DAYS = 7  # the last 7 complete days (JST): sent Monday morning, Monday–Sunday
 LATE_DAYS = 21  # how long before the window a meeting may be held and still be caught up
 BRIEF_BULLETS = 3
 BRIEF_CHARS = 260
@@ -67,7 +67,7 @@ class WeeklyReport:
     summarised: list[WeeklyItem]
     late: list[WeeklyItem]
     held: list[WeeklyItem]
-    undated: int = 0  # meetings detected this week with no known date (so not listed)
+    undated: int = 0  # meetings detected in the past week with no known date (so not listed)
 
     @property
     def total_held(self) -> int:
@@ -190,19 +190,21 @@ def _sort(items: list[WeeklyItem]) -> list[WeeklyItem]:
 def build_report(
     db_path: str | None = None,
     *,
-    today: date | None = None,
+    end: date | None = None,
     now: datetime | None = None,
     board: list | None = None,
     days: int = WINDOW_DAYS,
 ) -> WeeklyReport:
-    """Assemble the weekly report for the ``days`` ending *today* (JST, inclusive).
+    """Assemble the weekly report for the ``days`` ending on *end* (inclusive).
 
+    *end* defaults to yesterday (JST): only complete days, so the Monday-morning run
+    covers the previous Monday–Sunday and never lists that morning's meetings as held.
     *board* is the energy-board feed (``energy_board.BoardEntry`` list), fetched by
     the caller so this function never touches the network.
     """
-    today = today or today_jst()
+    end = end or yesterday_jst()
     now = now or datetime.now(UTC)
-    start = today - timedelta(days=days - 1)
+    start = end - timedelta(days=days - 1)
     since = now - timedelta(days=days)
 
     committees = store.list_committees(db_path=db_path)
@@ -235,7 +237,7 @@ def build_report(
     seen_name: dict[date, list[str]] = {}
 
     # 1) Detected meetings (any catalog committee) held in the window.
-    for m in store.meetings_for_week(start, today, db_path=db_path):
+    for m in store.meetings_for_week(start, end, db_path=db_path):
         key, num, day = m["committee_key"], m["meeting_num"], m["meeting_date"]
         it = item(key, day=day, num=num, status=_meeting_status(m["state"]))
         it.torimatome = m["has_torimatome"]
@@ -277,12 +279,12 @@ def build_report(
                 seen_num.add((key, num))
             seen_day.add((key, day))
 
-    for u in store.calendar_entries(start, today, db_path=db_path):
+    for u in store.calendar_entries(start, end, db_path=db_path):
         key = u["committee_key"] or _match_registry(u["name_ja"], committees)
         add_external(date.fromisoformat(u["date"]), u["name_ja"], key, u["meeting_num"],
                      u["org"], u["source_url"])
     for b in board or []:
-        if b.date is None or not (start <= b.date <= today):
+        if b.date is None or not (start <= b.date <= end):
             continue
         key = dir_to_key.get(b.meti_dir or "") or _match_registry(b.council, committees)
         add_external(b.date, b.title or b.council, key, b.meeting_num, "METI", b.meeting_url)
@@ -299,7 +301,7 @@ def build_report(
         late.append(it)
 
     return WeeklyReport(
-        start=start, end=today, summarised=_sort(summarised), late=_sort(late), held=_sort(held),
+        start=start, end=end, summarised=_sort(summarised), late=_sort(late), held=_sort(held),
         undated=store.undated_meetings_detected_since(since, db_path=db_path),
     )
 
@@ -329,8 +331,8 @@ def subject(report: WeeklyReport) -> str:
     return f"JEMA weekly policy summary — {fmt_range(report.start, report.end)} ({held})"
 
 
-_EMPTY_SUMMARISED = "No tracked meeting held this week has a summary yet."
-_EMPTY_HELD = "No other committee meetings were recorded this week."
+_EMPTY_SUMMARISED = "No tracked meeting held last week has a summary yet."
+_EMPTY_HELD = "No other committee meetings were recorded last week."
 
 
 def render_text(report: WeeklyReport) -> str:
@@ -357,7 +359,7 @@ def render_text(report: WeeklyReport) -> str:
 
     block("Tracked & summarised", report.summarised, _EMPTY_SUMMARISED, False)
     block("Summaries now available (held earlier)", report.late, None, False)
-    block("Also held this week", report.held, _EMPTY_HELD, True)
+    block("Also held last week", report.held, _EMPTY_HELD, True)
     if report.undated:
         out.append(_undated_note(report.undated))
     return "\n".join(out).rstrip() + "\n"
@@ -365,8 +367,8 @@ def render_text(report: WeeklyReport) -> str:
 
 def _undated_note(n: int) -> str:
     if n == 1:
-        return "1 meeting detected this week has no known date yet, so it is not listed."
-    return f"{n} meetings detected this week have no known date yet, so they are not listed."
+        return "1 meeting detected in the past week has no known date yet, so it is not listed."
+    return f"{n} meetings detected in the past week have no known date yet, so they are not listed."
 
 
 _STATUS_COLORS = {
@@ -423,7 +425,7 @@ def render_html(report: WeeklyReport) -> str:
 
     block("Tracked & summarised", report.summarised, _EMPTY_SUMMARISED, False)
     block("Summaries now available (held earlier)", report.late, None, False)
-    block("Also held this week", report.held, _EMPTY_HELD, True)
+    block("Also held last week", report.held, _EMPTY_HELD, True)
     if report.undated:
         parts.append(f'<p style="color:#6b7280;font-size:12px;margin-top:20px">{e(_undated_note(report.undated))}</p>')
     parts.append('<p style="color:#9ca3af;font-size:12px;margin-top:24px">Sent by the weekly-summary '

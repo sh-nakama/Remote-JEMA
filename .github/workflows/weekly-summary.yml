@@ -1,8 +1,8 @@
 name: Weekly Summary Email
 
-# Emails a summary of the committee meetings *held* in the last 7 days (JST): the
+# Emails a summary of the committee meetings *held* the previous Monday–Sunday (JST): the
 # tracked ones that already have a summary (with a short brief), summaries that
-# landed this week for meetings held in the three weeks before, and every other
+# landed in the past week for meetings held in the three weeks before, and every other
 # meeting held — tracked or not. Reads the dataset; never writes it.
 #
 # Secrets: SMTP_USER + SMTP_PASSWORD (a Gmail App Password) and MAIL_TO. The
@@ -10,8 +10,9 @@ name: Weekly Summary Email
 
 on:
   schedule:
-    # 08:00 UTC = 17:00 JST, Fridays — after the morning's detection + summaries.
-    - cron: "0 8 * * 5"
+    # 23:00 UTC Sunday = 08:00 JST Monday — after Monday's detection (05:30) and
+    # summaries (06:30) runs.
+    - cron: "0 23 * * 0"
   workflow_dispatch:
     inputs:
       dry_run:
