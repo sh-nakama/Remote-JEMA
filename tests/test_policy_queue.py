@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 from repower.dashboard import export_web
@@ -287,3 +287,76 @@ def test_drain_stamp_columns_are_added_to_a_pulled_database(tmp_path):
     store.sync_committees(db_path=db)
     cols = {r[1] for r in sqlite3.connect(db).execute("pragma table_info(policy_meeting)")}
     assert {"summarised_at", "resummarised_at"} <= cols
+
+
+# ── Recency tier ─────────────────────────────────────────────────────────────
+def test_recent_meetings_of_every_committee_go_before_a_high_priority_committees_old_backlog(
+        policy_db):
+    """chousei_jukyu (priority 3) has only old leftovers; santeii (100) has a current meeting.
+    The old leftover must no longer take the first slot."""
+    db = policy_db
+    _meeting(db, "chousei_jukyu", 19, meeting_date=date(2017, 8, 9))
+    _meeting(db, "santeii", 120, meeting_date=date(2026, 9, 1))
+    _meeting(db, "santeii", 100, meeting_date=date(2024, 1, 10))
+
+    assert _order(_snap(db)) == [
+        ("santeii", 120), ("chousei_jukyu", 19), ("santeii", 100),
+    ]
+
+
+def test_old_backlog_still_drains_once_the_recent_work_is_done(policy_db):
+    """A tier, not a cut-off: with nothing recent pending the old backlog runs as before
+    (priority order, newest first)."""
+    db = policy_db
+    _meeting(db, "santeii", 90, meeting_date=date(2023, 1, 1))
+    _meeting(db, "chousei_jukyu", 19, meeting_date=date(2017, 8, 9))
+    _meeting(db, "chousei_jukyu", 18, meeting_date=date(2017, 7, 1))
+
+    assert _order(_snap(db)) == [("chousei_jukyu", 19), ("santeii", 90), ("chousei_jukyu", 18)]
+
+
+def test_backlog_depth_is_measured_within_each_recency_tier(policy_db):
+    """A committee's newest *old* meeting is its depth 0 of the old tier — it is not pushed
+    behind its recent ones' depth, and recent depth-1 meetings still beat any old one."""
+    db = policy_db
+    _meeting(db, "saisei_kano", 70, meeting_date=date(2026, 8, 1))
+    _meeting(db, "saisei_kano", 69, meeting_date=date(2026, 6, 1))
+    _meeting(db, "santeii", 50, meeting_date=date(2020, 1, 1))
+
+    assert _order(_snap(db)) == [("saisei_kano", 70), ("saisei_kano", 69), ("santeii", 50)]
+
+
+def test_window_is_a_trailing_twelve_months_and_undated_counts_as_old(policy_db):
+    db = policy_db
+    _meeting(db, "santeii", 5, meeting_date=date(2025, 10, 16))     # exactly the boundary: recent
+    _meeting(db, "saisei_kano", 5, meeting_date=date(2025, 10, 15))  # a day outside: old
+    _meeting(db, "doji_shijo", 5)                                    # undated: old
+
+    order = _order(_snap(db))
+    assert order[0] == ("santeii", 5)
+    assert set(order[1:]) == {("saisei_kano", 5), ("doji_shijo", 5)}
+
+
+def test_a_requested_old_meeting_still_goes_first(policy_db):
+    db = policy_db
+    _meeting(db, "santeii", 120, meeting_date=date(2026, 9, 1))
+    _meeting(db, "chousei_jukyu", 19, meeting_date=date(2017, 8, 9), gen_requested=True)
+
+    assert _order(_snap(db))[0] == ("chousei_jukyu", 19)
+
+
+def test_recency_tier_does_not_apply_to_a_single_committee_backfill(policy_db):
+    """Depth-first (a named committee) keeps draining newest-first by meeting number."""
+    db = policy_db
+    _meeting(db, "santeii", 3, meeting_date=date(2017, 1, 1))
+    _meeting(db, "santeii", 4, meeting_date=date(2016, 1, 1))
+
+    nums = [w["meeting_num"] for w in store.pending_meetings("santeii", db_path=db)]
+    assert nums == [4, 3]
+
+
+def test_months_before_clamps_the_day():
+    assert store._months_before(date(2026, 10, 16), 12) == date(2025, 10, 16)
+    assert store._months_before(date(2026, 3, 31), 1) == date(2026, 2, 28)
+    assert store._months_before(date(2024, 2, 29), 12) == date(2023, 2, 28)
+    assert store._months_before(date(2026, 1, 15), 2) == date(2025, 11, 15)
