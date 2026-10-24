@@ -596,6 +596,25 @@ def _rollover_synthesis(committee: Committee, watermark: int, *,
     return nb_id
 
 
+def _notebook_source_count(nb_id: str) -> int:
+    """How many sources the notebook really holds (0 if it can't be listed).
+
+    The DB-derived count only sees meetings above the rollover watermark, so a
+    backfilled meeting below it that was folded into the live notebook (and any
+    duplicate an interrupted run left) goes uncounted — ``chousei_jukyu`` sat at
+    50/50 while the DB said 2, and every add failed with ``rpc_code=3`` instead of
+    rolling over. The notebook itself is the authority; a listing failure that
+    isn't account-wide falls back to the derived count rather than blocking.
+    """
+    try:
+        return len(nb.list_sources(nb_id))
+    except _HALTING:
+        raise
+    except nb.NotebookLMError as e:
+        logger.warning("could not list sources of synthesis notebook %s: %s", nb_id, e)
+        return 0
+
+
 def synthesize_committee(committee: Committee, *, db_path: str | None = None) -> bool:
     """Refresh the persistent per-committee synthesis notebook + running document.
 
@@ -629,6 +648,8 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
     # ``folded`` spans every notebook the committee has ever used.
     watermark = (state.archive_watermark_meeting if state else None) or 0
     src_count = len([n for n in folded if n > watermark])
+    if new_meetings:
+        src_count = max(src_count, _notebook_source_count(nb_id))
 
     work = _scratch() / committee.key / "synthesis"
     work.mkdir(parents=True, exist_ok=True)
