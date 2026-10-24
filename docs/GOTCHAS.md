@@ -674,10 +674,15 @@ fixed.
   the last meeting it covers. So the NotebookLM-generated *synthesis narrative* only spans
   meetings above the watermark — the running document is regenerated from the DB's briefings and
   stays complete, so don't "fix" a narrower narrative by re-adding old sources.
-- **The live notebook's size is derived from `synth_done` meetings above the watermark**, not
-  from `source_count` — that column is a cached mirror an interrupted run can leave NULL or
-  stale, and after a rollover the raw `synth_done` set spans every notebook the committee ever
-  used.
+- **The live notebook's size is the larger of the `synth_done` meetings above the watermark and
+  the notebook's real source list** (`pipeline._notebook_source_count`), never `source_count` —
+  that column is a cached mirror an interrupted run can leave NULL or stale, and after a
+  rollover the raw `synth_done` set spans every notebook the committee ever used. The DB-derived
+  figure alone is **not enough**: breadth-first backfill folds meetings *below* the watermark
+  into the live notebook (and interrupted retries leave duplicate sources), none of which the
+  derived count sees. `chousei_jukyu` sat at 50/50 while the DB said 2, so 15 meetings'
+  `synthesis add_source` failed with `RPCError rpc_code=3` instead of rolling over (2026-10-24).
+  Rollover assumes nothing about meeting order; ask NotebookLM how full the notebook is.
 - **Only *permanent* download failures burn a meeting's retry budget.** When no source PDF can
   be staged, `summarize_meeting` splits the verdict by `FETCH_KINDS`: a host-hostility kind
   (`_TRANSIENT_FETCH_KINDS` — circuit_open, challenge_unresolved, blocked_403, …) sets

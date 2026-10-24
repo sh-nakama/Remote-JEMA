@@ -1382,6 +1382,7 @@ def test_synthesize_committee_rolls_over_at_source_cap(monkeypatch, tmp_path):
 
     created: list[str] = []
     added: list[tuple[str, str]] = []
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [{}, {}])
     monkeypatch.setattr(nb_mod, "create_notebook",
                         lambda title: (created.append(title), "nb-new")[1])
     monkeypatch.setattr(nb_mod, "add_source",
@@ -1431,6 +1432,7 @@ def test_synthesis_source_count_survives_a_stale_cached_value(monkeypatch, tmp_p
     # NULL cached count, as an interrupted run leaves it — the cap must still bite.
     store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full", source_count=None)
 
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [])
     monkeypatch.setattr(nb_mod, "create_notebook", lambda title: "nb-new")
     monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
     monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
@@ -1441,6 +1443,75 @@ def test_synthesis_source_count_survives_a_stale_cached_value(monkeypatch, tmp_p
 
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
     assert store.get_committee(key, db_path=db).synthesis_notebook_id == "nb-new"
+
+
+def test_synthesis_rolls_over_when_backfill_below_watermark_filled_the_notebook(
+        monkeypatch, tmp_path):
+    """Regression (chousei_jukyu, 2026-10-24): after a rollover, backfilled meetings
+    *below* the watermark were folded into the live notebook but not counted by the
+    DB-derived size, so it sat at 50/50 while the DB said 2 and every add failed.
+    The notebook's real source list must drive the rollover."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 3)
+
+    def _done(num, *, folded=False):
+        store.record_meeting(key, num, None, db_path=db)
+        mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+                   if m["meeting_num"] == num)
+        store.update_meeting(mid, db_path=db, state="done",
+                             briefing_md=f"briefing {num}", synth_done=folded)
+
+    # Watermark 10; only meeting 11 above it is folded (derived count = 1), yet the
+    # notebook really holds 3 (a backfilled meeting 2 plus a duplicate of 11).
+    _done(2, folded=True)
+    _done(11, folded=True)
+    _done(12)
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-full",
+                           archive_watermark_meeting=10, source_count=1)
+
+    added: list[str] = []
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [{}, {}, {}])
+    monkeypatch.setattr(nb_mod, "create_notebook", lambda title: "nb-new")
+    monkeypatch.setattr(nb_mod, "add_source",
+                        lambda nb_id, path: (added.append(nb_id), "src-1")[1])
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "download_report",
+                        lambda nb_id, task_id, out: Path(out).write_text("s", encoding="utf-8") or True)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+    assert store.get_committee(key, db_path=db).synthesis_notebook_id == "nb-new"
+    assert added == ["nb-new"]  # nothing sent to the full notebook
+
+
+def test_synthesis_falls_back_to_derived_count_when_listing_fails(monkeypatch, tmp_path):
+    """A non-account-wide listing failure must not block synthesis."""
+    db = str(tmp_path / "t.db")
+    key = "emissions_trading"
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    store.record_meeting(key, 4, None, db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-1")
+
+    def boom(*a, **k):
+        raise nb_mod.NotebookLMError("list failed")
+
+    monkeypatch.setattr(nb_mod, "list_sources", boom)
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+    monkeypatch.setattr(nb_mod, "download_report",
+                        lambda nb_id, task_id, out: Path(out).write_text("s", encoding="utf-8") or True)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "EN"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+    assert store.meetings_for_synthesis(key, db_path=db) == []
 
 
 # ── Web committee discovery (network injected) ───────────────────────────────
