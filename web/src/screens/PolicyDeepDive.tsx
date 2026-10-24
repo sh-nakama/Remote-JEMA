@@ -499,6 +499,8 @@ export function PolicyDeepDiveScreen() {
     const base: CSS = { fontSize: 10, fontWeight: 600, borderRadius: 999, padding: '1px 8px', flexShrink: 0, whiteSpace: 'nowrap' }
     if (st === 'done') return { txt: 'Summarised 済', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
     if (st === 'scheduled') return { txt: 'Scheduled 開催予定', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
+    if (st === 'upcoming') return { txt: 'Upcoming 開催前', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
+    if (st === 'awaiting') return { txt: 'Awaiting materials 資料待ち', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
     if (st === 'running') return { txt: 'Summarising…', s: { ...base, background: 'var(--acTint)', color: 'var(--acT)' } }
     if (st === 'failed') return { txt: 'Failed — retry', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
     if (st === 'error') return { txt: 'Errored 要約エラー', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
@@ -795,6 +797,8 @@ export function PolicyDeepDiveScreen() {
         m.status !== 'done' &&
         m.status !== 'error' &&
         m.status !== 'scheduled' &&
+        m.status !== 'upcoming' &&
+        m.status !== 'awaiting' &&
         nowMs - tsOf(m.updatedAt) <= RECENT_MS,
     )
     .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))

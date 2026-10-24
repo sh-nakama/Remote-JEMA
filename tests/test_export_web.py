@@ -29,6 +29,14 @@ from repower.dashboard.export_web import (
 from repower.timeutil import today_jst
 
 
+def _docs(n: int) -> list:
+    """A meeting's worth of papers: the readiness gate leaves a document-less meeting out of
+    the worklist, so a test that needs a pending meeting must give it something to read."""
+    from repower.policy.scraper import Material
+
+    return [Material(n, f"{n:03d}_h1", f"https://x/{n}/01.pdf", "資料1", "handout")]
+
+
 def test_anchor_date_picks_latest():
     assert _anchor_date({"supply": "2026-07-31", "area_price": "2026-07-04"}) == date(2026, 7, 31)
 
@@ -339,9 +347,9 @@ def test_build_policy_status_keeps_failures_and_trims_quiet_backlog(tmp_path: Pa
     # overflows the cap.
     store.record_meeting("emissions_trading", 1, [
         Material(1, "001_min", "https://x/1.pdf", "議事録", "minutes")], db_path=db)
-    store.record_meeting("emissions_trading", 2, None, db_path=db)
+    store.record_meeting("emissions_trading", 2, _docs(2), db_path=db)
     for n in range(3, 3 + export_web.STATUS_MEETINGS_PER_COMMITTEE + 4):
-        store.record_meeting("emissions_trading", n, None, db_path=db)
+        store.record_meeting("emissions_trading", n, _docs(n), db_path=db)
 
     by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
     store.update_meeting(by_num[1], db_path=db, state="error", quality_flag="download_blocked",
@@ -372,8 +380,8 @@ def test_export_policy_keeps_raw_failure_text_off_the_public_site(tmp_path: Path
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
     local_path = r"C:\Users\someone\AppData\Local\Temp\repower\x.pdf"
-    store.record_meeting("emissions_trading", 1, None, db_path=db)
-    store.record_meeting("emissions_trading", 2, None, db_path=db)
+    store.record_meeting("emissions_trading", 1, _docs(1), db_path=db)
+    store.record_meeting("emissions_trading", 2, _docs(2), db_path=db)
     by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
     store.update_meeting(by_num[1], db_path=db, state="error", quality_flag=None,
                          last_error=f"NotebookLM NotebookLMError: notebooklm source add {local_path} -> exit 1")
@@ -401,8 +409,8 @@ def test_committees_payload_reports_last_pipeline_event(tmp_path: Path):
 
     db = str(tmp_path / "t.db")
     store.sync_committees(db_path=db)
-    store.record_meeting("emissions_trading", 4, None, db_path=db)
-    store.record_meeting("emissions_trading", 5, None, db_path=db)
+    store.record_meeting("emissions_trading", 4, _docs(4), db_path=db)
+    store.record_meeting("emissions_trading", 5, _docs(5), db_path=db)
     by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
     store.update_meeting(by_num[4], db_path=db, state="done")
     # Touched last, so this is the event the row must report — not the higher number.
@@ -443,7 +451,7 @@ def test_build_policy_status_orders_meetings_chronologically(tmp_path: Path):
     # Detected oldest-first, then the *oldest* meeting is touched last — so a
     # sort on update time would put it on top.
     for n in (1, 2, 3):
-        store.record_meeting("emissions_trading", n, None, db_path=db)
+        store.record_meeting("emissions_trading", n, _docs(n), db_path=db)
     by_num = {m["meeting_num"]: m["id"] for m in store.pending_meetings("emissions_trading", db_path=db)}
     store.update_meeting(by_num[3], db_path=db, meeting_date=date(2025, 3, 1))
     store.update_meeting(by_num[2], db_path=db, meeting_date=date(2025, 2, 1))

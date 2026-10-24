@@ -60,6 +60,48 @@ def _months_before(d: date, months: int) -> date:
     y, m0 = divmod(d.year * 12 + d.month - 1 - months, 12)
     return date(y, m0 + 1, min(d.day, calendar.monthrange(y, m0 + 1)[1]))
 
+
+# Documents that carry a meeting's substance. An agenda only lists what *will* be discussed
+# (and an appendix is a data sheet for a paper), so a meeting with nothing else has nothing
+# to summarise yet.
+CONTENT_KINDS = frozenset({"minutes", "brief", "compilation", "handout"})
+
+READY, UPCOMING, AWAITING = "ready", "upcoming", "awaiting"
+
+# How long a "looked, found nothing to read" verdict is trusted before the meeting's page is
+# read again. Papers appear over days; a week bounds the cost to one page fetch per awaiting
+# meeting per week.
+RELIST_DAYS = 7
+
+
+def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
+                      checked_at: datetime | None = None) -> str:
+    """Whether a meeting is worth summarising yet: ``ready`` / ``upcoming`` / ``awaiting``.
+
+    * ``upcoming`` — dated *today or later*. The daily run starts at 06:30 JST, before a
+      same-day meeting, and committee pages post the agenda and handouts days ahead, so a
+      briefing written now describes papers, not a meeting that happened.
+    * ``awaiting`` — held (or undated) and *looked at recently* (``checked_at``, within
+      :data:`RELIST_DAYS`) with none of :data:`CONTENT_KINDS` on file: an agenda alone, or
+      nothing yet.
+    * ``ready`` — held, with at least one paper to read **or not yet looked at**. Detection
+      only lists the newest few meetings' documents; the rest are listed when their turn comes,
+      so "no documents on file" means *unknown*, not *none* — gating on it would leave a
+      backlog that has never been listed unreachable forever. ``summarize_meeting`` lists
+      it, summarises if there is something to read, and otherwise defers and records the look.
+
+    Derived from the date, the document list and the last look, never stored, so it corrects
+    itself the day the date passes or a paper appears and no row can be left stuck. An undated
+    meeting is judged on its documents alone: a missing date must not block real work.
+    """
+    if meeting_date is not None and meeting_date >= today:
+        return UPCOMING
+    if CONTENT_KINDS.intersection(kinds):
+        return READY
+    if checked_at is not None and (today - checked_at.date()).days < RELIST_DAYS:
+        return AWAITING
+    return READY
+
 # Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
 # .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
 # account's daily NotebookLM quota, which stops a run sooner.
@@ -930,7 +972,8 @@ def prune_fetch_events(older_than_days: float = 90, db_path: str | None = None) 
 def pending_meetings(key: str | None = None, db_path: str | None = None,
                      only_enabled: bool = False, breadth_first: bool = False,
                      include_resummarise: bool = False,
-                     today: date | None = None) -> list[dict]:
+                     today: date | None = None,
+                     ready_only: bool = True) -> list[dict]:
     """Meetings still needing work, in summarisation order, as plain dicts.
 
     Ordered by: **user-requested first** (a dashboard "Generate summary" that was
@@ -951,6 +994,13 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
     ``resummarise_requested`` (``"resummarise": True``), held to the same retry cap.
     Off by default because "pending" is also a *count* (status tables, the backlog
     badge) that should keep meaning "no briefing yet".
+
+    **Readiness.** With ``ready_only`` (the default) a never-summarised meeting that is not
+    yet worth a briefing — ``upcoming`` or ``awaiting``, see :func:`meeting_readiness` — is
+    left out, so it neither takes a quota slot nor counts as backlog. A meeting someone
+    asked for (``gen_requested``) and a ``done`` meeting flagged for a new briefing are
+    exempt. Every row carries its ``"readiness"``; ``ready_only=False`` returns them all
+    for callers that report on the unready ones.
 
     **Recency tier.** Breadth-first only: meetings dated within the trailing
     ``RECENT_WINDOW_MONTHS`` of *today* (default today in JST; undated counts as old) all come
@@ -995,6 +1045,27 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         if only_enabled:
             rows = [m for m in rows if getattr(coms.get(m.committee_key), "enabled", True)]
 
+        # Readiness is judged on the document kinds on file, read in one query for the
+        # committees involved. A summarised meeting is never re-judged: it already passed.
+        kinds_by: dict[tuple[str, int], set[str]] = {}
+        unsettled = {m.committee_key for m in rows if m.state != "done"}
+        if unsettled:
+            for ck, num, kind in (
+                session.query(PolicyMaterial.committee_key, PolicyMaterial.meeting_num,
+                               PolicyMaterial.kind)
+                .filter(PolicyMaterial.committee_key.in_(unsettled))
+            ):
+                kinds_by.setdefault((ck, num), set()).add(kind)
+        day = today or today_jst()
+        readiness: dict[int, str] = {
+            m.id: READY if m.state == "done"
+            else meeting_readiness(m.meeting_date, kinds_by.get((m.committee_key, m.meeting_num), ()),
+                                   today=day, checked_at=m.materials_checked_at)
+            for m in rows
+        }
+        if ready_only:
+            rows = [m for m in rows if readiness[m.id] == READY or m.gen_requested]
+
         def _prio(ck: str) -> int:
             c = coms.get(ck)
             if c is not None and c.priority is not None:
@@ -1006,7 +1077,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         # when off it stays empty so the sort key below is a constant 0 and the
         # ordering collapses to the original priority-then-key behaviour.
         depth: dict[int, int] = {}
-        recent_from = _months_before(today or today_jst(), RECENT_WINDOW_MONTHS)
+        recent_from = _months_before(day, RECENT_WINDOW_MONTHS)
 
         def _age_tier(m: PolicyMeeting) -> int:
             """0 for a meeting inside the recency window, 1 for an older (or undated) one."""
@@ -1049,6 +1120,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
                 "has_torimatome": m.has_torimatome,
                 "gen_requested": bool(m.gen_requested),
                 "resummarise": m.state == "done",
+                "readiness": readiness[m.id],
             }
             for m in rows
         ]
@@ -1154,6 +1226,93 @@ def queue_snapshot(
         "recent": recent,
         "recentDays": recent_days,
     }
+
+
+def reset_unready_summaries(db_path: str | None = None, *, today: date | None = None) -> dict:
+    """Put back to ``detected`` the meetings that were summarised or failed *before* they
+    were ready, so the readiness gate can hold them until they are.
+
+    Two cases, both left by runs from before the gate (or by a date that arrived only after
+    the summary):
+
+    * ``done`` and dated **today or later** — a briefing of the papers posted ahead of a
+      meeting that has not happened. Its briefing and digest are cleared (they describe the
+      wrong thing and must not be shown or folded into the committee synthesis), its flags
+      and retry count reset; the per-meeting notebook id is kept so the next run deletes it.
+    * ``error`` with ``no_sources`` that is still not ready — an upcoming meeting with no
+      papers is "not yet", not a failure; the red row and the spent retry go away.
+
+    Idempotent and cheap, so ``detect`` runs it every pass — which is also what carries the
+    fix through the Hugging Face round trip. Returns ``{"unsummarised": n, "cleared": n}``.
+    """
+    day = today or today_jst()
+    out = {"unsummarised": 0, "cleared": 0}
+    with session_scope(db_path) as session:
+        kinds_by: dict[tuple[str, int], set[str]] = {}
+        for ck, num, kind in session.query(PolicyMaterial.committee_key,
+                                           PolicyMaterial.meeting_num, PolicyMaterial.kind):
+            kinds_by.setdefault((ck, num), set()).add(kind)
+        rows = (session.query(PolicyMeeting)
+                .filter(or_(
+                    (PolicyMeeting.state == "done") & (PolicyMeeting.meeting_date >= day),
+                    (PolicyMeeting.state == "error") & (PolicyMeeting.quality_flag == "no_sources"),
+                )).all())
+        for m in rows:
+            if meeting_readiness(m.meeting_date, kinds_by.get((m.committee_key, m.meeting_num), ()),
+                                 today=day, checked_at=m.materials_checked_at) == READY:
+                continue
+            was_done = m.state == "done"
+            m.state = "detected"
+            m.retry_count = 0
+            m.quality_flag = None
+            m.last_error = None
+            m.last_error_at = None
+            if was_done:
+                m.briefing_md = None
+                m.digest_en_json = None
+                m.citations_json = None
+                m.report_task_id = None
+                m.summarised_at = None
+                m.resummarised_at = None
+                m.resummarise_requested = False
+                m.synth_done = False
+                out["unsummarised"] += 1
+            else:
+                out["cleared"] += 1
+            m.updated_at = _now()
+    return out
+
+
+def mark_materials_checked(key: str, meeting_num: int, db_path: str | None = None) -> None:
+    """Record that the meeting's document list was just read from its page (see
+    :func:`meeting_readiness`: it is what turns "no documents on file" from *unknown* into
+    *looked, nothing yet*)."""
+    with session_scope(db_path) as session:
+        m = (session.query(PolicyMeeting)
+             .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
+        if m is not None:
+            m.materials_checked_at = _now()
+
+
+def meeting_gate(key: str, meeting_num: int, kinds, *, today: date | None = None,
+                 db_path: str | None = None) -> tuple[str, bool]:
+    """``(readiness, requested)`` for one meeting, judged on *kinds* (its documents now).
+
+    The check ``summarize_meeting`` repeats at the point of spending quota, in case the
+    worklist it came from is stale. A ``done`` meeting is always ``ready`` (it already
+    passed, and a re-write is a deliberate upgrade); *requested* is ``gen_requested`` — a
+    person asked for this one, which overrides the gate.
+    """
+    with session_scope(db_path, commit=False) as session:
+        m = (session.query(PolicyMeeting)
+             .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
+        if m is None:
+            return AWAITING, False
+        if m.state == "done":
+            return READY, bool(m.gen_requested)
+        return (meeting_readiness(m.meeting_date, kinds, today=today or today_jst(),
+                                  checked_at=m.materials_checked_at),
+                bool(m.gen_requested))
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
