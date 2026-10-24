@@ -786,6 +786,18 @@ _HAS_MATERIALS = (
 )
 
 
+def _as_datetime(v) -> datetime | None:
+    """A raw ``text()`` SELECT hands datetimes back as strings (or None)."""
+    if not v:
+        return None
+    if isinstance(v, datetime):
+        return v
+    try:
+        return datetime.fromisoformat(str(v))
+    except ValueError:
+        return None
+
+
 def _coverage_day(meeting_date, detected_at) -> date | None:
     """A meeting's day for coverage ageing: its real date, else when we detected it.
 
@@ -1005,7 +1017,7 @@ def build_policy_status(db_path: str | None = None) -> dict:
         rows = con.execute(text(
             "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
             "last_error, last_error_at, retry_count, gen_requested, resummarise_requested, has_minutes, "
-            "has_torimatome, gen_seconds, updated_at, detected_at FROM policy_meeting"
+            "has_torimatome, gen_seconds, updated_at, detected_at, materials_checked_at FROM policy_meeting"
         )).mappings().all()
         # Documents on the page, how many the pipeline would ingest, and how many
         # actually reached the notebook. The gap between the last two is the point: a
@@ -1016,16 +1028,32 @@ def build_policy_status(db_path: str | None = None) -> dict:
         from repower.policy.pipeline import INGESTABLE_KINDS
 
         mat_counts: dict[tuple, tuple[int, int, int]] = {}
+        mat_kinds: dict[tuple, set[str]] = {}
         for r in con.execute(text(
             "SELECT committee_key, meeting_num, kind, status FROM policy_material"
         )).mappings():
             k = (r["committee_key"], r["meeting_num"])
+            mat_kinds.setdefault(k, set()).add(r["kind"] or "")
             total, planned, got = mat_counts.get(k, (0, 0, 0))
             mat_counts[k] = (
                 total + 1,
                 planned + (1 if (r["kind"] or "") in INGESTABLE_KINDS else 0),
                 got + (1 if r["status"] == "ingested" else 0),
             )
+
+    from repower.policy.store import READY, meeting_readiness
+
+    day = today_jst()
+
+    def _readiness(m) -> str:
+        if m["state"] == "done":
+            return READY
+        try:
+            held = date.fromisoformat(str(m["meeting_date"])[:10]) if m["meeting_date"] else None
+        except ValueError:
+            held = None
+        return meeting_readiness(held, mat_kinds.get((m["committee_key"], m["meeting_num"]), ()),
+                                 today=day, checked_at=_as_datetime(m["materials_checked_at"]))
 
     def _stamp(m) -> tuple:
         """Newest-first sort key: chronological, not scrape order.
@@ -1065,6 +1093,9 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 "date": str(m["meeting_date"])[:10] if m["meeting_date"] else None,
                 # Raw lifecycle state, NOT the Deep Dive's done/pending/error rollup.
                 "state": m["state"],
+                # ready | upcoming | awaiting — whether the meeting is worth summarising yet.
+                # Only meaningful before it is summarised; the daily run leaves the others out.
+                "readiness": _readiness(m),
                 "flag": m["quality_flag"],
                 "error": m["last_error"],
                 "errorAt": str(m["last_error_at"]) if m["last_error_at"] else None,
@@ -1128,7 +1159,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
                 "citations_json, has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
-                "detected_at, tags, " + _HAS_MATERIALS + " FROM policy_meeting"
+                "detected_at, tags, materials_checked_at, " + _HAS_MATERIALS + " FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(
@@ -1161,6 +1192,21 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
 
     committees_data = build_committees_payload(committees, meetings, mat_counts)
 
+    from repower.policy.store import AWAITING, READY, UPCOMING, meeting_readiness  # local: see build_policy_status
+
+    day = today_jst()
+
+    def readiness_of(m: RowMapping) -> str:
+        """``ready`` / ``upcoming`` / ``awaiting`` for a not-yet-summarised meeting."""
+        if m["state"] == "done":
+            return READY
+        try:
+            held = date.fromisoformat(str(m["meeting_date"])[:10]) if m["meeting_date"] else None
+        except ValueError:
+            held = None
+        kinds = {x["kind"] for x in mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])}
+        return meeting_readiness(held, kinds, today=day, checked_at=_as_datetime(m["materials_checked_at"]))
+
     def build_meeting(m: RowMapping) -> dict:
         c = com_by_key.get(m["committee_key"])
         org = (c["source"] if c else None) or "METI"
@@ -1175,7 +1221,11 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         mats = mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])
         docs = [{"name": _doc_name(x["title"]), "size": _doc_size(x["title"]), "url": _web_url(x["url"])} for x in mats]
         has_digest = m["state"] == "done" and bool(m["digest_en_json"])
-        is_error = m["state"] == "error"
+        readiness = readiness_of(m)
+        # A "no sources" failure for a meeting that is simply not ready is "not yet", not an
+        # error; the next detect pass clears the row itself (``reset_unready_summaries``).
+        is_error = m["state"] == "error" and not (
+            readiness != READY and m["quality_flag"] == "no_sources")
         out_m: dict = {
             "key": "m" + str(m["id"]),
             "com": m["committee_key"],
@@ -1189,7 +1239,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             # when the meeting reaches `done` (= summarised). Lets the frontend show
             # "newly summarised · last N days" and sort committees by recency.
             "updatedAt": str(m["updated_at"]) if m["updated_at"] else None,
-            "status": "done" if has_digest else "error" if is_error else "pending",
+            "status": "done" if has_digest else "error" if is_error
+            else readiness if readiness != READY else "pending",
             "tori": bool(m["has_torimatome"]),
             "title": name_en + " — No. " + str(num),
             "titleJa": name_ja + " 第" + str(num) + "回",
@@ -1241,6 +1292,18 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             }.get(flag or "", "要約に失敗しました（再試行されます）")
             out_m["emptyTitle"] = "Not summarised — errored · 要約エラー"
             out_m["emptySub"] = f"Last attempt: {reason} · {reason_ja}"
+        elif readiness == UPCOMING:
+            out_m["emptyTitle"] = "Upcoming — summarised after the meeting · 開催前（開催後に要約）"
+            out_m["emptySub"] = (
+                f"Scheduled {upd} · {len(docs)} materials posted so far · "
+                "開催日の翌日以降に要約されます"
+            )
+        elif readiness == AWAITING:
+            out_m["emptyTitle"] = "Awaiting materials · 資料待ち"
+            out_m["emptySub"] = (
+                "Held, but nothing beyond the agenda is posted yet · "
+                "議事次第以外の資料が公開され次第、要約されます"
+            )
         else:
             out_m["emptyTitle"] = "Summary pending · 要約待ち"
             out_m["emptySub"] = (
@@ -1257,6 +1320,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         if (m["state"] == "done" and m["digest_en_json"])
         or m["state"] == "error"
         or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
+        or readiness_of(m) == UPCOMING
     ]
     kept.sort(key=lambda m: (
         0 if (m["state"] == "done" and m["digest_en_json"]) else 2 if m["state"] == "error" else 1,
@@ -1268,8 +1332,19 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
     # entries carry their tracked committee's EN name + key; unmatched energy
     # meetings surface the raw JA name (a "follow this committee" discovery hook).
     upcoming_data = []
+    # A meeting the committee page already lists, dated ahead, is shown as that meeting
+    # (status "upcoming"); the calendar entry for it would be a second card for the same day.
+    listed_ahead = {
+        (m["committee_key"], m["meeting_num"]) for m in kept if readiness_of(m) == UPCOMING
+    } | {
+        (m["committee_key"], str(m["meeting_date"])[:10]) for m in kept
+        if readiness_of(m) == UPCOMING and m["meeting_date"]
+    }
     for u in upcoming:
         ck = u["committee_key"]
+        if ck and ((ck, u["meeting_num"]) in listed_ahead
+                   or (ck, str(u["meeting_date"])[:10]) in listed_ahead):
+            continue
         c = com_by_key.get(ck) if ck else None
         upcoming_data.append(
             {

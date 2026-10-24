@@ -1057,8 +1057,10 @@ def policy_notebooks():
 def policy_status():
     """Show per-committee state: enabled flag, priority, latest meeting, pending counts.
 
-    PENDING is meetings with no briefing yet. UPDATE is summarised meetings queued to be
-    written again because a paper (e.g. the minutes) arrived after the summary.
+    PENDING is meetings ready to be summarised (held, with papers to read). WAIT is meetings
+    not worth a briefing yet — upcoming (dated today or later) or awaiting any paper beyond
+    the agenda. UPDATE is summarised meetings queued to be written again because a paper
+    (e.g. the minutes) arrived after the summary.
     """
     from collections import Counter
 
@@ -1066,9 +1068,12 @@ def policy_status():
 
     sync_committees()
     pend = Counter(m["committee_key"] for m in pending_meetings())
+    wait = Counter(m["committee_key"] for m in pending_meetings(ready_only=False)
+                   if m["readiness"] != "ready")
     upd = Counter(m["committee_key"] for m in pending_meetings(include_resummarise=True)
                   if m["resummarise"])
-    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}{'UPDATE':>8}  {'FETCH':<22}")
+    typer.echo(f"{'KEY':<28}{'SRC':<6}{'ON':>3}{'PRIO':>5}{'LATEST':>7}{'PENDING':>9}{'WAIT':>6}"
+               f"{'UPDATE':>8}  {'FETCH':<22}")
     for c in list_committees():
         latest = c["latest_meeting"] if c["latest_meeting"] else "-"
         on = "y" if c["enabled"] else "-"
@@ -1076,6 +1081,7 @@ def policy_status():
         typer.echo(
             f"{c['committee_key'] + tag:<28}{c['source']:<6}{on:>3}{c['priority']:>5}"
             f"{str(latest):>7}{pend.get(c['committee_key'], 0):>9}"
+            f"{wait.get(c['committee_key'], 0):>6}"
             f"{upd.get(c['committee_key'], 0):>8}  {_fetch_label(c):<22}"
         )
 

@@ -883,6 +883,34 @@ fixed.
   with only old meetings still runs, just after recent work. Undated meetings count as old;
   moved-to-front still outranks the tier; a single-committee run ignores it. This is the one
   outer sort key above `_tier` — it composes with the update slot rather than being a rival rule.
+- **A meeting is summarised only once it has been held and has a paper to read** —
+  `store.meeting_readiness` → `ready` / `upcoming` / `awaiting`, **derived** from the date, the
+  document kinds on file and `materials_checked_at`, never stored (so it corrects itself and no
+  row can stick). Committee pages post the agenda and handouts days *ahead*, so before this the
+  daily run summarised papers for meetings that had not happened (`chousei_jukyu` 第123回, six
+  days early) and then spent a second quota slot rewriting them when the late-paper requeue
+  fired. Rules that are easy to break:
+  - `upcoming` is `meeting_date >= today` (JST), not `>`: the 06:30 run precedes a same-day meeting.
+  - Only `CONTENT_KINDS` (minutes / brief / compilation / handout) make a meeting readable. An
+    agenda lists what *will* be discussed and an appendix is a data sheet, so neither counts.
+  - **"No documents on file" means *unknown*, not *none*.** Detection lists only the newest few
+    meetings' documents; the other ~530 backlog meetings had no rows at all. Treating that as
+    `awaiting` made the whole backlog unreachable (measured on the live DB: 532 of 643). So a
+    meeting that has never been looked at (`materials_checked_at` NULL) or whose "nothing yet"
+    look is older than `RELIST_DAYS` stays `ready`; `summarize_meeting` re-reads the page,
+    summarises if something is there, and otherwise returns `deferred` and stamps the look —
+    after which it is `awaiting` for a week. An *empty* listing records no look (it is "page
+    unreachable" as often as "nothing posted"), so it is retried next run.
+  - `deferred` is free: no error, no retry spent, no notebook, no `--max-per-run` slot.
+    `gen_requested` and an explicit `--meeting N` (`force=True`) override the gate; a `done`
+    meeting is never re-gated (a late paper is a deliberate upgrade).
+  - `reset_unready_summaries` runs in every `detect` pass: a `done` meeting dated today-or-later
+    goes back to `detected` with its briefing/digest cleared (it describes the wrong thing), and
+    a `no_sources` error for a not-ready meeting is cleared. It is idempotent and it is what
+    carries the fix through the HF round trip; a date that arrives *after* the summary is how a
+    summary can turn out to predate its meeting.
+  - The Deep Dive shows `upcoming` / `awaiting` statuses; a calendar (`policy_upcoming`) entry
+    for a meeting the committee page already lists ahead is dropped so it is not two cards.
 - **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
   separate column, not a state change: the meeting stays `done` and its briefing stays on the
   page while the re-run waits for quota (a minutes upgrade makes a *valid* briefing better, so

@@ -31,6 +31,7 @@ from repower.policy.store import (
     meetings_missing_materials,
     recent_meeting_nums,
     record_meeting,
+    reset_unready_summaries,
     set_committee_checked,
     set_committee_fetch_result,
     set_meeting_dates,
@@ -39,6 +40,7 @@ from repower.policy.store import (
     watch_meeting_nums,
 )
 from repower.scrapers.http_cache import budget_exhausted
+from repower.timeutil import today_jst
 
 
 def _select_committees(keys: list[str] | None, db_path: str | None):
@@ -255,6 +257,16 @@ def detect(
             c.key, res["latest_online"], known_latest, res["new"], res["enumerated"],
             res["dated"],
         )
+
+    if not dry_run:
+        # A summary written before its meeting was held (or a "no sources" failure for one
+        # that has no papers yet) is not a result — see ``meeting_readiness``. Run after the
+        # dates above are recorded, since a date that arrives late is how a summary can turn
+        # out to predate its meeting.
+        healed = reset_unready_summaries(db_path, today=today or today_jst())
+        if healed["unsummarised"] or healed["cleared"]:
+            logger.info("policy detect: %d summary(ies) of unheld meetings withdrawn, "
+                        "%d premature failure(s) cleared", healed["unsummarised"], healed["cleared"])
 
     if (refresh_window_days or watch_horizon_days) and not dry_run:
         # Only committees whose host answered this pass: a blocked or deferred one
