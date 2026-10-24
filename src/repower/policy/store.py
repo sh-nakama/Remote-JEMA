@@ -8,6 +8,7 @@ it can't drift from the source of truth and is safe to re-run after a crash.
 
 from __future__ import annotations
 
+import calendar
 import json
 import logging
 import re
@@ -45,6 +46,19 @@ MAX_RETRIES = 3
 # committee's newest pending meeting (depth 0), ahead of any committee's second-newest (depth 1).
 # See ``pending_meetings``.
 UPDATE_DEPTH = 0.5
+
+# The breadth-first run works meetings dated within this many trailing months before it touches
+# older ones. A high-priority committee whose recent meetings are already summarised would
+# otherwise keep taking the first slot every day with its oldest leftovers while other
+# committees' current meetings wait. Soft: older backlog still drains once the recent work is
+# done. See ``pending_meetings``.
+RECENT_WINDOW_MONTHS = 12
+
+
+def _months_before(d: date, months: int) -> date:
+    """*d* moved back *months* calendar months (day clamped to the target month's length)."""
+    y, m0 = divmod(d.year * 12 + d.month - 1 - months, 12)
+    return date(y, m0 + 1, min(d.day, calendar.monthrange(y, m0 + 1)[1]))
 
 # Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
 # .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
@@ -915,7 +929,8 @@ def prune_fetch_events(older_than_days: float = 90, db_path: str | None = None) 
 # ── Worklist / lifecycle ─────────────────────────────────────────────────────
 def pending_meetings(key: str | None = None, db_path: str | None = None,
                      only_enabled: bool = False, breadth_first: bool = False,
-                     include_resummarise: bool = False) -> list[dict]:
+                     include_resummarise: bool = False,
+                     today: date | None = None) -> list[dict]:
     """Meetings still needing work, in summarisation order, as plain dicts.
 
     Ordered by: **user-requested first** (a dashboard "Generate summary" that was
@@ -936,6 +951,14 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
     ``resummarise_requested`` (``"resummarise": True``), held to the same retry cap.
     Off by default because "pending" is also a *count* (status tables, the backlog
     badge) that should keep meaning "no briefing yet".
+
+    **Recency tier.** Breadth-first only: meetings dated within the trailing
+    ``RECENT_WINDOW_MONTHS`` of *today* (default today in JST; undated counts as old) all come
+    before any older one, and backlog depth is measured *within* a tier. So a committee whose
+    recent meetings are already summarised stops taking the first slot every day with its oldest
+    leftovers — current meetings of every committee go first, in priority order, and the old
+    backlog then drains the same way. It is a tier, not a cut-off: nothing is ever excluded.
+    ``gen_requested`` still wins over it.
 
     **Where an update sits.** Breadth-first (the daily run): after every committee's
     *newest* pending meeting, but **ahead of any committee's deeper backlog** — a
@@ -983,12 +1006,21 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         # when off it stays empty so the sort key below is a constant 0 and the
         # ordering collapses to the original priority-then-key behaviour.
         depth: dict[int, int] = {}
+        recent_from = _months_before(today or today_jst(), RECENT_WINDOW_MONTHS)
+
+        def _age_tier(m: PolicyMeeting) -> int:
+            """0 for a meeting inside the recency window, 1 for an older (or undated) one."""
+            if not breadth_first:
+                return 0
+            d = m.meeting_date
+            return 0 if d is not None and d >= recent_from else 1
+
         if breadth_first:
-            by_com: dict[str, list[PolicyMeeting]] = {}
+            by_com: dict[tuple[str, int], list[PolicyMeeting]] = {}
             for m in rows:
                 if m.state == "done":
                     continue  # an upgrade is not backlog depth: it must not push a new meeting back
-                by_com.setdefault(m.committee_key, []).append(m)
+                by_com.setdefault((m.committee_key, _age_tier(m)), []).append(m)
             for ms in by_com.values():
                 for r, m in enumerate(sorted(ms, key=lambda x: -x.meeting_num)):
                     depth[m.id] = r
@@ -1001,6 +1033,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
 
         rows.sort(key=lambda m: (
             0 if m.gen_requested else 1,  # user-requested ("Generate summary") first
+            _age_tier(m),                 # breadth-first: the recency window before older backlog
             _tier(m),                     # breadth-first: newest-of-each committee, updates, deeper…
             _prio(m.committee_key),
             m.committee_key,
@@ -1052,9 +1085,10 @@ def queue_snapshot(
     back to a done meeting touched recently with a recorded generation time, and carry
     ``kind: None`` — "summarised", but not known to be first or repeat.
     """
+    explicit_now = now is not None
     now = now or _now()
     work = pending_meetings(db_path=db_path, only_enabled=True, breadth_first=True,
-                            include_resummarise=True)
+                            include_resummarise=True, today=now.date() if explicit_now else None)
     with session_scope(db_path, commit=False) as session:
         def _kind(w: dict) -> str:
             return "update" if w["state"] == "done" else "retry" if w["state"] == "error" else "new"

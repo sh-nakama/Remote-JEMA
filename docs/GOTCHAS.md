@@ -872,6 +872,17 @@ fixed.
   single-committee run — a backfill draining history — keeps updates after every pending meeting.
   And it is a single sort key (`_tier` in `pending_meetings`), so the Queue view, the run and the
   tests all agree; don't add a second ordering rule beside it.
+- **The daily run does the trailing-12-months window before any older backlog** (breadth-first
+  only; `store.RECENT_WINDOW_MONTHS`, `_age_tier` in `pending_meetings`). Backlog depth used to
+  be per committee over *all* history, so a high-priority committee whose recent meetings were
+  done (`chousei_jukyu`: 19 left, newest from 2017) took slot 1 every day with its oldest
+  leftovers while priority-100 committees' current meetings (`kouikikeitouseibi` had ~20 from
+  2025–26) waited. Now depth is measured *within* a recency tier, recent first, so every
+  committee's current meetings go before anyone's old ones, then the old backlog drains in the
+  same priority order. It is a tier, **not a cut-off** — nothing is excluded, so a committee
+  with only old meetings still runs, just after recent work. Undated meetings count as old;
+  moved-to-front still outranks the tier; a single-committee run ignores it. This is the one
+  outer sort key above `_tier` — it composes with the update slot rather than being a rival rule.
 - **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
   separate column, not a state change: the meeting stays `done` and its briefing stays on the
   page while the re-run waits for quota (a minutes upgrade makes a *valid* briefing better, so
