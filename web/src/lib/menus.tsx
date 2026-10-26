@@ -747,8 +747,10 @@ interface MeetingStatus {
   /** detected | downloading | ingesting | generating | done | error — NOT the
    *  Deep Dive's 3-way rollup; a meeting stuck mid-pipeline is visible here. */
   state: string
-  /** ready | upcoming | awaiting — is it worth summarising yet? Before a meeting is
-   *  held (or while only its agenda is posted) the daily run leaves it out. */
+  /** ready | upcoming | awaiting | no_papers | removed — is it worth summarising yet? Before a
+   *  meeting is held (or while only its agenda is posted) the daily run leaves it out; so it does
+   *  when the committee's index says there is nothing to read (no_papers: a written/closed meeting
+   *  with no documents; removed: documents METI deleted). */
   readiness?: string
   flag: string | null
   error: string | null
@@ -835,11 +837,17 @@ const TD = "font-size:11.5px;color:var(--tx2);min-width:0;font-feature-settings:
 
 function StateChip({ state, readiness, lang }: { state: string; readiness?: string; lang: string }) {
   // A meeting not worth summarising yet reads as that, not as "detected" (which implies queued).
-  const unready = state !== 'done' && (readiness === 'upcoming' || readiness === 'awaiting')
+  const unready =
+    state !== 'done' &&
+    (readiness === 'upcoming' || readiness === 'awaiting' || readiness === 'no_papers' || readiness === 'removed')
   const m = unready
     ? readiness === 'upcoming'
       ? { en: 'upcoming', ja: '開催前', color: 'var(--mut)' }
-      : { en: 'awaiting materials', ja: '資料待ち', color: 'var(--mut)' }
+      : readiness === 'no_papers'
+        ? { en: 'no papers published', ja: '資料なし', color: 'var(--mut)' }
+        : readiness === 'removed'
+          ? { en: 'documents removed', ja: '資料削除済み', color: 'var(--mut)' }
+          : { en: 'awaiting materials', ja: '資料待ち', color: 'var(--mut)' }
     : mstate(state)
   return (
     <span style={s('display:inline-flex;align-items:center;gap:5px;min-width:0')}>

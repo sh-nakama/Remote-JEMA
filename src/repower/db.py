@@ -286,6 +286,13 @@ class PolicyMeeting(Base):
     # When this meeting's document list was last re-read from its page (NULL = never
     # since it was first recorded). Drives the sparse re-check for late minutes.
     materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
+    # What the committee's index says about this meeting's own documents, read from the index
+    # row beside the date (EGC's ※書面開催 / ※非公開開催 / ※削除済み): ``no_papers`` (a written or
+    # closed meeting whose row links nothing) or ``removed`` (METI took the documents down).
+    # NULL = nothing noted. Either value means there is nothing to summarise, so the meeting
+    # leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
+    # Refreshed on every ``detect`` pass, so a document posted later clears it.
+    index_note: Mapped[str | None] = mapped_column(String(16))
     # When the pipeline last finished writing this meeting's briefing, and — when that
     # replaced an existing briefing rather than writing the first — when. ``updated_at``
     # cannot say this: other writes touch it. They are what the Queue view's "recently
@@ -404,6 +411,7 @@ def init_db(db_path: str | None = None) -> Engine:
             _migrate_add_policy_tags(engine)
             _migrate_add_policy_citations(engine)
             _migrate_add_policy_minutes_watch(engine)
+            _migrate_add_policy_index_note(engine)
             _INITIALIZED.add(path)
     return engine
 
@@ -584,6 +592,19 @@ def _migrate_add_policy_citations(engine) -> None:
     if "citations_json" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
         with engine.begin() as conn:
             conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
+
+
+def _migrate_add_policy_index_note(engine) -> None:
+    """Add ``policy_meeting.index_note`` (additive; NULL = nothing noted)."""
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    if "policy_meeting" not in insp.get_table_names():
+        return
+    if "index_note" in {c["name"] for c in insp.get_columns("policy_meeting")}:
+        return
+    with engine.begin() as conn:
+        conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"))
 
 
 def _migrate_add_policy_minutes_watch(engine) -> None:

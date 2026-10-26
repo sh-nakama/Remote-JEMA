@@ -501,6 +501,8 @@ export function PolicyDeepDiveScreen() {
     if (st === 'scheduled') return { txt: 'Scheduled 開催予定', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
     if (st === 'upcoming') return { txt: 'Upcoming 開催前', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
     if (st === 'awaiting') return { txt: 'Awaiting materials 資料待ち', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
+    if (st === 'no_papers') return { txt: 'No papers published 資料なし', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
+    if (st === 'removed') return { txt: 'Documents removed 資料削除済み', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
     if (st === 'running') return { txt: 'Summarising…', s: { ...base, background: 'var(--acTint)', color: 'var(--acT)' } }
     if (st === 'failed') return { txt: 'Failed — retry', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
     if (st === 'error') return { txt: 'Errored 要約エラー', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
@@ -799,6 +801,8 @@ export function PolicyDeepDiveScreen() {
         m.status !== 'scheduled' &&
         m.status !== 'upcoming' &&
         m.status !== 'awaiting' &&
+        m.status !== 'no_papers' &&
+        m.status !== 'removed' &&
         nowMs - tsOf(m.updatedAt) <= RECENT_MS,
     )
     .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))

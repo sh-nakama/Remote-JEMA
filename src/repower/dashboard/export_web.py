@@ -1017,7 +1017,8 @@ def build_policy_status(db_path: str | None = None) -> dict:
         rows = con.execute(text(
             "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
             "last_error, last_error_at, retry_count, gen_requested, resummarise_requested, has_minutes, "
-            "has_torimatome, gen_seconds, updated_at, detected_at, materials_checked_at FROM policy_meeting"
+            "has_torimatome, gen_seconds, updated_at, detected_at, materials_checked_at, index_note "
+            "FROM policy_meeting"
         )).mappings().all()
         # Documents on the page, how many the pipeline would ingest, and how many
         # actually reached the notebook. The gap between the last two is the point: a
@@ -1053,7 +1054,8 @@ def build_policy_status(db_path: str | None = None) -> dict:
         except ValueError:
             held = None
         return meeting_readiness(held, mat_kinds.get((m["committee_key"], m["meeting_num"]), ()),
-                                 today=day, checked_at=_as_datetime(m["materials_checked_at"]))
+                                 today=day, checked_at=_as_datetime(m["materials_checked_at"]),
+                                 index_note=m["index_note"])
 
     def _stamp(m) -> tuple:
         """Newest-first sort key: chronological, not scrape order.
@@ -1093,8 +1095,10 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 "date": str(m["meeting_date"])[:10] if m["meeting_date"] else None,
                 # Raw lifecycle state, NOT the Deep Dive's done/pending/error rollup.
                 "state": m["state"],
-                # ready | upcoming | awaiting — whether the meeting is worth summarising yet.
-                # Only meaningful before it is summarised; the daily run leaves the others out.
+                # ready | upcoming | awaiting | no_papers | removed — whether the meeting is worth
+                # summarising yet. Only meaningful before it is summarised; the daily run leaves
+                # the others out. The last two are the committee's index saying there is nothing
+                # to read (a written meeting with no papers; documents METI deleted).
                 "readiness": _readiness(m),
                 "flag": m["quality_flag"],
                 "error": m["last_error"],
@@ -1159,7 +1163,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             text(
                 "SELECT id, committee_key, meeting_num, meeting_date, briefing_md, digest_en_json, "
                 "citations_json, has_minutes, has_torimatome, state, quality_flag, last_error, updated_at, "
-                "detected_at, tags, materials_checked_at, " + _HAS_MATERIALS + " FROM policy_meeting"
+                "detected_at, tags, materials_checked_at, index_note, " + _HAS_MATERIALS + " FROM policy_meeting"
             )
         ).mappings().all()
         materials = con.execute(
@@ -1192,12 +1196,19 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
 
     committees_data = build_committees_payload(committees, meetings, mat_counts)
 
-    from repower.policy.store import AWAITING, READY, UPCOMING, meeting_readiness  # local: see build_policy_status
+    from repower.policy.store import (  # local: see build_policy_status
+        AWAITING,
+        NO_PAPERS,
+        READY,
+        REMOVED,
+        UPCOMING,
+        meeting_readiness,
+    )
 
     day = today_jst()
 
     def readiness_of(m: RowMapping) -> str:
-        """``ready`` / ``upcoming`` / ``awaiting`` for a not-yet-summarised meeting."""
+        """``ready`` / ``upcoming`` / ``awaiting`` / ``no_papers`` / ``removed`` for a not-yet-summarised meeting."""
         if m["state"] == "done":
             return READY
         try:
@@ -1205,7 +1216,8 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         except ValueError:
             held = None
         kinds = {x["kind"] for x in mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])}
-        return meeting_readiness(held, kinds, today=day, checked_at=_as_datetime(m["materials_checked_at"]))
+        return meeting_readiness(held, kinds, today=day, checked_at=_as_datetime(m["materials_checked_at"]),
+                                 index_note=m["index_note"])
 
     def build_meeting(m: RowMapping) -> dict:
         c = com_by_key.get(m["committee_key"])
@@ -1224,8 +1236,10 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         readiness = readiness_of(m)
         # A "no sources" failure for a meeting that is simply not ready is "not yet", not an
         # error; the next detect pass clears the row itself (``reset_unready_summaries``).
+        # Likewise any failure on a meeting whose index says there is nothing to read.
         is_error = m["state"] == "error" and not (
-            readiness != READY and m["quality_flag"] == "no_sources")
+            (readiness != READY and m["quality_flag"] == "no_sources")
+            or readiness in (NO_PAPERS, REMOVED))
         out_m: dict = {
             "key": "m" + str(m["id"]),
             "com": m["committee_key"],
@@ -1298,6 +1312,18 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
                 f"Scheduled {upd} · {len(docs)} materials posted so far · "
                 "開催日の翌日以降に要約されます"
             )
+        elif readiness == NO_PAPERS:
+            out_m["emptyTitle"] = "No papers published · 資料なし"
+            out_m["emptySub"] = (
+                "Held as a written or closed meeting, and the committee page links no document · "
+                "書面開催・非公開開催で、資料は公開されていません"
+            )
+        elif readiness == REMOVED:
+            out_m["emptyTitle"] = "Documents removed · 資料削除済み"
+            out_m["emptySub"] = (
+                "The committee page marks this meeting's documents as deleted · "
+                "委員会ページで資料が削除済みとされています"
+            )
         elif readiness == AWAITING:
             out_m["emptyTitle"] = "Awaiting materials · 資料待ち"
             out_m["emptySub"] = (
@@ -1313,14 +1339,16 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
 
     # Keep: summarised meetings, meetings with detected materials (pending), and
     # errored meetings (even material-less ones) — otherwise a committee can claim
-    # "2 errored" in its rollup while its sessions list shows no trace of them.
+    # "2 errored" in its rollup while its sessions list shows no trace of them. A meeting
+    # the index says has nothing to read is kept for the same reason: it used to be that
+    # error row, and silently dropping it would look like the meeting never happened.
     kept = [
         m
         for m in meetings
         if (m["state"] == "done" and m["digest_en_json"])
         or m["state"] == "error"
         or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
-        or readiness_of(m) == UPCOMING
+        or readiness_of(m) in (UPCOMING, NO_PAPERS, REMOVED)
     ]
     kept.sort(key=lambda m: (
         0 if (m["state"] == "done" and m["digest_en_json"]) else 2 if m["state"] == "error" else 1,

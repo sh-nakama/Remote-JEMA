@@ -35,6 +35,7 @@ from repower.policy.store import (
     set_committee_checked,
     set_committee_fetch_result,
     set_meeting_dates,
+    set_meeting_index_notes,
     sync_committees,
     tracked_committees,
     watch_meeting_nums,
@@ -163,14 +164,19 @@ def detect(
             results.append({
                 "key": c.key, "source": c.source, "status": "deferred",
                 "error_kind": None, "error_detail": None, "latest_online": None,
-                "known_latest": None, "new": 0, "enumerated": 0, "dated": 0,
+                "known_latest": None, "new": 0, "enumerated": 0, "dated": 0, "noted": 0,
                 "refreshed": 0, "requeued": 0,
             })
             continue
         known = known_meeting_nums(c.key, db_path)
         known_latest = max(known) if known else None
 
-        disc = discover_meetings(c, db_path=db_path, known_latest=known_latest)
+        # EGC's index is read in full every pass rather than conditionally: its ※ notes
+        # (書面開催 / 削除済み) describe meetings that are already known, so a 304 would leave
+        # them unread for as long as the index stays unchanged. It is one small page per
+        # committee, on a host that has not needed the WAF-friendly pacing METI does.
+        disc = discover_meetings(c, db_path=db_path, known_latest=known_latest,
+                                 force=c.is_egc)
 
         # A 304 index means "no new meetings", but the meeting *dates* also live in
         # that body — so a committee whose index has settled can never repair
@@ -200,6 +206,7 @@ def detect(
             "new": 0,
             "enumerated": 0,
             "dated": 0,
+            "noted": 0,
             "refreshed": 0,
             "requeued": 0,
         }
@@ -249,13 +256,16 @@ def detect(
             # recorded meetings *and* already-known ones that never got a date,
             # so this self-heals committees the date backfill never reached.
             res["dated"] = set_meeting_dates(c.key, disc.dates, db_path=db_path)
+            # The index's own word on whether a meeting has anything to read (EGC only; the
+            # other sources hand back no notes). Recorded after the meetings exist above.
+            res["noted"] = set_meeting_index_notes(c.key, disc.notes, db_path=db_path)
             set_committee_checked(c.key, db_path=db_path)
 
         results.append(res)
         logger.info(
-            "policy detect %-26s online=%s known=%s new=%d enumerated=%d dated=%d",
+            "policy detect %-26s online=%s known=%s new=%d enumerated=%d dated=%d noted=%d",
             c.key, res["latest_online"], known_latest, res["new"], res["enumerated"],
-            res["dated"],
+            res["dated"], res["noted"],
         )
 
     if not dry_run:

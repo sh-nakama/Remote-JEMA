@@ -1058,8 +1058,10 @@ def policy_status():
     """Show per-committee state: enabled flag, priority, latest meeting, pending counts.
 
     PENDING is meetings ready to be summarised (held, with papers to read). WAIT is meetings
-    not worth a briefing yet — upcoming (dated today or later) or awaiting any paper beyond
-    the agenda. UPDATE is summarised meetings queued to be written again because a paper
+    not worth a briefing yet — upcoming (dated today or later), awaiting any paper beyond
+    the agenda, or (EGC) marked by the committee's index as having nothing to read: a written
+    or closed meeting with no papers, or documents METI deleted. UPDATE is summarised
+    meetings queued to be written again because a paper
     (e.g. the minutes) arrived after the summary.
     """
     from collections import Counter
