@@ -1023,11 +1023,17 @@ fixed.
   the queue (the export labels it, and `reset_unready_summaries` clears errors already on file).
   Three things to keep in mind: (1) the note is judged on the **row**, not the label — `※書面開催`
   with a 議事要旨 PDF or 配布資料 page (第617回) still has papers and is summarised, so `no_papers`
-  needs the row to link nothing at all; `removed` wins regardless of links. (2) EGC's index is
-  fetched **unconditionally** on every `detect` (a 304 would leave the notes of known meetings
-  unread while the page is unchanged); this is one small page per EGC committee. (3) It is
-  re-derived every pass, so a document posted later clears the note and the meeting returns —
-  nothing else needs to un-stick it. EGC only: METI and OCCTO indexes may carry similar notes,
+  needs the row to link nothing at all; `removed` wins regardless of links. (2) The ※ notes are only in
+  the page **body**, which a 304 does not send, so a conditional check reads none. `detect` stays
+  conditional (any change to the page — a new meeting, a note added or dropped — breaks the 304
+  and is read then) and forces a full read of an EGC index only when
+  `policy_committee.index_notes_at` is NULL (first pass after the column appeared, or a new
+  committee: this is the backfill) or older than `store.INDEX_NOTES_REFRESH_DAYS` (30; a safety
+  net against a stale validator, not how changes are found). A 200 that arrives on its own also
+  restarts the clock; a 304 or a failed fetch does not. Each read is a request against the EGC
+  host's allowance (16 per 5 minutes), so keep it rare. (3) The note is
+  re-derived whenever the page is read, so a document posted later clears it and the meeting
+  returns — nothing else needs to un-stick it. EGC only: METI and OCCTO indexes may carry similar notes,
   which nothing reads yet.
 
 ## Streamlit dashboard

@@ -230,33 +230,92 @@ def _egc_committee(db: str):
 
 
 # ── Detection ────────────────────────────────────────────────────────────────
-def test_detect_reads_the_egc_index_in_full_and_records_its_notes(policy_db, monkeypatch):
-    """A 304 would leave the notes of already-known meetings unread for as long as the index
-    stays unchanged, so an EGC index is always fetched with a body."""
+def _detect(db, monkeypatch, key, disc, seen):
+    def fake(c, **k):
+        seen.append(k.get("force"))
+        return disc
+    monkeypatch.setattr(detect_mod, "discover_meetings", fake)
+    return detect_mod.detect([key], db_path=db, refresh_window_days=None, watch_horizon_days=None)[0]
+
+
+def test_detect_reads_a_never_read_egc_index_in_full_once(policy_db, monkeypatch):
+    """The first pass after the notes exist (or for a new committee) has no body to go on, so
+    it forces one full read; the pass after that goes back to the conditional check."""
     db = policy_db
     _meeting(db, "emsc_system", 619, kinds=(), meeting_date=TODAY - timedelta(days=5))
     _meeting(db, "emsc_system", 617, meeting_date=TODAY - timedelta(days=30), index_note=NOTE_NO_PAPERS)
     seen: list[bool] = []
+    full = Discovery("ok", [619, 617], notes={619: NOTE_NO_PAPERS, 617: None})
 
-    def fake_discover(c, **k):
-        seen.append(k.get("force"))
-        return Discovery("ok", [619, 617], notes={619: NOTE_NO_PAPERS, 617: None})
+    assert store.index_notes_due("emsc_system", db_path=db)
+    res = _detect(db, monkeypatch, "emsc_system", full, seen)
 
-    monkeypatch.setattr(detect_mod, "discover_meetings", fake_discover)
-    res = detect_mod.detect(["emsc_system"], db_path=db, refresh_window_days=None, watch_horizon_days=None)
-
-    assert seen == [True]
-    assert res[0]["noted"] == 2
+    assert seen == [True] and res["noted"] == 2
     assert store.meeting_index_note("emsc_system", 619, db_path=db) == NOTE_NO_PAPERS
     assert store.meeting_index_note("emsc_system", 617, db_path=db) is None   # the papers arrived
+    assert not store.index_notes_due("emsc_system", db_path=db)
+
+    _detect(db, monkeypatch, "emsc_system", Discovery("unchanged", []), seen)
+    assert seen == [True, False]                     # steady state: a plain conditional GET
 
 
-def test_detect_does_not_force_other_sources(policy_db, monkeypatch):
+def test_a_stale_read_is_repeated_after_the_refresh_window(policy_db, monkeypatch):
+    db = policy_db
     seen: list[bool] = []
-    monkeypatch.setattr(detect_mod, "discover_meetings",
-                        lambda c, **k: (seen.append(k.get("force")), Discovery("unchanged", []))[1])
-    detect_mod.detect(["santeii"], db_path=policy_db, refresh_window_days=None, watch_horizon_days=None)
-    assert seen == [False]
+    store.mark_index_notes_read("emsc_system", db_path=db)
+    soon = datetime.now(UTC) + timedelta(days=store.INDEX_NOTES_REFRESH_DAYS - 1)
+    later = datetime.now(UTC) + timedelta(days=store.INDEX_NOTES_REFRESH_DAYS + 1)
+    assert not store.index_notes_due("emsc_system", now=soon, db_path=db)
+    assert store.index_notes_due("emsc_system", now=later, db_path=db)
+
+    store.update_committee("emsc_system", db_path=db,
+                           index_notes_at=datetime.now(UTC) - timedelta(days=store.INDEX_NOTES_REFRESH_DAYS + 1))
+    _detect(db, monkeypatch, "emsc_system", Discovery("ok", [], notes={}), seen)
+    assert seen == [True]
+    assert not store.index_notes_due("emsc_system", db_path=db)
+
+
+def test_a_page_that_changed_on_its_own_counts_as_a_full_read(policy_db, monkeypatch):
+    """A conditional check that gets a 200 (the page changed) parsed the body, so the notes are
+    current and the next pass need not force one."""
+    db = policy_db
+    store.update_committee("emsc_system", db_path=db, index_notes_at=datetime.now(UTC) - timedelta(days=5))
+    seen: list[bool] = []
+    _detect(db, monkeypatch, "emsc_system", Discovery("ok", [], notes={}), seen)
+    assert seen == [False]                           # recent: no force…
+    # …and the 200 restarted the clock: 29 days on is still inside the window (it was 5 days
+    # old before, so it would be due by then had the 200 not counted).
+    assert not store.index_notes_due("emsc_system", now=datetime.now(UTC) + timedelta(days=29), db_path=db)
+
+
+def test_an_unchanged_or_failed_check_does_not_count_as_a_read(policy_db, monkeypatch):
+    db = policy_db
+    seen: list[bool] = []
+    for disc in (Discovery("unchanged", []), Discovery("error", [], error_kind="blocked")):
+        _detect(db, monkeypatch, "emsc_system", disc, seen)
+        assert store.index_notes_due("emsc_system", db_path=db)
+    assert seen == [True, True]                      # still never read, so still forced
+
+
+def test_other_sources_are_never_forced(policy_db, monkeypatch):
+    seen: list[bool] = []
+    _detect(policy_db, monkeypatch, "santeii", Discovery("unchanged", []), seen)
+    assert seen == [False] and store.index_notes_due("santeii", db_path=policy_db)
+
+
+def test_the_migration_adds_both_columns_to_an_older_database(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+
+    from repower.db import _migrate_add_policy_index_note
+    eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE policy_meeting (id INTEGER PRIMARY KEY)"))
+        c.execute(text("CREATE TABLE policy_committee (committee_key VARCHAR(64) PRIMARY KEY)"))
+    for _ in range(2):                                # idempotent
+        _migrate_add_policy_index_note(eng)
+    insp = inspect(eng)
+    assert "index_note" in {c["name"] for c in insp.get_columns("policy_meeting")}
+    assert "index_notes_at" in {c["name"] for c in insp.get_columns("policy_committee")}
 
 
 # ── What the readers see ─────────────────────────────────────────────────────
