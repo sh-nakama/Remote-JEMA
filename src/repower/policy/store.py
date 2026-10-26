@@ -77,6 +77,13 @@ NO_PAPERS, REMOVED = NOTE_NO_PAPERS, NOTE_REMOVED
 # meeting per week.
 RELIST_DAYS = 7
 
+# How long an EGC index's ※ notes are trusted before the page is read in full again. The daily
+# conditional check already notices any change to the page (a note is part of the page, so a
+# note can only change when the page does and the 304 breaks), which makes this a safety net
+# against a stale validator, not the way changes are found. Long on purpose: each read is a
+# request against a host allowance of 16 per 5 minutes.
+INDEX_NOTES_REFRESH_DAYS = 30
+
 
 def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
                       checked_at: datetime | None = None, index_note: str | None = None) -> str:
@@ -1668,6 +1675,25 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
                 m.meeting_date = d
                 n += 1
         return n
+
+
+def index_notes_due(key: str, *, now: datetime | None = None, db_path: str | None = None) -> bool:
+    """True when committee *key*'s index should be read in full for its notes: never read (the
+    first ``detect`` after the column appears, or a newly added committee) or last read more than
+    :data:`INDEX_NOTES_REFRESH_DAYS` ago."""
+    with session_scope(db_path, commit=False) as session:
+        row = session.get(PolicyCommittee, key)
+        at = row.index_notes_at if row is not None else None
+    if at is None:
+        return True
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return ((now or _now()) - at).days >= INDEX_NOTES_REFRESH_DAYS
+
+
+def mark_index_notes_read(key: str, db_path: str | None = None) -> None:
+    """Record that *key*'s index was just read in full and its notes recorded."""
+    update_committee(key, db_path=db_path, index_notes_at=_now())
 
 
 def set_meeting_index_notes(key: str, notes: dict[int, str | None],

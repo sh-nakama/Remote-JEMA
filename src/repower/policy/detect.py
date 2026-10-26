@@ -26,7 +26,9 @@ from repower.policy.scraper import (
 from repower.policy.store import (
     add_late_materials,
     committee_or_config,
+    index_notes_due,
     known_meeting_nums,
+    mark_index_notes_read,
     meetings_missing_date,
     meetings_missing_materials,
     recent_meeting_nums,
@@ -171,12 +173,13 @@ def detect(
         known = known_meeting_nums(c.key, db_path)
         known_latest = max(known) if known else None
 
-        # EGC's index is read in full every pass rather than conditionally: its ※ notes
-        # (書面開催 / 削除済み) describe meetings that are already known, so a 304 would leave
-        # them unread for as long as the index stays unchanged. It is one small page per
-        # committee, on a host that has not needed the WAF-friendly pacing METI does.
-        disc = discover_meetings(c, db_path=db_path, known_latest=known_latest,
-                                 force=c.is_egc)
+        # An EGC index's ※ notes (書面開催 / 削除済み) are only in the page body, which a 304
+        # does not send. The daily check stays conditional — any change to the page breaks the
+        # 304 and is read then — and the page is forced to a full read only when its notes are
+        # missing (never read: the first pass after they were introduced, or a new committee) or
+        # old (``INDEX_NOTES_REFRESH_DAYS``, a safety net against a stale validator).
+        read_notes = c.is_egc and index_notes_due(c.key, db_path=db_path)
+        disc = discover_meetings(c, db_path=db_path, known_latest=known_latest, force=read_notes)
 
         # A 304 index means "no new meetings", but the meeting *dates* also live in
         # that body — so a committee whose index has settled can never repair
@@ -259,6 +262,8 @@ def detect(
             # The index's own word on whether a meeting has anything to read (EGC only; the
             # other sources hand back no notes). Recorded after the meetings exist above.
             res["noted"] = set_meeting_index_notes(c.key, disc.notes, db_path=db_path)
+            if c.is_egc:
+                mark_index_notes_read(c.key, db_path=db_path)  # status is "ok": a body was parsed
             set_committee_checked(c.key, db_path=db_path)
 
         results.append(res)
