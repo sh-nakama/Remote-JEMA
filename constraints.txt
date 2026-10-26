@@ -50,7 +50,7 @@ packaging==26.3
 pandas==3.0.6
 pathspec==1.1.1
 peewee==4.5.3
-pillow==12.3.0
+pillow==13.0.0
 platformdirs==4.13.5
 playwright==1.64.0
 plotly==7.1.0
