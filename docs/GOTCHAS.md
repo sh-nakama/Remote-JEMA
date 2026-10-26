@@ -1014,6 +1014,22 @@ fixed.
   (with a Gmail hint per code). Also: SMTP from the office network is intercepted (no AUTH or
   STARTTLS advertised), so test sending from Actions, not locally.
 
+- **An EGC index row can say "nothing to read" (`policy_meeting.index_note`).** EGC marks rows
+  `※書面開催` / `※非公開開催` (written or closed meeting) and `※削除済み` / `※削除` (documents
+  taken down). A written meeting with no links used to fail `no_sources` on every run (emsc_emsc
+  第619回, with no retry ever spent, so it took a slot each day); deleted documents download-failed
+  until the retry cap. `parse_egc_index` now reads the note, `detect` stores it, and
+  `meeting_readiness` returns `no_papers` / `removed`, so such a meeting leaves the worklist and
+  the queue (the export labels it, and `reset_unready_summaries` clears errors already on file).
+  Three things to keep in mind: (1) the note is judged on the **row**, not the label — `※書面開催`
+  with a 議事要旨 PDF or 配布資料 page (第617回) still has papers and is summarised, so `no_papers`
+  needs the row to link nothing at all; `removed` wins regardless of links. (2) EGC's index is
+  fetched **unconditionally** on every `detect` (a 304 would leave the notes of known meetings
+  unread while the page is unchanged); this is one small page per EGC committee. (3) It is
+  re-derived every pass, so a document posted later clears the note and the meeting returns —
+  nothing else needs to un-stick it. EGC only: METI and OCCTO indexes may carry similar notes,
+  which nothing reads yet.
+
 ## Streamlit dashboard
 
 - **The HF Space runs the same `app_main` as local, so its writes must be switched off by hand.**

@@ -33,7 +33,7 @@ from repower.policy.committees import (
     committee_by_key,
     committee_priority,
 )
-from repower.policy.scraper import Material
+from repower.policy.scraper import NOTE_NO_PAPERS, NOTE_REMOVED, Material
 from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
@@ -67,6 +67,10 @@ def _months_before(d: date, months: int) -> date:
 CONTENT_KINDS = frozenset({"minutes", "brief", "compilation", "handout"})
 
 READY, UPCOMING, AWAITING = "ready", "upcoming", "awaiting"
+# The committee's own index says there is nothing to read: a written/closed meeting whose row
+# links no document, or documents METI took down. Same strings as the ``index_note`` they come
+# from, so a readiness value and a stored note never need translating.
+NO_PAPERS, REMOVED = NOTE_NO_PAPERS, NOTE_REMOVED
 
 # How long a "looked, found nothing to read" verdict is trusted before the meeting's page is
 # read again. Papers appear over days; a week bounds the cost to one page fetch per awaiting
@@ -75,8 +79,15 @@ RELIST_DAYS = 7
 
 
 def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
-                      checked_at: datetime | None = None) -> str:
-    """Whether a meeting is worth summarising yet: ``ready`` / ``upcoming`` / ``awaiting``.
+                      checked_at: datetime | None = None, index_note: str | None = None) -> str:
+    """Whether a meeting is worth summarising yet: ``ready`` / ``upcoming`` / ``awaiting`` /
+    ``no_papers`` / ``removed``.
+
+    * ``no_papers`` / ``removed`` — the committee's index (``index_note``) says there is
+      nothing to read: a written (書面開催) or closed (非公開開催) meeting whose row links no
+      document, or documents METI deleted (削除済み). Unlike ``awaiting`` this is not "not yet" —
+      it is not re-checked on a timer, and it outranks the documents on file because those are
+      the dead links. It is cleared when a later ``detect`` sees the note gone.
 
     * ``upcoming`` — dated *today or later*. The daily run starts at 06:30 JST, before a
       same-day meeting, and committee pages post the agenda and handouts days ahead, so a
@@ -96,6 +107,8 @@ def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
     """
     if meeting_date is not None and meeting_date >= today:
         return UPCOMING
+    if index_note in (NO_PAPERS, REMOVED):
+        return index_note
     if CONTENT_KINDS.intersection(kinds):
         return READY
     if checked_at is not None and (today - checked_at.date()).days < RELIST_DAYS:
@@ -996,7 +1009,8 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
     badge) that should keep meaning "no briefing yet".
 
     **Readiness.** With ``ready_only`` (the default) a never-summarised meeting that is not
-    yet worth a briefing — ``upcoming`` or ``awaiting``, see :func:`meeting_readiness` — is
+    yet worth a briefing — ``upcoming``, ``awaiting``, or one the index says has nothing to read
+    (``no_papers`` / ``removed``), see :func:`meeting_readiness` — is
     left out, so it neither takes a quota slot nor counts as backlog. A meeting someone
     asked for (``gen_requested``) and a ``done`` meeting flagged for a new briefing are
     exempt. Every row carries its ``"readiness"``; ``ready_only=False`` returns them all
@@ -1060,7 +1074,8 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
         readiness: dict[int, str] = {
             m.id: READY if m.state == "done"
             else meeting_readiness(m.meeting_date, kinds_by.get((m.committee_key, m.meeting_num), ()),
-                                   today=day, checked_at=m.materials_checked_at)
+                                   today=day, checked_at=m.materials_checked_at,
+                                   index_note=m.index_note)
             for m in rows
         }
         if ready_only:
@@ -1240,7 +1255,10 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
       wrong thing and must not be shown or folded into the committee synthesis), its flags
       and retry count reset; the per-meeting notebook id is kept so the next run deletes it.
     * ``error`` with ``no_sources`` that is still not ready — an upcoming meeting with no
-      papers is "not yet", not a failure; the red row and the spent retry go away.
+      papers is "not yet", not a failure; the red row and the spent retry go away. So is any
+      ``error`` on a meeting whose index says it has nothing to read (``no_papers`` /
+      ``removed``): a written meeting with no papers, or documents METI deleted, is not a
+      failure and retrying it only repeats the download that cannot work.
 
     Idempotent and cheap, so ``detect`` runs it every pass — which is also what carries the
     fix through the Hugging Face round trip. Returns ``{"unsummarised": n, "cleared": n}``.
@@ -1255,11 +1273,14 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
         rows = (session.query(PolicyMeeting)
                 .filter(or_(
                     (PolicyMeeting.state == "done") & (PolicyMeeting.meeting_date >= day),
-                    (PolicyMeeting.state == "error") & (PolicyMeeting.quality_flag == "no_sources"),
+                    (PolicyMeeting.state == "error") & (
+                        (PolicyMeeting.quality_flag == "no_sources")
+                        | PolicyMeeting.index_note.in_((NO_PAPERS, REMOVED))),
                 )).all())
         for m in rows:
             if meeting_readiness(m.meeting_date, kinds_by.get((m.committee_key, m.meeting_num), ()),
-                                 today=day, checked_at=m.materials_checked_at) == READY:
+                                 today=day, checked_at=m.materials_checked_at,
+                                 index_note=m.index_note) == READY:
                 continue
             was_done = m.state == "done"
             m.state = "detected"
@@ -1311,8 +1332,16 @@ def meeting_gate(key: str, meeting_num: int, kinds, *, today: date | None = None
         if m.state == "done":
             return READY, bool(m.gen_requested)
         return (meeting_readiness(m.meeting_date, kinds, today=today or today_jst(),
-                                  checked_at=m.materials_checked_at),
+                                  checked_at=m.materials_checked_at, index_note=m.index_note),
                 bool(m.gen_requested))
+
+
+def meeting_index_note(key: str, meeting_num: int, db_path: str | None = None) -> str | None:
+    """The committee index's note on one meeting (``no_papers`` / ``removed``), or ``None``."""
+    with session_scope(db_path, commit=False) as session:
+        row = (session.query(PolicyMeeting.index_note)
+               .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
+        return row[0] if row else None
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
@@ -1637,6 +1666,32 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
             )
             if m is not None and d is not None and m.meeting_date != d:
                 m.meeting_date = d
+                n += 1
+        return n
+
+
+def set_meeting_index_notes(key: str, notes: dict[int, str | None],
+                            db_path: str | None = None) -> int:
+    """Set ``index_note`` for the given ``{meeting_num: note}`` of committee *key*.
+
+    *notes* carries ``None`` for an index row with no note, which clears a stale one (papers
+    posted after a written meeting). Only rows that exist and whose note actually changes are
+    touched, and ``updated_at`` is left alone, like :func:`set_meeting_dates`. A ``done``
+    meeting keeps its briefing whatever its row says, so only the note is recorded for it.
+    Returns the number of rows changed.
+    """
+    if not notes:
+        return 0
+    with session_scope(db_path) as session:
+        n = 0
+        for num, note in notes.items():
+            m = (
+                session.query(PolicyMeeting)
+                .filter_by(committee_key=key, meeting_num=num)
+                .one_or_none()
+            )
+            if m is not None and m.index_note != note:
+                m.index_note = note
                 n += 1
         return n
 

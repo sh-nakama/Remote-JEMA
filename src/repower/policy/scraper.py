@@ -77,6 +77,12 @@ class Material:
     kind: str  # minutes | brief | compilation | appendix | handout | agenda | other
 
 
+# What an EGC index row says about its own documents, from the ※ note beside the date.
+# Stored on the meeting as ``index_note`` (see ``store.meeting_readiness``).
+NOTE_NO_PAPERS = "no_papers"  # 書面開催 / 非公開開催 whose row links no document at all
+NOTE_REMOVED = "removed"  # ※削除済み — METI took the documents down; the links are dead
+
+
 @dataclass
 class Discovery:
     """Result of ``discover_meetings``.
@@ -93,6 +99,11 @@ class Discovery:
     list JSON carries dates too; only the (fallback) number probe cannot, since it
     learns nothing but which pages exist.
 
+    ``notes`` maps ``meeting_num → index note`` (:data:`NOTE_NO_PAPERS` /
+    :data:`NOTE_REMOVED`, or ``None`` for a row that carries no note) for every meeting the
+    index lists — EGC only. ``None`` entries matter: they are how a note that METI later
+    drops (papers finally posted) gets cleared.
+
     ``error_kind``/``error_detail``/``error_url`` say *why* a failure happened.
     Without them ``status == "error"`` collapses a blocked host, an uncleared WAF
     challenge, an open circuit breaker and a moved URL into one indistinguishable
@@ -103,6 +114,7 @@ class Discovery:
     status: str
     meeting_nums: list[int] = field(default_factory=list)
     dates: dict[int, datetime.date] = field(default_factory=dict)
+    notes: dict[int, str | None] = field(default_factory=dict)
     error_kind: str | None = None
     error_detail: str | None = None
     error_url: str | None = None
@@ -367,8 +379,23 @@ def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, s
     return out
 
 
+def egc_row_note(row_text: str, *, has_links: bool) -> str | None:
+    """The index note for one EGC meeting row, or ``None``.
+
+    Judged on the row, not the label alone: a ``※書面開催`` meeting can still publish papers
+    (a 議事要旨 PDF or a 配布資料 page), and those must be summarised. So a written/closed
+    meeting is :data:`NOTE_NO_PAPERS` only when its row links nothing. ``※削除`` (also written
+    ``※削除済み``) wins regardless of links: they are what was removed.
+    """
+    if "※削除" in row_text:
+        return NOTE_REMOVED
+    if not has_links and re.search(r"書面開催|非公開開催", row_text):
+        return NOTE_NO_PAPERS
+    return None
+
+
 def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None = None) -> list[dict]:
-    """Parse an EGC index/log table → list of ``{meeting_num, date, direct_pdfs, haifu_url}``.
+    """Parse an EGC index/log table → list of ``{meeting_num, date, direct_pdfs, haifu_url, note}``.
 
     Each meeting row carries a date and a ``第N回`` label, optionally with direct PDFs
     (議事要旨 / 議事録) and a 配布資料 (haifu) subpage URL holding the handout PDFs. A row
@@ -405,6 +432,7 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
                 "date": parse_jp_date(row_text),
                 "direct_pdfs": [],
                 "haifu_url": None,
+                "note": None,
             }
             for a in row.find_all("a", href=True):
                 href = href_of(a)
@@ -415,6 +443,8 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
                     info["direct_pdfs"].append({"url": full, "text": a.get_text(strip=True)})
                 elif "haifu" in href.lower() and href.lower().endswith(".html"):
                     info["haifu_url"] = full
+            info["note"] = egc_row_note(
+                row_text, has_links=bool(info["direct_pdfs"] or info["haifu_url"]))
             # Keep genuine held meetings: those with materials, or (materials-less
             # 非公開/書面開催 meetings) those carrying a parseable meeting date.
             if info["direct_pdfs"] or info["haifu_url"] or info["date"] is not None:
@@ -759,7 +789,8 @@ def discover_meetings(committee: Committee, *, db_path: str | None = None,
             meetings = parse_egc_index(content, committee.url)
             nums = sorted({m["meeting_num"] for m in meetings}, reverse=True)
             dates = {m["meeting_num"]: m["date"] for m in meetings if m["date"] is not None}
-            return Discovery("ok", nums, dates)
+            notes = {m["meeting_num"]: m["note"] for m in meetings}
+            return Discovery("ok", nums, dates, notes)
         # METI
         url_map = parse_meti_meeting_urls(content, committee.url)
         if url_map:

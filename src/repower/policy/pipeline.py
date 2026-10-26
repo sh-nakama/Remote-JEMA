@@ -42,6 +42,7 @@ from repower.policy.store import (
     mark_materials_checked,
     mark_synthesized,
     meeting_gate,
+    meeting_index_note,
     meeting_materials,
     meetings_for_synthesis,
     pending_meetings,
@@ -280,7 +281,11 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
     """
     # Ensure materials are enumerated (detection may have only recorded the number).
     materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
-    if not CONTENT_KINDS.intersection(m["kind"] for m in materials):
+    # The committee's index already says there is nothing to read (no papers published, or the
+    # documents were deleted): reading the page again would only confirm it, so the gate below
+    # defers the meeting without the request. A targeted run still looks, as it skips the gate.
+    noted = not force and meeting_index_note(committee.key, meeting_num, db_path=db_path) is not None
+    if not noted and not CONTENT_KINDS.intersection(m["kind"] for m in materials):
         # Nothing to read on file: either the list was never taken (detection lists only the
         # newest few meetings) or it is stale (an agenda-only list from before the papers were
         # posted). Read the page now; the gate below decides what the answer is worth. An empty
