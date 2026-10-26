@@ -747,6 +747,9 @@ interface MeetingStatus {
   /** detected | downloading | ingesting | generating | done | error — NOT the
    *  Deep Dive's 3-way rollup; a meeting stuck mid-pipeline is visible here. */
   state: string
+  /** ready | upcoming | awaiting — is it worth summarising yet? Before a meeting is
+   *  held (or while only its agenda is posted) the daily run leaves it out. */
+  readiness?: string
   flag: string | null
   error: string | null
   errorAt: string | null
@@ -830,8 +833,14 @@ const TH =
   "font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);white-space:nowrap;overflow:hidden;font-feature-settings:'tnum' 1"
 const TD = "font-size:11.5px;color:var(--tx2);min-width:0;font-feature-settings:'tnum' 1"
 
-function StateChip({ state, lang }: { state: string; lang: string }) {
-  const m = mstate(state)
+function StateChip({ state, readiness, lang }: { state: string; readiness?: string; lang: string }) {
+  // A meeting not worth summarising yet reads as that, not as "detected" (which implies queued).
+  const unready = state !== 'done' && (readiness === 'upcoming' || readiness === 'awaiting')
+  const m = unready
+    ? readiness === 'upcoming'
+      ? { en: 'upcoming', ja: '開催前', color: 'var(--mut)' }
+      : { en: 'awaiting materials', ja: '資料待ち', color: 'var(--mut)' }
+    : mstate(state)
   return (
     <span style={s('display:inline-flex;align-items:center;gap:5px;min-width:0')}>
       <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${m.color}`)}></span>
@@ -913,7 +922,7 @@ function MeetingRows({
             <span style={s(TD)} title={m.date ? '' : pick('Meeting date not backfilled yet', '開催日は未取得')}>
               {m.date || '—'}
             </span>
-            <StateChip state={m.state} lang={L} />
+            <StateChip state={m.state} readiness={m.readiness} lang={L} />
             {(() => {
               // A summarised meeting whose notebook saw fewer documents than the
               // page lists is the failure this column exists for — the briefing

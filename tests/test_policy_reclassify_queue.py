@@ -20,6 +20,14 @@ from repower.policy import pipeline, store
 from repower.policy.scraper import Material
 
 
+def _docs(n: int) -> list:
+    """A meeting's worth of papers: the readiness gate leaves a document-less meeting out of
+    the worklist, so a test that needs a pending meeting must give it something to read."""
+    from repower.policy.scraper import Material
+
+    return [Material(n, f"{n:03d}_h1", f"https://x/{n}/01.pdf", "資料1", "handout")]
+
+
 def _change(key: str, num: int, old: str, new: str, state: str = "done") -> dict:
     return {"committee_key": key, "meeting_num": num, "pdf_id": f"{num}_x", "old": old,
             "new": new, "state": state}
@@ -153,7 +161,7 @@ def test_queue_resummarise_flags_tracked_done_meetings_only(tmp_path: Path):
     _summarised(db, "chousei_jukyu", 10)
     _summarised(db, "santeii", 5)
     store.set_committee_enabled("santeii", False, db_path=db)
-    store.record_meeting("chousei_jukyu", 11, None, db_path=db)  # never summarised: not done
+    store.record_meeting("chousei_jukyu", 11, _docs(11), db_path=db)  # never summarised: not done
 
     res = store.queue_resummarise(
         [("chousei_jukyu", 10), ("santeii", 5), ("chousei_jukyu", 11), ("chousei_jukyu", 999)], db_path=db)

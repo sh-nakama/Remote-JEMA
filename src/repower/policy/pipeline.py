@@ -33,11 +33,15 @@ from repower.policy import tags as topic_tags
 from repower.policy.committees import Committee
 from repower.policy.scraper import list_materials
 from repower.policy.store import (
+    CONTENT_KINDS,
+    READY,
     clear_generation_request,
     committee_or_config,
     forget_staged_materials,
     get_committee,
+    mark_materials_checked,
     mark_synthesized,
+    meeting_gate,
     meeting_materials,
     meetings_for_synthesis,
     pending_meetings,
@@ -259,21 +263,32 @@ def _select_materials(materials: list[dict]) -> list[dict]:
     return usable[:MEETING_SOURCE_BUDGET]
 
 
-def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | None = None) -> str:
+def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | None = None,
+                      force: bool = False) -> str:
     """Summarise one meeting end-to-end. Returns the final state.
 
-    ``'done'`` | ``'error'`` | ``'generating'`` (left for resume) | ``'blocked'``.
-    ``'blocked'`` means the source host stopped us before anything reached
+    ``'done'`` | ``'error'`` | ``'generating'`` (left for resume) | ``'blocked'`` |
+    ``'deferred'``. ``'blocked'`` means the source host stopped us before anything reached
     NotebookLM: the DB row is still marked errored, but no quota was spent, so the
-    caller must not charge it against the run's budget.
+    caller must not charge it against the run's budget. ``'deferred'`` means the meeting
+    is not ready to summarise (see :func:`~repower.policy.store.meeting_readiness`): it is
+    untouched — no error, no retry spent — and simply comes round again once it is held and
+    has papers. A meeting someone asked for (``gen_requested``) or targeted by number
+    (*force*) skips that check.
 
     Looks up the meeting by (committee, number); the caller ensures the row exists.
     """
     # Ensure materials are enumerated (detection may have only recorded the number).
     materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
-    if not materials:
+    if not CONTENT_KINDS.intersection(m["kind"] for m in materials):
+        # Nothing to read on file: either the list was never taken (detection lists only the
+        # newest few meetings) or it is stale (an agenda-only list from before the papers were
+        # posted). Read the page now; the gate below decides what the answer is worth. An empty
+        # answer is "page unreachable" as often as "nothing posted", so it records no look.
         found = list_materials(committee, meeting_num, db_path=db_path)
         record_meeting(committee.key, meeting_num, found, db_path=db_path)
+        if found:
+            mark_materials_checked(committee.key, meeting_num, db_path=db_path)
         materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
 
     selected = _select_materials(materials)
@@ -284,6 +299,13 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
     if found_row is None:
         raise RuntimeError(f"{committee.key} #{meeting_num}: meeting row missing after record_meeting")
     meeting_row: int = found_row
+    if not force:
+        readiness, requested = meeting_gate(
+            committee.key, meeting_num, {m["kind"] for m in materials}, db_path=db_path)
+        if readiness != READY and not requested:
+            logger.info("policy %s 第%d回: %s — not summarised yet", committee.key, meeting_num,
+                        readiness)
+            return "deferred"
     if not selected:
         _fail_meeting(
             meeting_row, db_path, flag="no_sources",
@@ -753,7 +775,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     # the downloads never got that far and cost nothing, so it does not spend a
     # slot — pre-slicing the worklist instead let a bad METI day silently halve the
     # round (4 of 8 slots produced nothing on the day this was written).
-    done = errored = blocked = charged = 0
+    done = errored = blocked = charged = deferred = 0
     stop_reason: str | None = None
     touched_committees: set[str] = set()
     # Meetings passed over because their source host is cooling down, per host.
@@ -785,7 +807,8 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             continue
         upgrade = bool(item.get("resummarise"))
         try:
-            state = summarize_meeting(committee, item["meeting_num"], db_path=db_path)
+            state = summarize_meeting(committee, item["meeting_num"], db_path=db_path,
+                                      force=item["state"] == "targeted")
         except _HALTING as e:
             if upgrade:
                 _keep_briefing_visible(item["committee_key"], item["meeting_num"], db_path)
@@ -795,6 +818,11 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             break
         if upgrade and state in ("error", "blocked"):
             _keep_briefing_visible(item["committee_key"], item["meeting_num"], db_path)
+        if state == "deferred":
+            # Upcoming, or held with nothing to read yet. Nothing was spent and nothing
+            # changed, so it takes no slot; the worklist normally filters these out first.
+            deferred += 1
+            continue
         if state == "blocked":
             # Host trouble, not quota. Leave any queued dashboard request in place
             # so the meeting stays at the front of the next round's worklist.
@@ -841,7 +869,7 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     # 'processed' counts meetings actually attempted, not the whole worklist the
     # run was free to draw from.
     return {"processed": charged + blocked, "done": done, "errored": errored,
-            "blocked": blocked, "synthesized": synthesized,
+            "blocked": blocked, "deferred": deferred, "synthesized": synthesized,
             "skipped": sum(skipped_hosts.values()), "skipped_hosts": skipped_hosts,
             "rate_limited": stop_reason == "rate_limited", "stopped_early": stop_reason}
 

@@ -32,6 +32,14 @@ from repower.policy.scraper import (
 )
 from repower.scrapers.http_cache import ChallengeNotClearedError, min_host_interval
 
+
+def _docs(n: int) -> list:
+    """A meeting's worth of papers: the readiness gate leaves a document-less meeting out of
+    the worklist, so a test that needs a pending meeting must give it something to read."""
+    from repower.policy.scraper import Material
+
+    return [Material(n, f"{n:03d}_h1", f"https://x/{n}/01.pdf", "資料1", "handout")]
+
 # ── Fixtures (small inline HTML) ─────────────────────────────────────────────
 METI_INDEX = """
 <html><body>
@@ -462,7 +470,7 @@ def test_blocked_meetings_do_not_consume_the_quota_budget(monkeypatch, tmp_path)
     key = "doji_shijo"
     store.sync_committees(db_path=db)
     for num in range(1, 7):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
 
     monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
@@ -488,7 +496,7 @@ def test_run_stops_when_everything_is_blocked(monkeypatch, tmp_path):
     store.sync_committees(db_path=db)
     monkeypatch.setattr(pipeline, "_MAX_BLOCKED_ATTEMPTS", 3)
     for num in range(1, 21):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
 
     monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "synthesize_committee", lambda *a, **k: False)
@@ -513,7 +521,7 @@ def test_run_stops_cleanly_when_the_account_or_session_gives_out(monkeypatch, tm
     key = "doji_shijo"
     store.sync_committees(db_path=db)
     for num in (1, 2, 3):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
 
     monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "synthesize_committee",
@@ -541,7 +549,7 @@ def test_run_stops_when_synthesis_hits_a_create_timeout(monkeypatch, tmp_path):
     db = str(tmp_path / "t.db")
     key = "doji_shijo"
     store.sync_committees(db_path=db)
-    store.record_meeting(key, 1, None, db_path=db)
+    store.record_meeting(key, 1, _docs(1), db_path=db)
 
     monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "summarize_meeting", lambda *a, **k: "done")
@@ -720,7 +728,7 @@ def test_meetings_missing_materials_lists_hidden_meetings(policy_db):
         db_path=db,
     )
     store.record_meeting(key, 4, None, db_path=db)  # will be marked done
-    mid4 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
+    mid4 = next(m["id"] for m in store.pending_meetings(key, db_path=db, ready_only=False)
                 if m["meeting_num"] == 4)
     store.update_meeting(mid4, db_path=db, state="done", briefing_md="x")
 
@@ -1255,7 +1263,7 @@ def test_regenerate_running_doc_for_discovered_committee(monkeypatch, tmp_path):
         db_path=db,
     )
     assert "gx_demand" not in {c.key for c in COMMITTEES}  # genuinely not in config
-    store.record_meeting("gx_demand", 3, None, db_path=db)
+    store.record_meeting("gx_demand", 3, _docs(3), db_path=db)
     pend = store.pending_meetings("gx_demand", db_path=db)
     store.update_meeting(pend[0]["id"], db_path=db, state="done",
                          briefing_md="## 論点\nGX需要の創出策。")
@@ -1268,7 +1276,7 @@ def test_regenerate_running_doc_for_discovered_committee(monkeypatch, tmp_path):
 
 def test_pending_retries_errors_under_cap(policy_db):
     db = policy_db
-    store.record_meeting("santeii", 5, None, db_path=db)
+    store.record_meeting("santeii", 5, _docs(5), db_path=db)
     mid = store.pending_meetings("santeii", db_path=db)[0]["id"]
 
     # Errored under the retry cap → still in the worklist.
@@ -1291,7 +1299,7 @@ def test_meetings_for_synthesis_uses_flag_not_watermark(tmp_path):
     store.sync_committees(db_path=db)
     # Two done meetings recorded newest-first (5 then 3), each with a briefing.
     for n in (5, 3):
-        store.record_meeting(key, n, None, db_path=db)
+        store.record_meeting(key, n, _docs(n), db_path=db)
         mid = next(m["id"] for m in store.pending_meetings(key, db_path=db) if m["meeting_num"] == n)
         store.update_meeting(mid, db_path=db, state="done", briefing_md=f"briefing {n}")
 
@@ -1318,7 +1326,7 @@ def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
 
     # One done meeting whose briefing was folded in (synth_done=1) before the
     # interrupted run died — running_summary_md never written.
-    store.record_meeting(key, 4, None, db_path=db)
+    store.record_meeting(key, 4, _docs(4), db_path=db)
     mid = store.pending_meetings(key, db_path=db)[0]["id"]
     store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
     store.mark_synthesized(key, 4, db_path=db)
@@ -1367,7 +1375,7 @@ def test_synthesize_committee_rolls_over_at_source_cap(monkeypatch, tmp_path):
     monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
 
     def _done(num, *, folded=False):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
         mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
                    if m["meeting_num"] == num)
         store.update_meeting(mid, db_path=db, state="done",
@@ -1420,12 +1428,12 @@ def test_synthesis_source_count_survives_a_stale_cached_value(monkeypatch, tmp_p
     monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 2)
 
     for num in (5, 6):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
         mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
                    if m["meeting_num"] == num)
         store.update_meeting(mid, db_path=db, state="done",
                              briefing_md=f"briefing {num}", synth_done=True)
-    store.record_meeting(key, 7, None, db_path=db)
+    store.record_meeting(key, 7, _docs(7), db_path=db)
     mid7 = next(m["id"] for m in store.pending_meetings(key, db_path=db)
                 if m["meeting_num"] == 7)
     store.update_meeting(mid7, db_path=db, state="done", briefing_md="briefing 7")
@@ -1458,7 +1466,7 @@ def test_synthesis_rolls_over_when_backfill_below_watermark_filled_the_notebook(
     monkeypatch.setattr(pipeline, "NOTEBOOKLM_SOURCE_CAP", 3)
 
     def _done(num, *, folded=False):
-        store.record_meeting(key, num, None, db_path=db)
+        store.record_meeting(key, num, _docs(num), db_path=db)
         mid = next(m["id"] for m in store.pending_meetings(key, db_path=db)
                    if m["meeting_num"] == num)
         store.update_meeting(mid, db_path=db, state="done",
@@ -1494,7 +1502,7 @@ def test_synthesis_falls_back_to_derived_count_when_listing_fails(monkeypatch, t
     key = "emissions_trading"
     store.sync_committees(db_path=db)
     monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
-    store.record_meeting(key, 4, None, db_path=db)
+    store.record_meeting(key, 4, _docs(4), db_path=db)
     mid = store.pending_meetings(key, db_path=db)[0]["id"]
     store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
     store.update_committee(key, db_path=db, synthesis_notebook_id="nb-1")
@@ -1726,9 +1734,9 @@ def test_pending_meetings_ordered_by_priority_then_newest(policy_db):
     """A quota-bounded run should drain high-priority committees first, newest-first."""
     db = policy_db
     # santeii is a default-priority committee; system_review is priority 1.
-    store.record_meeting("santeii", 5, None, db_path=db)
-    store.record_meeting("system_review", 108, None, db_path=db)
-    store.record_meeting("system_review", 114, None, db_path=db)
+    store.record_meeting("santeii", 5, _docs(5), db_path=db)
+    store.record_meeting("system_review", 108, _docs(108), db_path=db)
+    store.record_meeting("system_review", 114, _docs(114), db_path=db)
 
     order = [(m["committee_key"], m["meeting_num"]) for m in store.pending_meetings(db_path=db)]
     assert order == [("system_review", 114), ("system_review", 108), ("santeii", 5)]
@@ -1777,7 +1785,7 @@ def test_disabled_committee_detected_but_not_summarised(monkeypatch, policy_db):
         return Discovery("ok", [1]) if c.key == "santeii" else Discovery("unchanged", [])
 
     monkeypatch.setattr(detect_mod, "discover_meetings", fake_discover)
-    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: [])
+    monkeypatch.setattr(detect_mod, "list_materials", lambda c, n, **kw: _docs(n))
     detect_mod.detect(db_path=db)
     assert "santeii" in seen and "system_review" in seen
 
@@ -1821,8 +1829,8 @@ def test_resolve_committee_roundtrips_occto_and_egc_params(policy_db):
 def test_generation_request_orders_first(policy_db):
     db = policy_db
     # santeii is default priority; system_review is priority 1.
-    store.record_meeting("santeii", 5, None, db_path=db)
-    store.record_meeting("system_review", 114, None, db_path=db)
+    store.record_meeting("santeii", 5, _docs(5), db_path=db)
+    store.record_meeting("system_review", 114, _docs(114), db_path=db)
 
     # Without a request, priority wins.
     order = [m["committee_key"] for m in store.pending_meetings(db_path=db)]
