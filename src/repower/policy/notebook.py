@@ -206,9 +206,23 @@ def list_notebooks(*, timeout: float = 60.0) -> list[dict]:
 
 
 # ── Sources ──────────────────────────────────────────────────────────────────
+def _is_dropped_upload(e: NotebookLMError) -> bool:
+    """True for a plain exit-1 failure of ``source add`` (not auth / rate limit / timeout).
+
+    The CLI reports a connection that closed mid-write as a bare exit 1, sometimes with
+    the asyncio ``Data should not be empty`` assertion on stderr and sometimes with
+    nothing at all, so the exit code is the signal, not the text. Auth and rate-limit
+    errors are classified earlier in :func:`_run` and are subclasses; they must still
+    halt the run, never be retried here.
+    """
+    if isinstance(e, (NotebookLMAuthError, NotebookLMRateLimitError, NotebookLMTimeout)):
+        return False
+    return f"-> exit {EXIT_ERROR}" in str(e)
+
+
 def add_source(notebook_id: str, path_or_url: str, *, timeout: float = 180.0,
                attempts: int = 2) -> str:
-    """Upload one source; returns its id. Retries a timed-out upload once.
+    """Upload one source; returns its id. Retries a dropped upload once.
 
     An upload is a single long-lived connection, and a dropped one raises
     NotebookLMTimeout — which the pipeline treats as "the account is the problem,
@@ -218,16 +232,22 @@ def add_source(notebook_id: str, path_or_url: str, *, timeout: float = 180.0,
     the run there discards every PDF already fetched for the meeting, so one
     retry is far cheaper than the re-download it prevents. Mirrors the ``--retry``
     that :func:`generate_report` already relies on for the submit RPC.
+
+    A drop can also surface as a bare exit 1 (observed 2026-10-26: two PDFs that
+    uploaded cleanly on a re-run), which used to fail the whole meeting with
+    ``ingest_failed`` and discard its notebook; that gets the same single retry.
     """
-    last: NotebookLMTimeout | None = None
+    last: NotebookLMError | None = None
     for attempt in range(max(1, attempts)):
         try:
             return _json(["source", "add", path_or_url, "--notebook", notebook_id],
                          timeout=timeout)["source"]["id"]
-        except NotebookLMTimeout as e:
+        except NotebookLMError as e:
+            if not isinstance(e, NotebookLMTimeout) and not _is_dropped_upload(e):
+                raise
             last = e
             if attempt + 1 < max(1, attempts):
-                logger.warning("source add timed out (%s), retrying once: %s",
+                logger.warning("source add dropped (%s), retrying once: %s",
                                Path(path_or_url).name, e)
                 time.sleep(5.0)
     raise last if last else NotebookLMError("source add failed")

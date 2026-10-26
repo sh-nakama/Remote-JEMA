@@ -2246,6 +2246,58 @@ def test_add_source_retries_a_dropped_upload_once(monkeypatch):
     assert len(calls) == 2
 
 
+def test_add_source_retries_a_bare_exit_1_once(monkeypatch):
+    """A connection that closes mid-write reaches us as a plain exit 1 (with the asyncio
+    assertion on stderr, or with nothing). It gets the same single retry as a timeout
+    instead of failing the meeting as ``ingest_failed``."""
+    for stderr in ("", "AssertionError: Data should not be empty"):
+        calls = []
+
+        def fake_json(args, *, timeout, _stderr=stderr, _calls=calls):
+            _calls.append(args)
+            if len(_calls) == 1:
+                raise nb_mod.NotebookLMError(f"notebooklm source add a.pdf -> exit 1: {_stderr}")
+            return {"source": {"id": "src-2"}}
+
+        monkeypatch.setattr(nb_mod, "_json", fake_json)
+        monkeypatch.setattr(nb_mod.time, "sleep", lambda *_: None)
+        assert nb_mod.add_source("nb1", "C:/tmp/a.pdf") == "src-2"
+        assert len(calls) == 2
+
+    # Still bounded: a persistent exit 1 is raised after the second attempt.
+    calls = []
+
+    def always_fail(args, *, timeout):
+        calls.append(args)
+        raise nb_mod.NotebookLMError("notebooklm source add a.pdf -> exit 1: boom")
+
+    monkeypatch.setattr(nb_mod, "_json", always_fail)
+    with pytest.raises(nb_mod.NotebookLMError):
+        nb_mod.add_source("nb1", "C:/tmp/a.pdf")
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("exc", [
+    nb_mod.NotebookLMAuthError("session expired"),
+    nb_mod.NotebookLMRateLimitError("rate-limited"),
+    nb_mod.NotebookLMError("non-JSON output from notebooklm source add"),
+])
+def test_add_source_does_not_retry_halting_or_unrelated_errors(monkeypatch, exc):
+    """Auth and rate-limit errors halt the run and must not be retried here; neither is an
+    unparseable response, which is not a dropped connection."""
+    calls = []
+
+    def fake_json(args, *, timeout):
+        calls.append(args)
+        raise exc
+
+    monkeypatch.setattr(nb_mod, "_json", fake_json)
+    monkeypatch.setattr(nb_mod.time, "sleep", lambda *_: None)
+    with pytest.raises(type(exc)):
+        nb_mod.add_source("nb1", "C:/tmp/a.pdf")
+    assert len(calls) == 1
+
+
 def _no_probe(*a, **kw):
     """Stand-in for the probe: reaching it means the JSON path failed to answer."""
     raise AssertionError("the number probe was reached; the JSON should have answered")
