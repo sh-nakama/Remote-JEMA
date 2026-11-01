@@ -28,10 +28,12 @@ from repower.db import (
     init_db,
 )
 from repower.policy.committees import (
+    CATALOG_NAMES_JA,
     COMMITTEES,
     Committee,
     committee_by_key,
     committee_priority,
+    english_name,
 )
 from repower.policy.scraper import NOTE_NO_PAPERS, NOTE_REMOVED, Material
 from repower.timeutil import today_jst
@@ -169,7 +171,8 @@ def sync_committees(db_path: str | None = None) -> int:
     insert — plus a back-fill when a just-migrated row still has ``priority IS
     NULL`` — and never clobbered afterwards, which is what lets a committee "jump
     the queue permanently". Committees not in the config (discovered / user-added)
-    are left untouched.
+    are left untouched, except that a discovered one listed in ``CATALOG_NAMES_JA``
+    has its wrongly-scraped Japanese name corrected.
     """
     with session_scope(db_path) as session:
         n = 0
@@ -192,6 +195,11 @@ def sync_committees(db_path: str | None = None) -> int:
             # preserve UI/CLI edits otherwise.
             if row.priority is None:
                 row.priority = c.priority
+        # Discovered committees stored under a wrong Japanese name (see CATALOG_NAMES_JA).
+        for key, name_ja in CATALOG_NAMES_JA.items():
+            row = session.get(PolicyCommittee, key)
+            if row is not None and not row.user_added and row.name_ja != name_ja:
+                row.name_ja = name_ja
         return n
 
 
@@ -206,7 +214,7 @@ def _row_to_committee(row: PolicyCommittee) -> Committee:
     return Committee(
         key=row.committee_key,
         name_ja=row.name_ja or row.committee_key,
-        name_en=row.name_en or row.committee_key,
+        name_en=english_name(row.committee_key, row.name_en) or row.committee_key,
         url=row.url or "",
         source=row.source or "METI",
         priority=row.priority if row.priority is not None else 100,
@@ -431,7 +439,7 @@ def list_committees(db_path: str | None = None) -> list[dict]:
                 "key": r.committee_key,
                 "committee_key": r.committee_key,
                 "source": r.source or "METI",
-                "name_en": r.name_en or r.committee_key,
+                "name_en": english_name(r.committee_key, r.name_en) or r.committee_key,
                 "name_ja": r.name_ja or r.committee_key,
                 "enabled": bool(r.enabled) if r.enabled is not None else True,
                 "archived": bool(r.archived),
@@ -1535,6 +1543,7 @@ def meetings_for_week(
                 "state": m.state,
                 "has_torimatome": bool(m.has_torimatome),
                 "digest_en_json": m.digest_en_json,
+                "briefing_md": m.briefing_md,
                 "summarised_at": m.summarised_at,
             }
             for m in rows

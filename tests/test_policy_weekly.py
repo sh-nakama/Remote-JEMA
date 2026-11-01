@@ -14,8 +14,8 @@ from typer.testing import CliRunner
 from repower import cli
 from repower.db import PolicyMeeting
 from repower.notify import mail
+from repower.policy import committees, store, weekly
 from repower.policy import schedule as sched
-from repower.policy import store, weekly
 from repower.policy.energy_board import BoardEntry
 
 TODAY = date(2026, 10, 9)  # the last day of the window under test
@@ -37,13 +37,37 @@ DIGEST = """### **Key decisions**
 """
 
 
-def _meeting(db, key, num, day, *, state="detected", digest=None, summarised_at=None, detected_at=None):
+BRIEFING = """# 第101回 調達価格等算定委員会 議論要約レポート
+
+## 1. 主要な論点（議題ごとに整理）
+
+* **議題一覧**: ここは決定ではない。
+
+## 3. 結論・決定事項（および事務局提案・継続検討事項）
+
+### 3.1 決定・決定方向事項（出典: `101_01.pdf` P.12）
+
+1. **事業用太陽光発電の入札条件**
+   - **上限価格**: 事前公表とする［資料１ p.7］。
+2. **陸上風力発電の入札条件**：初回募集容量は0.9GW【出典：資料3】。
+
+### 3.2 事務局提案および継続検討事項（確定していない事項）
+
+1. **バイオマス発電の制度設計**: まだ決まっていない。
+
+## 4. 今後の検討課題
+"""
+
+
+def _meeting(db, key, num, day, *, state="detected", digest=None, briefing=None, summarised_at=None,
+             detected_at=None):
     store.record_meeting(key, num, None, db_path=db)
     with store.session_scope(db) as s:
         m = s.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
         m.meeting_date = day
         m.state = state
         m.digest_en_json = json.dumps({"answer": digest}) if digest else None
+        m.briefing_md = briefing
         m.summarised_at = summarised_at
         if detected_at is not None:
             m.detected_at = detected_at
@@ -74,6 +98,54 @@ def test_brief_truncates_long_bullets_on_a_word_boundary():
     assert len(body) <= weekly.BRIEF_CHARS + 1 and body.endswith("…") and not body.endswith(" …")
 
 
+def test_japanese_brief_takes_the_decided_items_only():
+    assert weekly.extract_brief_ja(BRIEFING) == [
+        ("事業用太陽光発電の入札条件", "事前公表とする。"),
+        ("陸上風力発電の入札条件", "初回募集容量は0.9GW。"),
+    ]
+
+
+def test_japanese_brief_stops_at_an_undecided_pseudo_heading():
+    briefing = """## 4. 結論・決定事項および継続検討事項
+
+**【決定事項】**
+* 連絡体制を構築した（資料1）。
+
+**【継続検討・事務局提案事項】**
+* 手順の標準化。
+"""
+    assert weekly.extract_brief_ja(briefing) == [("", "連絡体制を構築した。")]
+    grouped = """## 3. 結論および事務局提案事項
+
+- **決定事項（確認事項）：**
+    1. DECOMP法を採用する（議事録 p.1）。
+- **事務局提案・継続検討事項：**
+    - 影響を評価する。
+"""
+    assert weekly.extract_brief_ja(grouped) == [("決定事項（確認事項）", "DECOMP法を採用する。")]
+
+
+def test_japanese_brief_falls_back_to_prose_but_never_to_the_agenda():
+    hearing = """## 3. 結論・決定事項
+
+### 3.1 本会合における決定事項
+
+本会合はヒアリングであり、決定事項はない。
+
+### 3.2 事務局提案・継続検討事項
+
+* 引き続き検討する。
+"""
+    assert weekly.extract_brief_ja(hearing) == [("", "本会合はヒアリングであり、決定事項はない。")]
+    assert weekly.extract_brief_ja("## 1. 主要な論点\n\n* 議題A\n* 議題B\n") == []
+    assert weekly.extract_brief_ja("") == []
+
+
+def test_japanese_brief_truncates_at_a_comma_near_the_limit():
+    (t, body), = weekly.extract_brief_ja("## 3. 結論・決定事項\n* **T**: " + "あ" * 100 + "、" + "い" * 100)
+    assert body == "あ" * 100 + "…"
+
+
 # ── What goes in which section ───────────────────────────────────────────────
 def test_by_default_the_window_is_the_previous_monday_to_sunday(policy_db, monkeypatch):
     """Sent Monday 08:00 JST: the window is the 7 complete days before it, never that morning."""
@@ -92,7 +164,7 @@ def test_sections_are_keyed_on_when_the_meeting_was_held(policy_db):
     db = policy_db
     store.set_committee_enabled("santeii", False, db_path=db)
     _meeting(db, "chousei_jukyu", 122, TODAY - timedelta(days=3), state="done", digest=DIGEST,
-             summarised_at=NOW - timedelta(days=1))
+             briefing=BRIEFING, summarised_at=NOW - timedelta(days=1))
     _meeting(db, "system_review", 50, TODAY, state="detected")  # held today, not summarised yet
     _meeting(db, "doji_shijo", 26, TODAY - timedelta(days=6), state="error")  # first day of the window
     _meeting(db, "santeii", 115, TODAY - timedelta(days=2), state="done", digest=DIGEST,
@@ -113,6 +185,7 @@ def test_sections_are_keyed_on_when_the_meeting_was_held(policy_db):
     assert (r.start, r.end) == (TODAY - timedelta(days=6), TODAY)
     assert [(i.committee_key, i.meeting_num) for i in r.summarised] == [("chousei_jukyu", 122)]
     assert r.summarised[0].brief[0][0] == "Black start tender"
+    assert r.summarised[0].brief_ja[0][0] == "事業用太陽光発電の入札条件"
     assert [(i.committee_key, i.meeting_num) for i in r.late] == [("saisei_kano", 80)]
     held = {(i.committee_key, i.meeting_num): i.status for i in r.held}
     assert held == {
@@ -235,15 +308,62 @@ def test_html_escapes_scraped_text_and_skips_an_empty_catch_up_section():
     assert "Also held last week (0)" in out
 
 
+def test_both_languages_render_with_labels_and_lang_tags():
+    item = _report().summarised[0]
+    item.brief_ja = [("題", "本文")]
+    r = _report(summarised=[item])
+    out = weekly.render_html(r)
+    assert '<ul lang="en"' in out and '<ul lang="ja"' in out and "<b>題</b>：本文" in out
+    assert "English" in out and "日本語" in out
+    text = weekly.render_text(r)
+    assert "  [English]\n  • Title: Body & more\n  [日本語]\n  • 題：本文" in text
+
+
 def test_text_and_subject():
     r = _report()
     assert weekly.subject(r) == "JEMA weekly policy summary — 3–9 Oct 2026 (1 meeting held)"
     text = weekly.render_text(r)
     assert "- Fri 9 Oct · Committee <A> 第5回 [OCCTO]" in text
     assert "  • Title: Body & more" in text
+    assert "[English]" not in text  # one language: no labels
     empty = _report(summarised=[])
     assert "no meetings held" in weekly.subject(empty)
     assert "No tracked meeting held last week has a summary yet." in weekly.render_text(empty)
+
+
+def test_a_discovered_committee_gets_its_curated_english_name_with_the_japanese_below(policy_db):
+    """Discovered committees arrive with only a Japanese name; the email used to show
+    that alone, with nothing under it but the organisation."""
+    store.upsert_discovered_committees([{
+        "key": "shorai_jukyu", "name_ja": "将来の電力需給シナリオに関する検討会", "source": "OCCTO",
+        "url": "https://www.occto.or.jp/iinkai/shorai_jukyu/index.html",
+    }], db_path=policy_db)
+    _meeting(policy_db, "shorai_jukyu", 12, TODAY - timedelta(days=1))
+    it, = _build(policy_db).held
+    assert it.name == "Study Group on Future Electricity Supply-Demand Scenarios"
+    assert it.name_ja == "将来の電力需給シナリオに関する検討会"
+
+
+def test_english_name_prefers_curated_names_over_the_stored_placeholder():
+    assert committees.english_name("santeii", "stale") == committees.committee_by_key("santeii").name_en
+    assert committees.english_name("shorai_jukyu", "") == committees.CATALOG_NAMES_EN["shorai_jukyu"]
+    assert committees.english_name("user_added_x", "Typed by hand") == "Typed by hand"
+    assert committees.english_name("user_added_x", "user_added_x") == ""  # the old key placeholder
+    assert committees.english_name("user_added_x", None) == ""
+    assert not set(committees.CATALOG_NAMES_EN) & set(committees.committee_keys())
+
+
+def test_sync_corrects_a_wrongly_scraped_japanese_name_but_not_a_user_added_one(policy_db):
+    store.upsert_discovered_committees([{
+        "key": "distributed_energy_wg", "name_ja": "省エネルギー小委員会", "source": "METI",
+        "url": "https://www.meti.go.jp/shingikai/enecho/denryoku_gas/jisedai_kiban/distributed_energy_wg/",
+    }], db_path=policy_db)
+    store.add_committee(key="plastic_wg", name_ja="手入力の名前", name_en="", url="https://x/plastic_wg/",
+                        source="METI", db_path=policy_db)
+    store.sync_committees(db_path=policy_db)
+    names = {c["key"]: c["name_ja"] for c in store.list_committees(db_path=policy_db)}
+    assert names["distributed_energy_wg"] == "分散型エネルギー推進戦略ワーキンググループ"
+    assert names["plastic_wg"] == "手入力の名前"
 
 
 def test_label_does_not_repeat_a_number_already_in_a_raw_name():

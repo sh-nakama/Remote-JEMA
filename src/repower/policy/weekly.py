@@ -13,9 +13,11 @@ when it was summarised, so the backlog catch-up cannot flood the email:
    from detection (all catalog committees), the METI calendar history and the
    energy-board feed, deduplicated.
 
-The brief is a deterministic extract of the English digest (its first "Key
-decisions" bullets, citation markers removed) — no model call. Building the report
-reads only the DB; the energy-board feed is fetched by the caller and passed in.
+Each summarised meeting carries two briefs, both deterministic extracts — no model
+call: an English one from the digest (its first "Key decisions" bullets) and a
+Japanese one from the briefing (the first bullets of its 決定事項 section), citation
+markers removed. Building the report reads only the DB; the energy-board feed is
+fetched by the caller and passed in.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ WINDOW_DAYS = 7  # the last 7 complete days (JST): sent Monday morning, Monday�
 LATE_DAYS = 21  # how long before the window a meeting may be held and still be caught up
 BRIEF_BULLETS = 3
 BRIEF_CHARS = 260
+BRIEF_CHARS_JA = 120  # a Japanese character carries roughly two English ones' worth
 
 SUMMARISED = "Summarised"
 PENDING = "Summary pending"
@@ -57,6 +60,7 @@ class WeeklyItem:
     meeting_num: int | None = None
     url: str | None = None
     brief: list[tuple[str, str]] = field(default_factory=list)  # (title, text); title may be ""
+    brief_ja: list[tuple[str, str]] = field(default_factory=list)  # same shape, from the briefing
     torimatome: bool = False
 
 
@@ -76,10 +80,22 @@ class WeeklyReport:
 
 # ── Brief extraction (pure) ──────────────────────────────────────────────────
 _CITE_RE = re.compile(r"\s*\[\d+(?:\s*[-–,]\s*\d+)*\]")
+# The Japanese briefing cites its papers inline: ［資料１ p.7］, [資料2], `[出典: 資料3]`,
+# 【出典：資料3】, （出典: `x.pdf` P.12）, （議事録 p.1）.
+_CITE_JA_RE = re.compile(
+    r"\s*(?:［[^］]*］|`?\[(?:資料|出典)[^\]]*\]`?|【(?:出典|資料)[^】]*】|[（(]出典[^）)]*[）)]"
+    r"|[（(](?:資料|議事録)[^）)]{0,15}[）)])"
+)
 _HEADING_RE = re.compile(r"^\s*#{1,6}\s*(.*?)\s*$")
 _BULLET_RE = re.compile(r"^(\s*)(?:[*\-•]|\d+[.)])\s+(.*)$")
 _TITLED_RE = re.compile(r"^\*\*(.+?)\*\*\s*[:：]?\s*(.*)$")
 _GREEK = {"alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "Delta": "Δ", "lambda": "λ", "sigma": "σ"}
+# The briefing's conclusions section: "(3) 結論・決定事項", "3. 結論および事務局提案事項" —
+# not "約定価格の決定方法".
+_CONCLUSIONS_JA_RE = re.compile(r"結論|(?:決定|確定|合意).{0,10}事項")
+_PAREN_JA_RE = re.compile(r"（[^）]*）")
+_HEADING_LEVEL_RE = re.compile(r"^\s*(#{1,6})")
+_BOLD_LINE_RE = re.compile(r"^\s*\*\*([^*]+)\*\*\s*$")  # "**【継続検討・事務局提案事項】**"
 
 
 def _clean(s: str) -> str:
@@ -90,6 +106,19 @@ def _clean(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _clean_ja(s: str) -> str:
+    return _clean(_CITE_JA_RE.sub("", s))
+
+
+def _undecided_ja(title: str) -> bool:
+    """A 継続検討 / 未確定 / bare 事務局提案 heading — not "事務局提案に対し合意が得られた事項"
+    or "決定・概ね合意された事項（事務局提案）"."""
+    t = _PAREN_JA_RE.sub("", _clean_ja(title))
+    if re.search(r"継続|未確定", t):
+        return True
+    return "提案" in t and not re.search(r"決定|確定|合意", t)
+
+
 def _truncate(s: str, n: int = BRIEF_CHARS) -> str:
     if len(s) <= n:
         return s
@@ -97,13 +126,25 @@ def _truncate(s: str, n: int = BRIEF_CHARS) -> str:
     return cut + "…"
 
 
-def _split_bullet(raw: str) -> tuple[str, str]:
+def _truncate_ja(s: str, n: int = BRIEF_CHARS_JA) -> str:
+    """No spaces to break on: back off to the last 、/。 when one is near the end."""
+    if len(s) <= n:
+        return s
+    cut = s[:n]
+    stop = max(cut.rfind("、"), cut.rfind("。"))
+    if stop >= n * 2 // 3:
+        cut = cut[:stop]
+    return cut.rstrip("、。・：: ") + "…"
+
+
+def _split_bullet(raw: str, ja: bool = False) -> tuple[str, str]:
     """``**Title**: body`` → (title, body). A title-only bullet ("**Title:**", its
     content in sub-bullets) returns an empty body for the caller to fill."""
+    clean, trunc = (_clean_ja, _truncate_ja) if ja else (_clean, _truncate)
     m = _TITLED_RE.match(raw.strip())
     if m:
-        return _clean(m.group(1)).rstrip(":： "), _truncate(_clean(m.group(2)))
-    return "", _truncate(_clean(raw))
+        return clean(m.group(1)).rstrip(":： "), trunc(clean(m.group(2)))
+    return "", trunc(clean(raw))
 
 
 def _digest_answer(digest_en_json: str | None) -> str:
@@ -115,6 +156,41 @@ def _digest_answer(digest_en_json: str | None) -> str:
         return ""
 
 
+def _bullets(lines: list[str], from_idx: int, *, stop_at_heading: bool, limit: int,
+             ja: bool = False) -> list[tuple[str, str]]:
+    """The first ``limit`` top-level bullets from ``lines[from_idx:]``.
+
+    With ``ja``, a bold-only line or top-level bullet naming undecided items (a
+    pseudo-heading inside a combined 決定事項・継続検討 section) also ends the run.
+    """
+    out: list[tuple[str, str]] = []
+    for ln in lines[from_idx:]:
+        if stop_at_heading and (_HEADING_RE.match(ln) or ln.strip() == "---"):
+            break
+        if ja and (b := _BOLD_LINE_RE.match(ln)) and _undecided_ja(b.group(1)):
+            break
+        m = _BULLET_RE.match(ln)
+        if not m:
+            # An indented continuation line: the body of a title-only parent.
+            if ln[:1].isspace() and ln.strip() and out and not out[-1][1]:
+                out[-1] = (out[-1][0], _split_bullet(ln, ja)[1])
+            continue
+        if not m.group(2).strip():
+            continue
+        if len(m.group(1).expandtabs()) >= 2:
+            # A sub-bullet: only used to fill a title-only parent.
+            if out and not out[-1][1]:
+                out[-1] = (out[-1][0], _split_bullet(m.group(2), ja)[1])
+            continue
+        if len(out) >= limit and out[-1][1]:
+            break
+        item = _split_bullet(m.group(2), ja)
+        if ja and not item[1] and _undecided_ja(item[0]):
+            break  # "- **事務局提案・継続検討事項：**" heading a group of sub-bullets
+        out.append(item)
+    return [(t, b) if b else ("", t) for t, b in out[:limit] if t or b]
+
+
 def extract_brief(answer: str, limit: int = BRIEF_BULLETS) -> list[tuple[str, str]]:
     """The first ``limit`` top-level bullets of the digest's "Key decisions" section.
 
@@ -123,38 +199,82 @@ def extract_brief(answer: str, limit: int = BRIEF_BULLETS) -> list[tuple[str, st
     bold and LaTeX delimiters are stripped; each bullet is truncated.
     """
     lines = (answer or "").splitlines()
-
-    def bullets(from_idx: int, stop_at_heading: bool) -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
-        for ln in lines[from_idx:]:
-            if stop_at_heading and (_HEADING_RE.match(ln) or ln.strip() == "---"):
-                break
-            m = _BULLET_RE.match(ln)
-            if not m or not m.group(2).strip():
-                continue
-            if len(m.group(1).expandtabs()) >= 2:
-                # A sub-bullet: only used to fill a title-only parent.
-                if out and not out[-1][1]:
-                    out[-1] = (out[-1][0], _split_bullet(m.group(2))[1])
-                continue
-            if len(out) >= limit and out[-1][1]:
-                break
-            out.append(_split_bullet(m.group(2)))
-        return [(t, b) if b else ("", t) for t, b in out[:limit] if t or b]
-
     for i, ln in enumerate(lines):
         h = _HEADING_RE.match(ln)
         if h and "key decision" in _clean(h.group(1)).lower():
-            found = bullets(i + 1, stop_at_heading=True)
+            found = _bullets(lines, i + 1, stop_at_heading=True, limit=limit)
             if found:
                 return found
-    found = bullets(0, stop_at_heading=False)
+    found = _bullets(lines, 0, stop_at_heading=False, limit=limit)
     if found:
         return found
     for para in re.split(r"\n\s*\n", answer or ""):
         text = " ".join(ln for ln in para.splitlines() if not _HEADING_RE.match(ln) and ln.strip() != "---")
         if _clean(text):
             return [("", _truncate(_clean(text)))]
+    return []
+
+
+def _decided_blocks(lines: list[str], start: int) -> list[int]:
+    """Heading indices of the section at *start* and its subsections, less the
+    undecided ones (and everything nested under them)."""
+    level = len(_HEADING_LEVEL_RE.match(lines[start]).group(1))  # type: ignore[union-attr]
+    blocks = [start]
+    skip_below: int | None = None
+    for i in range(start + 1, len(lines)):
+        h = _HEADING_RE.match(lines[i])
+        if not h:
+            continue
+        lv = len(_HEADING_LEVEL_RE.match(lines[i]).group(1))  # type: ignore[union-attr]
+        if lv <= level:
+            break
+        if skip_below is not None and lv > skip_below:
+            continue
+        skip_below = lv if _undecided_ja(h.group(1)) else None
+        if skip_below is None:
+            blocks.append(i)
+    return blocks
+
+
+def _first_paragraph_ja(lines: list[str], from_idx: int) -> str:
+    body: list[str] = []
+    for ln in lines[from_idx:]:
+        if _HEADING_RE.match(ln) or ln.strip() == "---":
+            break
+        body.append(ln)
+    for para in re.split(r"\n\s*\n", "\n".join(body)):
+        text = _clean_ja(" ".join(para.splitlines()))
+        if text and not text.startswith("出典") and not _BOLD_LINE_RE.match(para.strip()):
+            return text
+    return ""
+
+
+def extract_brief_ja(briefing: str, limit: int = BRIEF_BULLETS) -> list[tuple[str, str]]:
+    """The first ``limit`` top-level bullets of the Japanese briefing's decisions.
+
+    The briefing prompt asks for a "(3) 結論・決定事項" section that keeps decisions
+    apart from 事務局提案・継続検討 items. Its wording and layout vary — subsections,
+    bold pseudo-headings, or a bullet heading each group — so this walks that section
+    and skips whatever is marked undecided. When the decided part has no bullets (a
+    hearing-only meeting says in prose that nothing was decided) its first paragraph
+    stands in. No such section → no brief: falling back to the first bullets anywhere
+    would surface the agenda list, which reads like decisions.
+    """
+    lines = (briefing or "").splitlines()
+    covered: set[int] = set()
+    for start, ln in enumerate(lines):
+        h = _HEADING_RE.match(ln)
+        if start in covered or not h or not _CONCLUSIONS_JA_RE.search(_PAREN_JA_RE.sub("", _clean_ja(h.group(1)))):
+            continue
+        blocks = _decided_blocks(lines, start)
+        covered.update(blocks)
+        for b in blocks:
+            found = _bullets(lines, b + 1, stop_at_heading=True, limit=limit, ja=True)
+            if found:
+                return found
+        for b in blocks:
+            if text := _first_paragraph_ja(lines, b + 1):
+                return [("", _truncate_ja(text))]
     return []
 
 
@@ -243,6 +363,7 @@ def build_report(
         it.torimatome = m["has_torimatome"]
         if it.tracked and m["state"] == "done":
             it.brief = extract_brief(_digest_answer(m["digest_en_json"]))
+            it.brief_ja = extract_brief_ja(m["briefing_md"])
             summarised.append(it)
         else:
             held.append(it)
@@ -298,6 +419,7 @@ def build_report(
         it = item(m["committee_key"], day=m["meeting_date"], num=m["meeting_num"], status=SUMMARISED)
         it.torimatome = m["has_torimatome"]
         it.brief = extract_brief(_digest_answer(m["digest_en_json"]))
+        it.brief_ja = extract_brief_ja(m["briefing_md"])
         late.append(it)
 
     return WeeklyReport(
@@ -335,6 +457,12 @@ _EMPTY_SUMMARISED = "No tracked meeting held last week has a summary yet."
 _EMPTY_HELD = "No other committee meetings were recorded last week."
 
 
+def _briefs(it: WeeklyItem) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
+    """(label, lang, title separator, bullets) for each language that has a brief."""
+    out = [("English", "en", ": ", it.brief), ("日本語", "ja", "：", it.brief_ja)]
+    return [b for b in out if b[3]]
+
+
 def render_text(report: WeeklyReport) -> str:
     out = ["JEMA weekly policy summary", f"Committee meetings held {fmt_range(report.start, report.end)}", ""]
 
@@ -351,8 +479,12 @@ def render_text(report: WeeklyReport) -> str:
             out.append(f"- {_fmt_day(it.date)} · {_label(it)} [{it.org}]{flag}{status}")
             if it.name_ja:
                 out.append(f"  {it.name_ja}")
-            for t, body in it.brief:
-                out.append(f"  • {t}: {body}" if t else f"  • {body}")
+            briefs = _briefs(it)
+            for label, _, sep, bullets in briefs:
+                if len(briefs) > 1:
+                    out.append(f"  [{label}]")
+                for t, body in bullets:
+                    out.append(f"  • {t}{sep}{body}" if t else f"  • {body}")
             if it.url:
                 out.append(f"  {it.url}")
         out.append("")
@@ -415,10 +547,15 @@ def render_html(report: WeeklyReport) -> str:
                          + (f" {pill(it.status)}" if with_status else "") + "</div>")
             sub = meta + (f" · {e(it.name_ja)}" if it.name_ja else "")
             parts.append(f'<div style="color:#6b7280;font-size:12px">{sub}</div>')
-            if it.brief:
-                parts.append('<ul style="margin:6px 0 0;padding-left:20px">')
-                for t, body in it.brief:
-                    head = f"<b>{e(t)}</b>: " if t else ""
+            briefs = _briefs(it)
+            for label, lang, sep, bullets in briefs:
+                if len(briefs) > 1:
+                    parts.append(f'<div style="margin:8px 0 0;color:#6b7280;font-size:11px;font-weight:600;'
+                                 f'letter-spacing:.04em">{e(label)}</div>')
+                top = "2px" if len(briefs) > 1 else "6px"
+                parts.append(f'<ul lang="{lang}" style="margin:{top} 0 0;padding-left:20px">')
+                for t, body in bullets:
+                    head = f"<b>{e(t)}</b>{sep}" if t else ""
                     parts.append(f'<li style="margin:2px 0">{head}{e(body)}</li>')
                 parts.append("</ul>")
             parts.append("</div>")
@@ -429,5 +566,6 @@ def render_html(report: WeeklyReport) -> str:
     if report.undated:
         parts.append(f'<p style="color:#6b7280;font-size:12px;margin-top:20px">{e(_undated_note(report.undated))}</p>')
     parts.append('<p style="color:#9ca3af;font-size:12px;margin-top:24px">Sent by the weekly-summary '
-                 "workflow. Briefs are extracts of each meeting's English digest.</p></div>")
+                 "workflow. Briefs are extracts of each meeting's English digest and Japanese "
+                 "briefing.</p></div>")
     return "\n".join(parts)
