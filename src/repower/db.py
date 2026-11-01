@@ -208,6 +208,11 @@ class PolicyCommittee(Base):
     #   last_fetch_at      — written on *every* pass, success or failure
     #   last_ok_at         — last genuinely successful fetch (200/304)
     #   consecutive_failures — reset to 0 on success; separates flaky from dead
+    # When this committee's index page was last read *in full* for its ※ notes (EGC only; see
+    # ``PolicyMeeting.index_note``). A conditional check that comes back 304 carries no body and
+    # so reads nothing, so this is what says how stale the notes are: NULL = never read, which is
+    # also what makes the first ``detect`` after the column appears backfill them.
+    index_notes_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     last_fetch_status: Mapped[str | None] = mapped_column(String(16))
     last_fetch_kind: Mapped[str | None] = mapped_column(String(32))
     last_fetch_detail: Mapped[str | None] = mapped_column(Text)
@@ -595,16 +600,20 @@ def _migrate_add_policy_citations(engine) -> None:
 
 
 def _migrate_add_policy_index_note(engine) -> None:
-    """Add ``policy_meeting.index_note`` (additive; NULL = nothing noted)."""
+    """Add ``policy_meeting.index_note`` and ``policy_committee.index_notes_at`` (additive; NULL =
+    nothing noted / never read)."""
     from sqlalchemy import inspect
     from sqlalchemy import text as sql_text
     insp = inspect(engine)
-    if "policy_meeting" not in insp.get_table_names():
-        return
-    if "index_note" in {c["name"] for c in insp.get_columns("policy_meeting")}:
-        return
+    adds = {
+        "policy_meeting": ("index_note", "ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"),
+        "policy_committee": ("index_notes_at",
+                             "ALTER TABLE policy_committee ADD COLUMN index_notes_at DATETIME"),
+    }
     with engine.begin() as conn:
-        conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"))
+        for table, (col, ddl) in adds.items():
+            if table in insp.get_table_names() and col not in {c["name"] for c in insp.get_columns(table)}:
+                conn.execute(sql_text(ddl))
 
 
 def _migrate_add_policy_minutes_watch(engine) -> None:
