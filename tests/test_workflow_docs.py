@@ -26,9 +26,9 @@ def _crons(text: str) -> list[str]:
 
 
 def _jst(cron: str) -> str:
-    """Clock time in JST of a cron that fires at a fixed hour and minute (all of ours do)."""
-    minute, hour = cron.split()[:2]
-    return f"{(int(hour) + 9) % 24:02d}:{int(minute):02d}"
+    """Clock times in JST of a cron that fires at fixed hours and a fixed minute (all of ours do)."""
+    minute, hours = cron.split()[:2]
+    return ", ".join(f"{(int(hour) + 9) % 24:02d}:{int(minute):02d}" for hour in hours.split(","))
 
 
 def _commands(text: str) -> list[str]:

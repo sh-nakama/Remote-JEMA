@@ -752,7 +752,14 @@ fixed.
   failure, and keep `-s` so curl never prints the webhook URL, whose path is the secret.
 - **The weekly email waits for the morning's summaries by clock alone.** Nothing links the two
   workflows: its 12:00 JST slot only leaves room for a summaries run that GitHub starts hours late.
-  Raising `DAILY_RUN_CAP` lengthens that run, so check the gap still holds.
+  Raising `DAILY_RUN_CAP` lengthens that run, so check the gap still holds. On Mondays the
+  11:30 JST policy slot may also still be running at 12:00, and the email cannot see what it has
+  not pushed yet.
+- **`policy.yml` runs about every 5 hours, not exactly.** Five slots leave one 4-hour gap, and
+  GitHub starts each one hours late, so two runs can fall closer together than NotebookLM's rate
+  limit needs. Such a run stops on the limit rather than failing. `DAILY_RUN_CAP` is now the cap
+  per run, despite its name. Each run also repeats `policy detect` and `resolve-citations` against
+  the WAF-guarded METI hosts, so watch for more blocks.
 - **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
   translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
   when the meeting is done. So meetings summarised earlier have none until they are summarised

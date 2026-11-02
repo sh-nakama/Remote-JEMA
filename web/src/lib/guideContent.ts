@@ -43,8 +43,8 @@ export const SCREENS_GUIDE: GuideSection[] = [
   {
     hEn: 'Data freshness & the daily runs', hJa: 'データ鮮度と日次実行',
     items: [
-      { en: 'GitHub Actions refresh the data every day (market data around 05:30 JST, policy summaries around 06:30 JST), sync it to a private Hugging Face dataset and rebuild the public site. GitHub can start scheduled jobs hours late, so a slightly late update is normal.',
-        ja: 'GitHub Actionsが毎日データを更新します（市場データは約05:30 JST、政策要約は約06:30 JST）。更新は非公開のHugging Faceデータセットに同期され、公開サイトが再構築されます。GitHubは定期ジョブの開始が数時間遅れることがあるため、多少の遅れは通常です。' },
+      { en: 'GitHub Actions refresh the data every day (market data around 05:30 JST, policy summaries about every 5 hours), sync it to a private Hugging Face dataset and rebuild the public site. GitHub can start scheduled jobs hours late, so a slightly late update is normal.',
+        ja: 'GitHub Actionsが毎日データを更新します（市場データは約05:30 JST、政策要約は約5時間ごと）。更新は非公開のHugging Faceデータセットに同期され、公開サイトが再構築されます。GitHubは定期ジョブの開始が数時間遅れることがあるため、多少の遅れは通常です。' },
       { en: 'The Refresh button on the freshness card re-reads the latest published snapshots. Run locally, it does a real refresh instead: recover gaps, scrape every source, re-export.',
         ja: 'データ鮮度カードの「更新」は、最新の公開スナップショットを再読み込みします。ローカルで実行している場合は、欠損の補完、全ソースの取得、再エクスポートまでを実行します。' },
     ],
@@ -163,8 +163,8 @@ export const POLICY_GUIDE: GuideSection[] = [
         ja: '再開 ⚿: 途中で止まった会合のみを処理（中断・レート制限後に残ったもの）。中断地点から再開し、対象が無ければ何もしません。' },
       { en: 'Both Summarise buttons need a NotebookLM login. In the local app use Sign in to NotebookLM in the Commands pane (or `notebooklm login` in a terminal).',
         ja: 'いずれの要約ボタンもNotebookLMへのログインが必要です。ローカルアプリでは「コマンド」パネルの「NotebookLMにログイン」を使います（またはターミナルで `notebooklm login`）。' },
-      { en: 'On the hosted setup summarising runs in the daily policy job (about 06:30 JST; GitHub can start scheduled jobs hours late). Locally you can run it on demand.',
-        ja: 'ホスト環境では日次のポリシージョブ（約06:30 JST。GitHubは定期ジョブの開始が数時間遅れることがあります）で要約されます。ローカルではいつでも実行できます。' },
+      { en: 'On the hosted setup summarising runs in the policy job (about every 5 hours; GitHub can start scheduled jobs hours late). Locally you can run it on demand.',
+        ja: 'ホスト環境ではポリシージョブ（約5時間ごと。GitHubは定期ジョブの開始が数時間遅れることがあります）で要約されます。ローカルではいつでも実行できます。' },
     ],
   },
   {
@@ -213,9 +213,9 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     writes: true,
   },
   {
-    file: 'policy.yml', cron: '30 21 * * *', jst: '06:30',
+    file: 'policy.yml', cron: '30 2,7,12,17,21 * * *', jst: '11:30, 16:30, 21:30, 02:30, 06:30',
     nameEn: 'Policy summaries', nameJa: '政策の要約',
-    whenEn: 'Every day, 06:30 JST', whenJa: '毎日 06:30 JST',
+    whenEn: 'About every 5 hours', whenJa: '約5時間ごと',
     doesEn: 'Detects new meetings, then — only if the NotebookLM login is valid — resumes stuck meetings, summarises up to 12 and builds the digest. Then, login or not, it resolves the source pages behind citations for up to 5 earlier meetings. A stale login skips the summaries, raises an alert and ends the run as failed.',
     doesJa: '新規会合を検出し、NotebookLMのログインが有効な場合のみ、中断分の再開、最大12件の要約、ダイジェスト作成を実行。その後、ログインの有無にかかわらず、過去の会合最大5件の引用元ページを特定します。ログインが切れていると要約を省略し、アラートを出して実行を失敗扱いで終了します。',
     writes: true,
