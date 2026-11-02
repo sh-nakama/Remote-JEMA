@@ -371,7 +371,7 @@ class PolicyMaterial(Base):
 # (e.g. a threaded scrape, or Streamlit's worker threads) can't race on cache
 # population or run the migration twice.
 _ENGINES: dict[str, Engine] = {}
-_INITIALIZED: set[str] = set()
+_INITIALIZED: set[str] = set()  # paths create_all + migrations have run on; dispose_engines() empties it
 _LOCK = threading.Lock()
 
 
@@ -389,10 +389,17 @@ def get_engine(db_path: str | None = None) -> Engine:
 
 
 def dispose_engines() -> None:
-    """Close pooled connections, e.g. once a pull has replaced the DB file under them."""
+    """Close pooled connections, e.g. once a pull has replaced the DB file under them.
+
+    Also forgets which paths ``init_db`` has set up. A replaced file is a different database
+    (the Hub copy can predate a column the code reads, e.g. ``policy_meeting.index_note``),
+    so the next ``init_db`` must run ``create_all`` and the migrations on it again; both are
+    idempotent, so doing it for a file that did not need it is harmless.
+    """
     with _LOCK:
         for engine in _ENGINES.values():
             engine.dispose()
+        _INITIALIZED.clear()
 
 
 def init_db(db_path: str | None = None) -> Engine:

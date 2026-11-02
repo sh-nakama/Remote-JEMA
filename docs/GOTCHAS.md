@@ -277,6 +277,12 @@ fixed.
   `hf_hub_download` falls back to overwriting the file in place. `pull_db_from_hf` therefore
   calls `db.dispose_engines()` before and after downloading. That only covers this process —
   stop `web-api` (or anything else holding the DB) before a local `pull-hf`.
+  `dispose_engines()` also empties `db._INITIALIZED`, so the next `init_db` re-runs `create_all`
+  and the migrations on the new file. A Hub copy can predate a column the code reads
+  (`policy_meeting.index_note` did), and until this every query then raised "no such column"
+  until a restart. The Space calls `init_db()` right after its pull, because its cached
+  `_db_session` runs it only once per process; jobs that replace the DB under `web-api`
+  (`pull-hf`, `refresh-web`) are listed in `web_api._REPLACES_DB`.
 - **`repower sync` (run by `web-api` on start) is the merge-aware pull; `pull-hf` stays a blind
   replace.** It reads the Hub commit + per-file LFS sha256 in one `dataset_info` call and compares
   them with `data/.hf_sync.json` (written by `pull-hf`, `push-hf` and `sync`; no stamp = hash the

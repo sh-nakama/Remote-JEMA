@@ -301,6 +301,13 @@ def _build_policy_argv(cmd: str, params: dict, db_path: str | None) -> list[str]
     return commands.build_argv(cmd, params, known)
 
 
+# Jobs that leave a different database in the live file, under this server's pooled connections:
+# ``pull-hf`` outright, ``refresh-web`` through the sync it starts with. Once one finishes the
+# engines are disposed, which also has the next ``init_db`` migrate the new contents — a Hub
+# copy can predate columns the code reads.
+_REPLACES_DB = frozenset({"pull-hf", "refresh-web"})
+
+
 def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S, cmd_id: str | None = None) -> None:
     tail: deque[str] = deque(maxlen=_OUTPUT_MAX)
     timed_out = threading.Event()
@@ -350,7 +357,7 @@ def _run_command_job(argv: list[str], timeout: int = _JOB_TIMEOUT_S, cmd_id: str
         with _job_lock:
             _job.update(state="error", finished_at=_now(), error=str(e), output=list(tail))
     finally:
-        if cmd_id == "pull-hf":
+        if cmd_id in _REPLACES_DB:
             dispose_engines()  # reopen on the replaced file
         if cmd_id:
             with _job_lock:

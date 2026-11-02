@@ -395,3 +395,44 @@ def test_a_sync_lands_under_another_process_holding_the_db_open(synced):
             ("from the cron",)]
     finally:
         reader.close()
+
+
+# ── A replaced DB is migrated by the next init_db ────────────────────────────────
+
+
+def _has_index_note(db: Path) -> bool:
+    return any(row[1] == "index_note" for row in _sql(db, "PRAGMA table_info(policy_meeting)"))
+
+
+def test_a_pull_of_an_older_schema_is_migrated_by_the_next_init_db(hub, tmp_path):
+    """The Hub's copy can predate a column the code reads (``policy_meeting.index_note``) until the
+    next cron push. init_db is once-per-path, so the pull has to leave it free to run again."""
+    from repower.db import init_db
+
+    older = _policy_db(tmp_path / "older.db")
+    _sql(older, "ALTER TABLE policy_meeting DROP COLUMN index_note")
+    assert not _has_index_note(older)
+    local = hub.local["repower.db"]
+    init_db(str(local))  # this process already set the file up, as the Space does at start
+    hub.remote = {"repower.db": older.read_bytes()}
+
+    hf_sync.pull_db_from_hf()
+    init_db(str(local))
+
+    assert hub.downloads == ["repower.db"]
+    assert _has_index_note(local)
+
+
+def test_a_sync_of_an_older_schema_is_migrated_by_the_next_init_db(synced):
+    from repower.db import init_db
+
+    local = synced.local["repower.db"]
+    init_db(str(local))  # web-api has set the file up by the time a refresh syncs it
+    _cron_writes(synced, "ALTER TABLE policy_meeting DROP COLUMN index_note")
+    assert not _has_index_note(synced.src)
+
+    result = hf_sync.sync_from_hf()
+    init_db(str(local))
+
+    assert result.downloaded == ["repower.db"]
+    assert _has_index_note(local)

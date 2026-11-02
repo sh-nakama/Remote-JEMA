@@ -13,8 +13,13 @@ st.set_page_config(page_title="RePower — Tokyo Market", layout="wide", page_ic
 def _pull_db() -> str | None:
     """Pull the DB for the whole process; returns the failure text, if any."""
     try:
+        from repower.db import init_db
         from repower.hf_sync import pull_db_from_hf
         pull_db_from_hf()
+        # The Hub copy can predate a column the code reads (a migration ships before the next
+        # cron push), and the dashboard's cached session only calls init_db once per process,
+        # so migrate on every pull rather than leave the new file for a query to trip over.
+        init_db()
     except Exception as exc:  # noqa: BLE001
         return str(exc)
     return None
