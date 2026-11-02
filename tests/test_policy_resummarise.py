@@ -310,6 +310,100 @@ def test_a_failed_english_digest_does_not_fail_the_meeting(monkeypatch, policy_d
     assert not any(q.startswith(_JAPANESE_PREFIX) for q in asked)
 
 
+def _rerun_with_a_digest_on_file(db: str) -> None:
+    _summarised(db, KEY, 9, [_mat(9, "gijishidai", "agenda")])
+    _update(db, KEY, 9, digest_en_json='{"answer": "OLD EN"}', digest_ja_json='{"answer": "OLD JA"}',
+            citations_json='{"items": []}')
+    store.add_late_materials(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+
+
+def _ask_english_gives_nothing(monkeypatch) -> None:
+    monkeypatch.setattr(pipeline.nb, "ask", lambda nb_id, question, **k: (
+        {"answer": ""} if question == pipeline._ENGLISH_DIGEST_Q else {"answer": "ok"}))
+
+
+@pytest.mark.parametrize("failure", ["error", "empty"])
+def test_a_rerun_without_a_new_english_digest_keeps_the_whole_old_set(monkeypatch, policy_db, tmp_path, failure):
+    """The digest, its translation and its citations stay together, beside the new briefing,
+    with a flag saying so. The re-run itself worked, so it is not queued again."""
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 新しい要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    if failure == "error":
+        _ask_failing_at(monkeypatch, "english", pipeline.nb.NotebookLMError("nope"))
+    else:
+        _ask_english_gives_nothing(monkeypatch)
+    _rerun_with_a_digest_on_file(db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    m = _row(db, KEY, 9)
+    assert m.state == "done" and m.briefing_md.startswith("## 新しい要約")
+    assert m.digest_en_json == '{"answer": "OLD EN"}' and m.digest_ja_json == '{"answer": "OLD JA"}'
+    assert m.citations_json == '{"items": []}'
+    assert m.quality_flag == "digest_stale" and m.resummarise_requested is False
+
+
+def test_a_new_english_digest_does_not_keep_the_old_translation(monkeypatch, policy_db, tmp_path):
+    """The old Japanese is a translation of different bullets, and may even match their count.
+    The weekly email falls back to a labelled extract of the briefing instead."""
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, "japanese", pipeline.nb.NotebookLMError("nope"))
+    _rerun_with_a_digest_on_file(db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    m = _row(db, KEY, 9)
+    assert json.loads(m.digest_en_json)["answer"] == "EN BODY"
+    assert m.digest_ja_json is None and m.citations_json != '{"items": []}'
+    assert m.quality_flag is None
+
+
+def test_the_stale_digest_flag_goes_once_a_rerun_gets_a_digest(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, "english", pipeline.nb.NotebookLMError("nope"))
+    _rerun_with_a_digest_on_file(db)
+    pipeline.run([KEY], db_path=db)
+    assert _row(db, KEY, 9).quality_flag == "digest_stale"
+
+    _ask_failing_at(monkeypatch, "none", pipeline.nb.NotebookLMError("unused"))
+    store.request_generation(KEY, 9, db_path=db)
+    pipeline.run([KEY], db_path=db)
+
+    m = _row(db, KEY, 9)
+    assert m.quality_flag is None and json.loads(m.digest_en_json)["answer"] == "EN BODY"
+
+
+def test_a_first_summary_without_a_digest_has_nothing_stale_to_flag(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, "english", pipeline.nb.NotebookLMError("nope"))
+    store.record_meeting(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    m = _row(db, KEY, 9)
+    assert m.digest_en_json is None and m.quality_flag is None
+
+
+def test_a_briefing_problem_outranks_the_stale_digest_flag(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "短い")
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, "english", pipeline.nb.NotebookLMError("nope"))
+    _rerun_with_a_digest_on_file(db)
+
+    pipeline.run([KEY], db_path=db)
+
+    m = _row(db, KEY, 9)
+    assert m.quality_flag == "short_output" and m.digest_en_json == '{"answer": "OLD EN"}'
+
+
 @pytest.mark.parametrize("question", _DIGEST_QUESTIONS)
 @pytest.mark.parametrize(("exc", "reason"), _HALTING_ERRORS, ids=[r for _, r in _HALTING_ERRORS])
 def test_an_account_error_in_a_digest_question_leaves_a_rerun_as_it_was(

@@ -1413,6 +1413,80 @@ def test_synthesize_committee_recovers_stalled_report(monkeypatch, tmp_path):
     assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is False
 
 
+def _synthesis_with_an_overview_on_file(monkeypatch, tmp_path, key: str) -> str:
+    """A committee with one new meeting to fold in and an earlier report + overview stored."""
+    db = str(tmp_path / "t.db")
+    store.sync_committees(db_path=db)
+    monkeypatch.setattr(store, "POLICY_DIR", tmp_path / "policy")
+    store.record_meeting(key, 4, _docs(4), db_path=db)
+    mid = store.pending_meetings(key, db_path=db)[0]["id"]
+    store.update_meeting(mid, db_path=db, state="done", briefing_md="briefing 4")
+    store.update_committee(key, db_path=db, synthesis_notebook_id="nb-123",
+                           running_summary_md="old report", running_digest_en_md="old overview")
+    monkeypatch.setattr(nb_mod, "list_sources", lambda *a, **k: [])
+    monkeypatch.setattr(nb_mod, "add_source", lambda *a, **k: "src-1")
+    monkeypatch.setattr(nb_mod, "generate_report", lambda *a, **k: "task-1")
+    monkeypatch.setattr(nb_mod, "wait_artifact", lambda *a, **k: True)
+
+    def fake_download(nb_id, task_id, out):
+        Path(out).write_text("new report", encoding="utf-8")
+        return True
+
+    monkeypatch.setattr(nb_mod, "download_report", fake_download)
+    return db
+
+
+def _raises(exc):
+    def fail(*a, **k):
+        raise exc
+    return fail
+
+
+@pytest.mark.parametrize("ask", [_raises(nb_mod.NotebookLMError("nope")), lambda *a, **k: {"answer": ""}],
+                         ids=["error", "empty"])
+def test_a_failed_overview_question_keeps_the_earlier_overview(monkeypatch, tmp_path, ask):
+    key = "emissions_trading"
+    db = _synthesis_with_an_overview_on_file(monkeypatch, tmp_path, key)
+    monkeypatch.setattr(nb_mod, "ask", ask)
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+
+    row = store.get_committee(key, db_path=db)
+    assert row.running_summary_md == "new report" and row.running_digest_en_md == "old overview"
+
+
+def test_a_new_overview_replaces_the_earlier_one(monkeypatch, tmp_path):
+    key = "emissions_trading"
+    db = _synthesis_with_an_overview_on_file(monkeypatch, tmp_path, key)
+    monkeypatch.setattr(nb_mod, "ask", lambda *a, **k: {"answer": "new overview"})
+
+    assert pipeline.synthesize_committee(committee_by_key(key), db_path=db) is True
+
+    assert store.get_committee(key, db_path=db).running_digest_en_md == "new overview"
+
+
+@pytest.mark.parametrize(("exc", "reason"), [
+    (nb_mod.NotebookLMRateLimitError("quota"), "rate_limited"),
+    (nb_mod.NotebookLMTimeout("slow"), "timed_out"),
+    (nb_mod.NotebookLMAuthError("lapsed"), "auth_expired"),
+])
+def test_an_account_error_in_the_overview_question_saves_the_report_and_stops_the_run(
+        monkeypatch, tmp_path, exc, reason):
+    """The report is already paid for, so it is saved first; the error then stops the round."""
+    key = "emissions_trading"
+    db = _synthesis_with_an_overview_on_file(monkeypatch, tmp_path, key)
+    monkeypatch.setattr(nb_mod, "ask", _raises(exc))
+    monkeypatch.setattr(nb_mod, "require_auth", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "stalled_synthesis_committees", lambda **k: [key])
+
+    assert pipeline.run([key], db_path=db)["stopped_early"] == reason
+
+    row = store.get_committee(key, db_path=db)
+    assert row.running_summary_md == "new report" and row.running_digest_en_md == "old overview"
+    assert row.source_count == 1
+    assert store.meetings_for_synthesis(key, db_path=db) == []  # folded in: not added twice
+
+
 def test_synthesize_committee_rolls_over_at_source_cap(monkeypatch, tmp_path):
     """At the NotebookLM source cap the synthesis continues in a NEW notebook
     instead of dropping the briefings: the full notebook is left untouched, the

@@ -803,6 +803,7 @@ const FLAG_TEXT: Record<string, [string, string]> = {
   listing_blocked: ['the committee page could not be read — will be retried', '委員会ページを読めませんでした（再試行されます）'],
   ocr_suspect: ['sources look image-only — the briefing may be thin', '画像PDFの可能性 — 要約が薄い場合があります'],
   short_output: ['the briefing came back unusually short', '要約が異常に短いです'],
+  digest_stale: ['the digest is older than the briefing — its update failed', 'ダイジェストは要約より古いものです（更新に失敗しました）'],
 }
 
 // http_cache FETCH_KINDS, condensed from `repower policy doctor`'s remedies.
