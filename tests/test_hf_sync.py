@@ -9,16 +9,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
+from huggingface_hub.errors import HfHubHTTPError
 
 from repower import hf_sync
 
 _NAMES = ("repower.db", "eprx_balancing.parquet", "eprx_tieline.parquet")
+
+
+def _http_error(status: int) -> HfHubHTTPError:
+    request = httpx.Request("POST", "https://hub.invalid/commit/main")
+    return HfHubHTTPError(f"{status} from the Hub", response=httpx.Response(status, request=request))
 
 
 @pytest.fixture
@@ -30,8 +38,14 @@ def hub(tmp_path, monkeypatch):
         local={name: tmp_path / name for name in _NAMES},
         hub_calls=[],  # every create_repo / create_commit, in order
         commits=[],  # {repo filename: bytes} per create_commit
-        parents=[],  # parent_commit passed to each create_commit
+        parents=[],  # parent_commit of each create_commit that landed
+        attempted_parents=[],  # parent_commit of every create_commit, refused or not
         downloads=[],  # repo filenames, per hf_hub_download
+        messages=[],  # commit_message of each create_commit that landed
+        history={},  # commit sha -> {repo filename: bytes}, for reads at a revision
+        unreadable=0,  # how many dataset_info calls fail before they work again
+        git_blobs=set(),  # repo filenames kept as plain git blobs, with no LFS sha256
+        before_commit=None,  # runs once, as the next create_commit reaches the Hub
     )
     # The commit sha is a digest of the contents, so any change to `remote` moves the head.
     state.head = lambda: hashlib.sha1(repr(sorted(state.remote.items())).encode()).hexdigest()
@@ -42,24 +56,35 @@ def hub(tmp_path, monkeypatch):
 
         def dataset_info(self, repo_id, *, revision=None, files_metadata=False, **_):
             state.hub_calls.append("dataset_info")
-            return SimpleNamespace(sha=state.head(), siblings=[
-                SimpleNamespace(rfilename=n, blob_id=None,
-                                lfs=SimpleNamespace(sha256=hashlib.sha256(b).hexdigest()))
-                for n, b in state.remote.items()
+            if state.unreadable:
+                state.unreadable -= 1
+                raise OSError("503 Service Unavailable")
+            state.history[state.head()] = dict(state.remote)
+            sha = revision or state.head()
+            return SimpleNamespace(sha=sha, siblings=[
+                SimpleNamespace(rfilename=n, blob_id=hashlib.sha1(b).hexdigest(),
+                                lfs=None if n in state.git_blobs
+                                else SimpleNamespace(sha256=hashlib.sha256(b).hexdigest()))
+                for n, b in state.history[sha].items()
             ])
 
         def create_repo(self, **_):
             state.hub_calls.append("create_repo")
 
-        def create_commit(self, *, operations, parent_commit=None, **_):
+        def create_commit(self, *, operations, commit_message="", parent_commit=None, **_):
             state.hub_calls.append("create_commit")
+            state.attempted_parents.append(parent_commit)
+            if state.before_commit is not None:
+                hook, state.before_commit = state.before_commit, None
+                hook()
             if parent_commit is not None and parent_commit != state.head():
-                raise RuntimeError("412 Precondition Failed: the branch moved")
+                raise _http_error(412)
             # The DB snapshot lives in a temp dir that is gone once the push returns.
             files = {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations}
             state.commits.append(files)
             state.remote.update(files)
             state.parents.append(parent_commit)
+            state.messages.append(commit_message)
             return SimpleNamespace(oid=state.head())
 
     def fake_download(*, repo_id, repo_type, filename, token, local_dir, revision=None):
@@ -198,6 +223,177 @@ def test_push_refuses_a_damaged_db_before_touching_the_hub(hub):
         hf_sync.push_db_to_hf()
 
     assert hub.hub_calls == []
+
+
+# ── push: a Parquet the Hub already holds stays out of the upload, never out of the tree ──
+
+
+def _with_parquets(hub, *, balancing=b"bal", tieline=b"tie") -> None:
+    """The Hub holds a DB and both Parquets; the local Parquets hold the given bytes."""
+    hub.remote = {"repower.db": b"old db", "eprx_balancing.parquet": b"bal", "eprx_tieline.parquet": b"tie"}
+    _make_db(hub.local["repower.db"], ["a"])
+    hub.local["eprx_balancing.parquet"].write_bytes(balancing)
+    hub.local["eprx_tieline.parquet"].write_bytes(tieline)
+
+
+def test_push_uploads_only_the_parquet_that_changed_and_names_only_what_it_uploaded(hub, tmp_path, caplog):
+    _with_parquets(hub, tieline=b"tie v2")
+    head = hub.head()
+
+    with caplog.at_level(logging.INFO, logger=hf_sync.logger.name):
+        hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [{"repower.db", "eprx_tieline.parquet"}]
+    assert hub.parents == [head]  # the revision the omitted file was compared with
+    assert hub.messages == ["Update repower.db, eprx_tieline.parquet"]
+    assert "Pushed repower.db, eprx_tieline.parquet" in caplog.messages
+    assert "Skip push (unchanged on the Hub): eprx_balancing.parquet" in caplog.messages
+    # The omitted file is still in the tree, next to the DB and the Parquet that changed.
+    assert _rows(hub.remote["repower.db"], tmp_path) == ["a"]
+    assert hub.remote["eprx_balancing.parquet"] == b"bal"
+    assert hub.remote["eprx_tieline.parquet"] == b"tie v2"
+
+
+def test_a_push_with_no_changed_parquet_uploads_the_db_alone(hub):
+    _with_parquets(hub)
+
+    hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [{"repower.db"}]
+    assert hub.messages == ["Update repower.db"]
+
+
+def test_a_push_with_nothing_omitted_stays_last_write_wins(hub):
+    _with_parquets(hub, balancing=b"bal v2", tieline=b"tie v2")
+
+    hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [set(_NAMES)]
+    assert hub.parents == [None]
+
+
+def test_a_parquet_kept_as_a_git_blob_is_uploaded_since_it_has_no_sha256_to_compare(hub):
+    _with_parquets(hub)
+    hub.git_blobs = {"eprx_balancing.parquet"}
+
+    hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [{"repower.db", "eprx_balancing.parquet"}]
+
+
+def test_the_stamp_after_a_push_lists_the_omitted_parquet(synced):
+    synced.remote["eprx_balancing.parquet"] = b"bal"
+    synced.local["eprx_balancing.parquet"].write_bytes(b"bal")
+    hf_sync.sync_from_hf()
+    stamp_path = hf_sync.stamp_path(synced.local["repower.db"])
+    data_commit = hf_sync.read_stamp(stamp_path)["data_commit"]
+    _sql(synced.local["repower.db"], "UPDATE policy_committee SET priority = 2 WHERE committee_key = 'santeii'")
+
+    pushed = hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in synced.commits] == [{"repower.db"}]
+    stamp = hf_sync.read_stamp(stamp_path)
+    assert stamp["commit"] == pushed == synced.head()
+    assert stamp["data_commit"] == data_commit
+    assert stamp["files"]["eprx_balancing.parquet"] == hashlib.sha256(b"bal").hexdigest()
+    assert stamp["files"]["repower.db"] == hashlib.sha256(synced.remote["repower.db"]).hexdigest()
+    # Nothing looks stale to the next start, and the Hub already has the edit.
+    synced.downloads.clear()
+    result = hf_sync.sync_from_hf()
+    assert synced.downloads == [] and result.downloaded == []
+    assert result.edits.describe() == []
+
+
+def test_sync_push_leaves_out_an_unchanged_parquet_on_the_commit_it_synced_to(synced):
+    synced.remote["eprx_balancing.parquet"] = b"bal"
+    synced.local["eprx_balancing.parquet"].write_bytes(b"bal")
+    _sql(synced.local["repower.db"], "UPDATE policy_committee SET priority = 2 WHERE committee_key = 'santeii'")
+    head = synced.head()
+
+    result = hf_sync.sync_from_hf(push=True)
+
+    assert [set(c) for c in synced.commits] == [{"repower.db"}]
+    assert synced.parents == [head]
+    assert result.pushed == synced.head()
+    assert synced.remote["eprx_balancing.parquet"] == b"bal"
+
+
+def test_a_parent_push_compares_with_the_parent_and_is_refused_once_the_hub_moved(hub):
+    """The local Parquet matches the parent, not the head: the push must not land on a
+    head whose Parquet its DB's ETags never vouched for."""
+    _with_parquets(hub)
+    parent = hub.head()
+    hf_sync.remote_revision(hf_sync.HfApi(), None)  # the read sync_from_hf made at that commit
+    hub.remote["eprx_balancing.parquet"] = b"a cron's newer rows"
+
+    with pytest.raises(HfHubHTTPError):
+        hf_sync.push_db_to_hf(parent_commit=parent)
+
+    assert hub.attempted_parents == [parent] and hub.commits == []
+    assert hub.remote["eprx_balancing.parquet"] == b"a cron's newer rows"
+
+
+def test_a_parent_push_is_refused_when_the_hub_moves_during_the_upload(hub):
+    _with_parquets(hub)
+    parent = hub.head()
+    hub.before_commit = lambda: hub.remote.update({"eprx_balancing.parquet": b"a cron's newer rows"})
+
+    with pytest.raises(HfHubHTTPError):
+        hf_sync.push_db_to_hf(parent_commit=parent)
+
+    assert hub.attempted_parents == [parent] and hub.commits == []
+
+
+def test_a_plain_push_uploads_everything_when_the_hub_moves_during_the_upload(hub):
+    """Omitting the Parquet now would pair this DB with rows from someone else's push."""
+    _with_parquets(hub)
+    compared = hub.head()
+    hub.before_commit = lambda: hub.remote.update({"eprx_balancing.parquet": b"a cron's newer rows"})
+
+    pushed = hf_sync.push_db_to_hf()
+
+    assert hub.attempted_parents == [compared, None]
+    assert [set(c) for c in hub.commits] == [set(_NAMES)]
+    assert hub.remote["eprx_balancing.parquet"] == b"bal"  # last write wins, whole
+    assert pushed == hub.head()
+
+
+def test_any_other_commit_failure_is_not_retried(hub):
+    _with_parquets(hub)
+
+    def refuse():
+        raise _http_error(500)
+
+    hub.before_commit = refuse
+
+    with pytest.raises(HfHubHTTPError):
+        hf_sync.push_db_to_hf()
+
+    assert len(hub.attempted_parents) == 1 and hub.commits == []
+
+
+def test_an_unreadable_hub_falls_back_to_uploading_everything(hub, caplog):
+    _with_parquets(hub)
+    hub.unreadable = 1
+
+    with caplog.at_level(logging.WARNING, logger=hf_sync.logger.name):
+        pushed = hf_sync.push_db_to_hf()
+
+    assert [set(c) for c in hub.commits] == [set(_NAMES)]
+    assert hub.parents == [None]
+    assert any("uploading every Parquet" in m for m in caplog.messages)
+    assert hf_sync.read_stamp(hf_sync.stamp_path(hub.local["repower.db"]))["commit"] == pushed
+
+
+def test_an_unreadable_hub_still_honours_the_parent(hub):
+    _with_parquets(hub)
+    parent = hub.head()
+    hub.unreadable = 1
+
+    hf_sync.push_db_to_hf(parent_commit=parent)
+
+    assert [set(c) for c in hub.commits] == [set(_NAMES)]
+    assert hub.parents == [parent]
 
 
 # ── sync_from_hf: pull only what changed, keep the local edits ───────────────────

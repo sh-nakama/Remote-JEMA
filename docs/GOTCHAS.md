@@ -272,6 +272,22 @@ fixed.
   rolls back a hot journal left by a killed run), `PRAGMA quick_check` refuses a damaged DB before
   anything reaches the Hub, and one `create_commit` keeps the DB — which holds the ETags — from
   landing without the Parquet rows they vouch for. Don't go back to per-file `upload_file`.
+- **A Parquet left out of a push is only safe on the revision it was compared with.** `push-hf`
+  omits a Parquet whose sha256 matches the Hub's, and an omitted file stays in the commit's tree
+  as whatever the *parent* holds. So when it omits one it pins `parent_commit` to the compared
+  revision; a plain push the Hub then refuses (412: someone pushed during the upload) uploads
+  every Parquet unpinned, keeping its last-write-wins, while `sync --push` just fails. Never omit
+  without the pin: that pairs this DB with another run's Parquet. An unreadable Hub uploads
+  everything. `huggingface_hub` also drops files matching the branch head from its commits, unpinned,
+  which is why old commit titles list Parquets those commits never touched: read a file's
+  `last_commit`, not the title.
+- **Every push of a changed `repower.db` adds its full size to the dataset's storage.**
+  `usedStorage` was exactly the sum of all 556 LFS objects in history (27.65 GB on 2026-11-02),
+  so history counts in full and no chunk-level saving is credited. Identical content adds
+  nothing, so skipping unchanged Parquets saves transfer, not storage. The free tier allows 100 GB of
+  private storage; adding a scheduled push costs about 117 MB a run, and only
+  `super_squash_history` gets it back (irreversible, and it removes the history a clobbered
+  dataset would be restored from).
 - **A pull replaces the DB under whoever has it open.** `db.get_engine` pools connections per
   path; on Linux they keep reading the replaced file's old inode, and on Windows
   `hf_hub_download` falls back to overwriting the file in place. `pull_db_from_hf` therefore
