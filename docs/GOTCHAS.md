@@ -718,6 +718,12 @@ fixed.
   from its page's `<h1>` and uses the label only when the page can't be fetched. When that fallback
   stores a wrong name, add the page's real one to `committees.CATALOG_NAMES_JA`, which
   `sync_committees` applies to every run (editing the row alone is undone by the next HF pull).
+- **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
+  translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
+  when the meeting is done. So meetings summarised earlier have none until they are summarised
+  again, and the weekly email falls back to an extract of the briefing and labels it
+  ブリーフィングより抜粋. That fallback also applies when the translation's bullet count differs from
+  the English, since the two lists would no longer line up. It costs one more question per meeting.
 - **Committee English names are resolved at read time.** Discovered committees store `name_en`
   as `''`; `committees.english_name()` supplies the curated name (`COMMITTEES`, then
   `CATALOG_NAMES_EN`). Read `name_en` through it, never raw; a new discovered committee needs a

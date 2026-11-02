@@ -93,9 +93,61 @@ def test_brief_falls_back_to_any_bullets_then_the_first_paragraph():
     assert weekly.extract_brief("") == []
 
 
-def test_brief_truncates_long_bullets_on_a_word_boundary():
-    (t, body), = weekly.extract_brief("### Key decisions\n* **T**: " + "word " * 100)
-    assert len(body) <= weekly.BRIEF_CHARS + 1 and body.endswith("…") and not body.endswith(" …")
+def test_a_long_bullet_stays_whole():
+    long = "word " * 100 + "ends here."
+    (t, body), = weekly.extract_brief("### Key decisions\n* **T**: " + long)
+    assert body == long.replace("  ", " ")
+    long_ja = "あ" * 300 + "。"
+    (t, body), = weekly.extract_brief_ja("## 3. 結論・決定事項\n* **T**: " + long_ja)
+    assert body == long_ja
+
+
+def _briefs_of(db, *, ja_digest):
+    _meeting(db, "chousei_jukyu", 122, TODAY - timedelta(days=3), state="done", digest=DIGEST,
+             briefing=BRIEFING, summarised_at=NOW - timedelta(days=1))
+    with store.session_scope(db) as s:
+        m = s.query(PolicyMeeting).filter_by(committee_key="chousei_jukyu", meeting_num=122).one()
+        m.digest_ja_json = json.dumps({"answer": ja_digest}) if ja_digest else None
+    it, = _build(db).summarised
+    return it
+
+
+JA_DIGEST = """### **決定事項**
+
+* **ブラックスタート入札**: 2030年度入札に問題がないことを確認した[1-5]。
+* **アルファ値**: 改定後の値を承認した[6]。
+* **不足分:**
+  * 未調達分の随意契約を検討することで合意した[11]。
+* **第四の論点**: 簡略版には出ない。
+
+### **意見の相違**
+
+* **公平性**: 委員が懸念を示した[16]。
+"""
+
+
+def test_the_japanese_brief_takes_the_same_bullets_from_the_translated_digest(policy_db):
+    it = _briefs_of(policy_db, ja_digest=JA_DIGEST)
+    assert it.brief_ja_matched
+    assert [t for t, _ in it.brief] == ["Black start tender", "Alpha values", "Shortages"]
+    assert it.brief_ja == [
+        ("ブラックスタート入札", "2030年度入札に問題がないことを確認した。"),
+        ("アルファ値", "改定後の値を承認した。"),
+        ("不足分", "未調達分の随意契約を検討することで合意した。"),
+    ]
+
+
+def test_older_or_misaligned_meetings_fall_back_to_the_briefing_and_say_so(policy_db):
+    it = _briefs_of(policy_db, ja_digest=None)
+    assert not it.brief_ja_matched and it.brief_ja[0][0] == "事業用太陽光発電の入札条件"
+    report = _report(summarised=[it])
+    assert "[日本語（ブリーフィングより抜粋）]" in weekly.render_text(report)
+    assert "may cover different points" in weekly.render_html(report)
+
+
+def test_a_translation_that_merged_bullets_does_not_count_as_matching(policy_db):
+    merged = "### 決定事項\n\n* 三点をまとめて確認した。\n"
+    assert not _briefs_of(policy_db, ja_digest=merged).brief_ja_matched
 
 
 def test_japanese_brief_takes_the_decided_items_only():
@@ -139,11 +191,6 @@ def test_japanese_brief_falls_back_to_prose_but_never_to_the_agenda():
     assert weekly.extract_brief_ja(hearing) == [("", "本会合はヒアリングであり、決定事項はない。")]
     assert weekly.extract_brief_ja("## 1. 主要な論点\n\n* 議題A\n* 議題B\n") == []
     assert weekly.extract_brief_ja("") == []
-
-
-def test_japanese_brief_truncates_at_a_comma_near_the_limit():
-    (t, body), = weekly.extract_brief_ja("## 3. 結論・決定事項\n* **T**: " + "あ" * 100 + "、" + "い" * 100)
-    assert body == "あ" * 100 + "…"
 
 
 # ── What goes in which section ───────────────────────────────────────────────
@@ -311,6 +358,7 @@ def test_html_escapes_scraped_text_and_skips_an_empty_catch_up_section():
 def test_both_languages_render_with_labels_and_lang_tags():
     item = _report().summarised[0]
     item.brief_ja = [("題", "本文")]
+    item.brief_ja_matched = True
     r = _report(summarised=[item])
     out = weekly.render_html(r)
     assert '<ul lang="en"' in out and '<ul lang="ja"' in out and "<b>題</b>：本文" in out
