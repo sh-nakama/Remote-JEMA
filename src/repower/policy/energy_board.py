@@ -28,6 +28,7 @@ import logging
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
@@ -202,24 +203,37 @@ def materials_for(committee, meeting_num: int, *, db_path: str | None = None) ->
 
 
 # ── Cross-check (monthly) ────────────────────────────────────────────────────
-def _missing_to_items(missing: list[dict]) -> list[dict]:
+def _page_name(url: str, db_path: str | None = None) -> str | None:
+    """The committee's own name, from its METI page's ``<h1>``; None when unreachable."""
+    from repower.policy.catalog import _fetch, parse_meti_page_title
+
+    content = _fetch(url, db_path=db_path)
+    return parse_meti_page_title(content) if content else None
+
+
+def _missing_to_items(missing: list[dict], name_of: Callable[[str], str | None] | None = None) -> list[dict]:
     """Map cross-check ``missing`` rows to catalog items for the discovered-committee
     upsert. energy-board only carries METI committees, whose committee index is
     ``/shingikai/<dir>/`` — the same shape the METI scraper enumerates generically,
     so a committee added this way is scrapeable once the user tracks it. The key is
     the last path segment (``energy_environment/gx_demand`` → ``gx_demand``); the
-    upsert disambiguates a colliding key and dedups by normalised URL."""
+    upsert disambiguates a colliding key and dedups by normalised URL.
+
+    The name comes from *name_of* (the committee page) when it answers: the feed's
+    council label can be a parent body (分散型エネルギー推進戦略WG was stored as
+    省エネルギー小委員会) or a truncated name (戦略ワーキンググループ)."""
     items: list[dict] = []
     for m in missing:
         d = (m.get("dir") or "").strip("/")
         if not d:
             continue
         key = d.split("/")[-1]
+        url = f"https://www.meti.go.jp/shingikai/{d}/"
         items.append({
             "key": key,
-            "name_ja": m.get("council") or key,
+            "name_ja": (name_of(url) if name_of else None) or m.get("council") or key,
             "source": "METI",
-            "url": f"https://www.meti.go.jp/shingikai/{d}/",
+            "url": url,
         })
     return items
 
@@ -253,6 +267,8 @@ def cross_check(*, db_path: str | None = None, persist: bool = True) -> dict:
     missing = [info for d, info in sorted(theirs.items()) if d not in ours]
     added = 0
     if persist and missing:
-        added = upsert_discovered_committees(_missing_to_items(missing), db_path=db_path)
+        # One page fetch per newly-found committee (rare: the catalog accumulates).
+        items = _missing_to_items(missing, name_of=lambda u: _page_name(u, db_path))
+        added = upsert_discovered_committees(items, db_path=db_path)
     return {"theirs": len(theirs), "matched": len(theirs) - len(missing),
             "missing": missing, "added": added}

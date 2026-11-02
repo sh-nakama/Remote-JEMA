@@ -208,6 +208,11 @@ class PolicyCommittee(Base):
     #   last_fetch_at      — written on *every* pass, success or failure
     #   last_ok_at         — last genuinely successful fetch (200/304)
     #   consecutive_failures — reset to 0 on success; separates flaky from dead
+    # When this committee's index page was last read *in full* for its ※ notes (EGC only; see
+    # ``PolicyMeeting.index_note``). A conditional check that comes back 304 carries no body and
+    # so reads nothing, so this is what says how stale the notes are: NULL = never read, which is
+    # also what makes the first ``detect`` after the column appears backfill them.
+    index_notes_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     last_fetch_status: Mapped[str | None] = mapped_column(String(16))
     last_fetch_kind: Mapped[str | None] = mapped_column(String(32))
     last_fetch_detail: Mapped[str | None] = mapped_column(Text)
@@ -251,6 +256,9 @@ class PolicyMeeting(Base):
     report_task_id: Mapped[str | None] = mapped_column(String(64))
     briefing_md: Mapped[str | None] = mapped_column(Text)  # detailed Japanese per-meeting briefing
     digest_en_json: Mapped[str | None] = mapped_column(Text)  # English ask --json (answer + references[])
+    # The same digest in Japanese, bullet for bullet: asked in the meeting's notebook right after the
+    # English one, since the notebook is deleted when the meeting is done. NULL on older meetings.
+    digest_ja_json: Mapped[str | None] = mapped_column(Text)
     # Where each digest citation lives: {"v", "resolvedAt", "items": [{n, url, doc, page?, pageEnd?}]}
     # (see repower.policy.citations). Kept apart from digest_en_json so the raw NotebookLM answer
     # stays untouched and the resolver can be re-run. NULL = never attempted; a non-NULL value with
@@ -291,7 +299,9 @@ class PolicyMeeting(Base):
     # the last means the video was taken down): ``no_papers`` when the row also links no document.
     # NULL = nothing noted. With no paper on file that means there is nothing to summarise, so the
     # meeting leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
-    # Refreshed on every ``detect`` pass, so a document posted later clears it.
+    # Re-derived whenever ``detect`` reads the index *body* — any change to the page breaks the 304, and a
+    # full read is forced once ``store.INDEX_NOTES_REFRESH_DAYS`` have passed since
+    # ``PolicyCommittee.index_notes_at`` — so a document posted later clears it.
     index_note: Mapped[str | None] = mapped_column(String(16))
     # When the pipeline last finished writing this meeting's briefing, and — when that
     # replaced an existing briefing rather than writing the first — when. ``updated_at``
@@ -602,16 +612,20 @@ def _migrate_add_policy_citations(engine) -> None:
 
 
 def _migrate_add_policy_index_note(engine) -> None:
-    """Add ``policy_meeting.index_note`` (additive; NULL = nothing noted)."""
+    """Add ``policy_meeting.index_note`` and ``policy_committee.index_notes_at`` (additive; NULL =
+    nothing noted / never read)."""
     from sqlalchemy import inspect
     from sqlalchemy import text as sql_text
     insp = inspect(engine)
-    if "policy_meeting" not in insp.get_table_names():
-        return
-    if "index_note" in {c["name"] for c in insp.get_columns("policy_meeting")}:
-        return
+    adds = {
+        "policy_meeting": ("index_note", "ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"),
+        "policy_committee": ("index_notes_at",
+                             "ALTER TABLE policy_committee ADD COLUMN index_notes_at DATETIME"),
+    }
     with engine.begin() as conn:
-        conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"))
+        for table, (col, ddl) in adds.items():
+            if table in insp.get_table_names() and col not in {c["name"] for c in insp.get_columns(table)}:
+                conn.execute(sql_text(ddl))
 
 
 def _migrate_add_policy_minutes_watch(engine) -> None:
@@ -632,6 +646,7 @@ def _migrate_add_policy_minutes_watch(engine) -> None:
              "ALTER TABLE policy_meeting ADD COLUMN materials_checked_at DATETIME"),
             ("summarised_at", "ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"),
             ("resummarised_at", "ALTER TABLE policy_meeting ADD COLUMN resummarised_at DATETIME"),
+            ("digest_ja_json", "ALTER TABLE policy_meeting ADD COLUMN digest_ja_json TEXT"),
         ],
         "policy_material": [
             ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),

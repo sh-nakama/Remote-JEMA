@@ -10,6 +10,7 @@ slow re-check selects. Network-free, like ``test_policy.py``.
 from __future__ import annotations
 
 import datetime
+import json
 import sqlite3
 from pathlib import Path
 
@@ -219,6 +220,52 @@ def test_a_successful_rerun_replaces_the_briefing_and_clears_the_flag(monkeypatc
     assert m.briefing_md.startswith("## 新しい要約")
     assert m.synth_done is False  # so the committee synthesis folds the new briefing in
     assert {r["status"] for r in store.meeting_materials(KEY, 9, db_path=db)} == {"ingested"}
+
+
+def _ask_with(monkeypatch, japanese):
+    """English digest question → "EN BODY"; the translation question → *japanese* (or raise it)."""
+    asked = []
+
+    def ask(nb_id, question, **k):
+        asked.append(question)
+        if question == pipeline._ENGLISH_DIGEST_Q:
+            return {"answer": "EN BODY"}
+        if question.startswith(pipeline._JAPANESE_DIGEST_Q.split("{digest}")[0]):
+            if isinstance(japanese, Exception):
+                raise japanese
+            return {"answer": japanese}
+        return {"answer": "ok"}
+
+    monkeypatch.setattr(pipeline.nb, "ask", ask)
+    return asked
+
+
+def test_a_run_translates_the_stored_english_digest_into_japanese(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    asked = _ask_with(monkeypatch, "JA BODY")
+    _summarised(db, KEY, 9, [_mat(9, "gijishidai", "agenda")])
+    store.add_late_materials(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    assert asked[-1].endswith("EN BODY")  # the translation sees the English answer itself
+    assert json.loads(_row(db, KEY, 9).digest_ja_json)["answer"] == "JA BODY"
+
+
+def test_a_failed_translation_does_not_fail_the_meeting(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_with(monkeypatch, pipeline.nb.NotebookLMError("nope"))
+    _summarised(db, KEY, 9, [_mat(9, "gijishidai", "agenda")])
+    store.add_late_materials(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    m = _row(db, KEY, 9)
+    assert m.state == "done" and m.digest_ja_json is None and json.loads(m.digest_en_json)["answer"] == "EN BODY"
 
 
 @pytest.mark.parametrize("outcome", ["error", "blocked", "unsent"])

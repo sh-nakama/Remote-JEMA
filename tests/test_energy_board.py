@@ -66,6 +66,7 @@ def test_recent_meeting_nums_and_materials(monkeypatch):
 def test_cross_check_flags_untracked(monkeypatch, policy_db):
     db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
+    monkeypatch.setattr(eb, "_page_name", lambda url, db_path=None: None)
     res = eb.cross_check(db_path=db)
     assert res["theirs"] == 2
     assert res["matched"] == 1  # doji_shijo is in our catalog
@@ -79,6 +80,7 @@ def test_cross_check_persists_missing_as_discovered(monkeypatch, policy_db):
     committees.json — the fix for crosscheck findings vanishing instead of sticking."""
     db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
+    monkeypatch.setattr(eb, "_page_name", lambda url, db_path=None: None)
 
     res = eb.cross_check(db_path=db)
     assert res["added"] == 1  # hydrogen accumulated
@@ -95,10 +97,29 @@ def test_cross_check_persists_missing_as_discovered(monkeypatch, policy_db):
     assert res2["matched"] == 2 and res2["missing"] == []
 
 
+def test_a_committee_found_on_energy_board_is_named_from_its_own_page(monkeypatch, policy_db):
+    """The feed's council label can be a parent body or a truncated name; the page's
+    <h1> is the committee's real name. The label is only the fallback."""
+    db = policy_db
+    monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
+    asked = []
+    monkeypatch.setattr(eb, "_page_name", lambda url, db_path=None: asked.append(url) or "水素保安小委員会（正式名）")
+    eb.cross_check(db_path=db)
+    assert asked == ["https://www.meti.go.jp/shingikai/sankoshin/hoan_shohi/hydrogen/"]  # only the new one
+    cat = {c["key"]: c for c in store.list_committees(db_path=db)}
+    assert cat["hydrogen"]["name_ja"] == "水素保安小委員会（正式名）"
+
+
+def test_an_unreachable_page_falls_back_to_the_feed_label():
+    items = eb._missing_to_items([{"dir": "a/b/hydrogen", "council": "水素保安小委員会"}], name_of=lambda u: None)
+    assert items[0]["name_ja"] == "水素保安小委員会"
+
+
 def test_cross_check_persist_false_is_pure(monkeypatch, policy_db):
     """persist=False keeps cross_check a read-only diff (no rows written)."""
     db = policy_db
     monkeypatch.setattr(eb, "fetch_feed", lambda **kw: eb.parse_feed(FEED_HTML))
+    monkeypatch.setattr(eb, "_page_name", lambda url, db_path=None: None)
     before = len(store.list_committees(db_path=db))
     res = eb.cross_check(db_path=db, persist=False)
     assert res["added"] == 0

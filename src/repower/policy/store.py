@@ -28,10 +28,12 @@ from repower.db import (
     init_db,
 )
 from repower.policy.committees import (
+    CATALOG_NAMES_JA,
     COMMITTEES,
     Committee,
     committee_by_key,
     committee_priority,
+    english_name,
 )
 from repower.policy.scraper import NOTE_NO_PAPERS, Material
 from repower.timeutil import today_jst
@@ -77,6 +79,13 @@ NO_PAPERS = NOTE_NO_PAPERS
 # meeting per week.
 RELIST_DAYS = 7
 
+# How long an EGC index's ※ notes are trusted before the page is read in full again. The daily
+# conditional check already notices any change to the page (a note is part of the page, so a
+# note can only change when the page does and the 304 breaks), which makes this a safety net
+# against a stale validator, not the way changes are found. Long on purpose: each read is a
+# request against a host allowance of 16 per 5 minutes.
+INDEX_NOTES_REFRESH_DAYS = 30
+
 
 def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
                       checked_at: datetime | None = None, index_note: str | None = None) -> str:
@@ -97,9 +106,11 @@ def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
       says there is nothing to read: a ※ remark (書面開催 / 非公開開催 / 削除済み) on a row
       that links no document. Unlike ``awaiting`` this is not "not yet" — it is not re-checked
       on a timer. Notes are re-derived only from the committee's *main* index
-      (``committee.url``), which on EGC lists just the current fiscal year: a note is cleared
-      when a later ``detect`` sees it gone from there, but a row that has since moved to a log
-      page keeps its last note — which is why papers on file outrank it.
+      (``committee.url``), which on EGC lists just the current fiscal year, and only when
+      ``detect`` reads that page in full (the day it changes, else once
+      :data:`INDEX_NOTES_REFRESH_DAYS` have passed since the last full read): a note is cleared
+      when such a read finds it gone, but a row that has since moved to a log page keeps its
+      last note — which is why papers on file outrank it.
     * ``awaiting`` — held (or undated) and *looked at recently* (``checked_at``, within
       :data:`RELIST_DAYS`) with none of :data:`CONTENT_KINDS` on file: an agenda alone, or
       nothing yet.
@@ -172,7 +183,8 @@ def sync_committees(db_path: str | None = None) -> int:
     insert — plus a back-fill when a just-migrated row still has ``priority IS
     NULL`` — and never clobbered afterwards, which is what lets a committee "jump
     the queue permanently". Committees not in the config (discovered / user-added)
-    are left untouched.
+    are left untouched, except that a discovered one listed in ``CATALOG_NAMES_JA``
+    has its wrongly-scraped Japanese name corrected.
     """
     with session_scope(db_path) as session:
         n = 0
@@ -195,6 +207,11 @@ def sync_committees(db_path: str | None = None) -> int:
             # preserve UI/CLI edits otherwise.
             if row.priority is None:
                 row.priority = c.priority
+        # Discovered committees stored under a wrong Japanese name (see CATALOG_NAMES_JA).
+        for key, name_ja in CATALOG_NAMES_JA.items():
+            row = session.get(PolicyCommittee, key)
+            if row is not None and not row.user_added and row.name_ja != name_ja:
+                row.name_ja = name_ja
         return n
 
 
@@ -209,7 +226,7 @@ def _row_to_committee(row: PolicyCommittee) -> Committee:
     return Committee(
         key=row.committee_key,
         name_ja=row.name_ja or row.committee_key,
-        name_en=row.name_en or row.committee_key,
+        name_en=english_name(row.committee_key, row.name_en) or row.committee_key,
         url=row.url or "",
         source=row.source or "METI",
         priority=row.priority if row.priority is not None else 100,
@@ -434,7 +451,7 @@ def list_committees(db_path: str | None = None) -> list[dict]:
                 "key": r.committee_key,
                 "committee_key": r.committee_key,
                 "source": r.source or "METI",
-                "name_en": r.name_en or r.committee_key,
+                "name_en": english_name(r.committee_key, r.name_en) or r.committee_key,
                 "name_ja": r.name_ja or r.committee_key,
                 "enabled": bool(r.enabled) if r.enabled is not None else True,
                 "archived": bool(r.archived),
@@ -679,8 +696,9 @@ def recent_meeting_nums(key: str, since: date, db_path: str | None = None) -> li
 
     A not-yet-summarised meeting the committee's index marks ``no_papers`` is left out: its
     row links nothing, so a re-read finds nothing (and costs a forced index fetch each pass).
-    ``detect`` clears the note once the main-index row links something, and the meeting is
-    refreshed normally from then on. A ``done`` meeting is never judged by its note.
+    ``detect`` clears the note when it next reads the main-index row linking something (see
+    :data:`INDEX_NOTES_REFRESH_DAYS`), and the meeting is refreshed normally from then on. A
+    ``done`` meeting is never judged by its note.
     """
     with session_scope(db_path, commit=False) as session:
         rows = (
@@ -1336,6 +1354,7 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
             if was_done:
                 m.briefing_md = None
                 m.digest_en_json = None
+                m.digest_ja_json = None
                 m.citations_json = None
                 m.report_task_id = None
                 m.summarised_at = None
@@ -1566,6 +1585,8 @@ def meetings_for_week(
                 "state": m.state,
                 "has_torimatome": bool(m.has_torimatome),
                 "digest_en_json": m.digest_en_json,
+                "digest_ja_json": m.digest_ja_json,
+                "briefing_md": m.briefing_md,
                 "summarised_at": m.summarised_at,
             }
             for m in rows
@@ -1671,8 +1692,9 @@ def meetings_missing_materials(key: str, db_path: str | None = None) -> list[int
     A meeting the committee's index marks ``no_papers`` is left out: its row links nothing,
     so listing it finds nothing, and a listing that finds nothing is never stamped — every
     catch-up would repeat it, each time as a forced EGC index fetch against the host's
-    request allowance. ``detect`` clears the note once the main-index row links something,
-    and the meeting is listed normally from then on.
+    request allowance. ``detect`` clears the note when it next reads the main-index row linking
+    something (see :data:`INDEX_NOTES_REFRESH_DAYS`), and the meeting is listed normally from
+    then on.
     """
     with session_scope(db_path, commit=False) as session:
         with_mats = {
@@ -1713,6 +1735,25 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
                 m.meeting_date = d
                 n += 1
         return n
+
+
+def index_notes_due(key: str, *, now: datetime | None = None, db_path: str | None = None) -> bool:
+    """True when committee *key*'s index should be read in full for its notes: never read (the
+    first ``detect`` after the column appears, or a newly added committee) or last read more than
+    :data:`INDEX_NOTES_REFRESH_DAYS` ago."""
+    with session_scope(db_path, commit=False) as session:
+        row = session.get(PolicyCommittee, key)
+        at = row.index_notes_at if row is not None else None
+    if at is None:
+        return True
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return ((now or _now()) - at).days >= INDEX_NOTES_REFRESH_DAYS
+
+
+def mark_index_notes_read(key: str, db_path: str | None = None) -> None:
+    """Record that *key*'s index was just read in full and its notes recorded."""
+    update_committee(key, db_path=db_path, index_notes_at=_now())
 
 
 def set_meeting_index_notes(key: str, notes: dict[int, str | None],

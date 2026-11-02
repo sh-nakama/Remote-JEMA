@@ -728,6 +728,23 @@ fixed.
   separate in any new check. (`web-api` is long-running: restart it after upgrading.)
 - `energy_board.py`'s module-level feed cache (`_feed_cache`/`_feed_ts`) is unlocked — fine
   under today's single-flight usage, unsafe if you add threads.
+- **energy-board's council label is not a committee name.** It can be a parent body
+  (`distributed_energy_wg`, really 分散型エネルギー推進戦略WG, was stored as 省エネルギー小委員会) or
+  truncated (`plastic_wg` as 戦略ワーキンググループ). `cross_check` now names a newly found committee
+  from its page's `<h1>` and uses the label only when the page can't be fetched. When that fallback
+  stores a wrong name, add the page's real one to `committees.CATALOG_NAMES_JA`, which
+  `sync_committees` applies to every run (editing the row alone is undone by the next HF pull).
+- **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
+  translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
+  when the meeting is done. So meetings summarised earlier have none until they are summarised
+  again, and the weekly email falls back to an extract of the briefing and labels it
+  ブリーフィングより抜粋. That fallback also applies when the translation's bullet count differs from
+  the English, since the two lists would no longer line up. It costs one more question per meeting.
+- **Committee English names are resolved at read time.** Discovered committees store `name_en`
+  as `''`; `committees.english_name()` supplies the curated name (`COMMITTEES`, then
+  `CATALOG_NAMES_EN`). Read `name_en` through it, never raw; a new discovered committee needs a
+  `CATALOG_NAMES_EN` entry or it falls back to a humanised key on the site and its Japanese name
+  in the weekly email.
 - EGC index tables list **non-public meetings** (`※非公開開催` / `※書面開催`) with an *empty
   materials column* — the main-commission page (`index_emsc.html`) is full of them. `parse_egc_index`
   keeps a row when it has materials **or** a parseable date, so these still register and don't leave a
@@ -1083,21 +1100,31 @@ fixed.
   whatever the row linked, which dropped 35 of 39 rate-review meetings whose papers were all still
   there, so don't add a note that outranks links. A stored `index_note='removed'` from that
   version may linger in old databases and means nothing: compare with `NO_PAPERS`, never
-  `index_note is not None`. (2) **Documents on file outrank the note** in `meeting_readiness`
+  `index_note is not None`. Only the next full read of the main index rewrites it (see (3) and
+  (4)), so it can linger for up to `INDEX_NOTES_REFRESH_DAYS`; it is ignored meanwhile.
+  (2) **Documents on file outrank the note** in `meeting_readiness`
   (order: upcoming, papers on file → ready, `no_papers`, awaiting). A meeting already mid-pipeline,
   or errored while owning a notebook, stays in the worklist for `resume` / retry, and
   `reset_unready_summaries` leaves real errors on a noted meeting that has papers alone. For the
   same reason `summarize_meeting` has no shortcut on the note: a requested meeting bypasses the
   gate, so with nothing readable on file it must read the page rather than trust a note that is
-  only as fresh as the last `detect`. (3) EGC's index is fetched **unconditionally** on every
-  `detect` (a 304 would leave the notes of known meetings unread while the page is unchanged).
-  That costs bytes, not requests: a 304 spends the host's `_HOST_BUDGET` allowance (16 per 300 s)
-  exactly as a 200 does, and EGC is behind the same WAF challenge as METI. (4) Notes are
-  re-derived only from the committee's **main index** (`committee.url`), which on EGC lists just
-  the current fiscal year. A note is cleared when a later `detect` sees it gone from there, so a
-  document posted later returns the meeting; but a row that has moved to a log page is never read
-  for notes again and **keeps its last one** (which is why (2) matters). (5) Whatever counts or
-  re-lists meetings has to honour the note too. The committee rollup (`build_committees_payload`,
+  only as fresh as the last full read of the index. (3) The ※ remarks are only in the page
+  **body**, which a 304 does not send, so a conditional check reads none. `detect` stays
+  conditional (any change to the page — a new meeting, a remark added or dropped — breaks the 304
+  and is read then) and forces a full read of an EGC index only when
+  `policy_committee.index_notes_at` is NULL (first pass after the column appeared, or a new
+  committee: this is the backfill) or older than `store.INDEX_NOTES_REFRESH_DAYS` (30; a safety
+  net against a stale validator, not how changes are found). A 200 that arrives on its own also
+  restarts the clock; a 304 or a failed fetch does not. Each read is a request against the EGC
+  host's allowance (16 per 5 minutes), so keep it rare. (4) Notes are re-derived only from the
+  committee's **main index** (`committee.url`), which on EGC lists just the current fiscal year,
+  and only when that index is read in full, so the next full read (not "the next `detect`") is
+  what rewrites or clears one. A changed page breaks the 304 and is read the same day, which is
+  how a document posted later clears its note and returns the meeting; a stale value on a page
+  that has not changed (the retired `removed`, or a change a stale validator hides) waits for the
+  `INDEX_NOTES_REFRESH_DAYS` read. A row that has moved to a log page is never read for notes
+  again and **keeps its last one** (which is why (2) matters). (5) Whatever counts or re-lists
+  meetings has to honour the note too. The committee rollup (`build_committees_payload`,
   given `material_kinds` by *both* `build_policy_catalog` and `build_policy_snapshot`, whose
   SELECTs therefore carry `materials_checked_at` and `index_note`) leaves a `no_papers` meeting
   out of `pending` and `error`, as its card does; `meetings_missing_materials` and
