@@ -268,7 +268,7 @@ def test_a_failed_translation_does_not_fail_the_meeting(monkeypatch, policy_db, 
     assert m.state == "done" and m.digest_ja_json is None and json.loads(m.digest_en_json)["answer"] == "EN BODY"
 
 
-@pytest.mark.parametrize("outcome", ["error", "blocked"])
+@pytest.mark.parametrize("outcome", ["error", "blocked", "unsent"])
 def test_a_failed_rerun_keeps_the_old_briefing_on_the_page(monkeypatch, policy_db, outcome):
     db = policy_db
     _no_auth_no_synthesis(monkeypatch)

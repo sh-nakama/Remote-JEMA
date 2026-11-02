@@ -426,7 +426,9 @@ def test_missing_documents_burn_the_retry_budget_and_eventually_drop_out(monkeyp
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
 
     for expected in range(1, store.MAX_RETRIES + 1):
-        assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+        # 'unsent', not 'error': the row is errored and the retry spent, but nothing reached
+        # NotebookLM, so the run must not charge the attempt a slot.
+        assert pipeline.summarize_meeting(committee, 7, db_path=db) == "unsent"
         row = _meeting_row("doji_shijo", 7, db)
         assert row["quality_flag"] == "download_failed"
         assert row["retry_count"] == expected
@@ -444,7 +446,7 @@ def test_every_failure_path_records_why_and_success_clears_it(monkeypatch, tmp_p
     committee = _stage_meeting(db)
 
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
-    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "error"
+    assert pipeline.summarize_meeting(committee, 7, db_path=db) == "unsent"
     row = _meeting_row("doji_shijo", 7, db)
     assert "not_found" in row["last_error"] and row["last_error_at"]
 
@@ -1989,7 +1991,7 @@ def test_missing_document_burns_a_retry_even_when_others_download(monkeypatch, p
                         lambda url, *a, **k: "ok" if "gijiroku" in url else "not_found")
 
     for expected in range(1, store.MAX_RETRIES + 1):
-        assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "error"
+        assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "unsent"
         row = _meeting_row(key, num, db)
         assert row["quality_flag"] == "download_failed" and row["retry_count"] == expected
         assert "1 of 2" in row["last_error"]
@@ -2215,7 +2217,7 @@ def test_discarded_staging_stops_claiming_the_files_are_downloaded(monkeypatch, 
     # One document lands, the other is permanently gone: a hard error, staging wiped.
     monkeypatch.setattr(pipeline, "_download_pdf",
                         lambda url, dest, **k: "ok" if "gijiroku" in url else "not_found")
-    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "error"
+    assert pipeline.summarize_meeting(committee_by_key(key), num, db_path=db) == "unsent"
     mats = {m["pdf_id"]: m["status"] for m in store.meeting_materials(key, num, db_path=db)}
     assert mats["015_min"] == "detected"  # was 'downloaded', but the file is gone
     assert mats["015_h1"] == "error"

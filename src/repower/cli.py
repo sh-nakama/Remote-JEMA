@@ -845,6 +845,7 @@ def policy_run(
     typer.echo(
         f"processed={summary['processed']} done={summary['done']} "
         f"errored={summary['errored']} blocked={summary.get('blocked', 0)} "
+        f"unsent={summary.get('unsent', 0)} "
         f"skipped={summary.get('skipped', 0)} synthesized={summary['synthesized']}"
     )
     for host, n in sorted((summary.get("skipped_hosts") or {}).items()):

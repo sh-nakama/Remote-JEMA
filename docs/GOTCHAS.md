@@ -696,11 +696,21 @@ fixed.
   a calm day; anything else sets `'download_failed'` and bumps `retry_count`, so a genuinely
   dead meeting leaves the worklist after `MAX_RETRIES`. A *mixed* outcome counts as blocked —
   one transient kind is enough to make "these documents are gone" the wrong conclusion.
-- **`--max-per-run` counts NotebookLM attempts, not meetings tried.** `summarize_meeting`
-  returns `'blocked'` (DB state still `error`) when the host stopped it before anything reached
-  NotebookLM, and `run` doesn't charge those against the budget — otherwise a bad METI day
-  silently halves the round. A round still stops after `_MAX_BLOCKED_ATTEMPTS` blocked meetings
-  so a host-wide outage can't walk the whole backlog; that bound is logged when hit.
+- **`--max-per-run` counts NotebookLM attempts, not meetings tried** — an attempt is one that got
+  as far as creating a notebook (`done`, `generating`, or an `error` from NotebookLM itself).
+  `summarize_meeting` has three other outcomes, and `run` charges none of them: `'deferred'` (not
+  ready), `'blocked'` (DB state `error`: the host stopped it before anything reached NotebookLM —
+  the committee page could not be read, or the downloads were refused; otherwise a bad METI day
+  silently halves the round) and `'unsent'` (DB state `error`: it failed on its own account before
+  NotebookLM — `no_sources`, or a permanent `download_failed`, which still spends its retry). `unsent`
+  used to be `'error'`, so a meeting whose page listed nothing took a slot every day, on every
+  source, ahead of ready work that never ran. A round stops after `_MAX_BLOCKED_ATTEMPTS` (50)
+  blocked meetings so a host-wide outage can't walk the whole backlog, and after
+  `_MAX_UNSENT_ATTEMPTS` (10) unsent ones — much tighter, because an unsent meeting can be a whole
+  download burst (up to 12 paced requests at a WAF-guarded host) where a blocked one fails on its
+  first request; each bound is logged when hit. In the returned summary `processed` still counts
+  every attempt that was not deferred (`charged + blocked + unsent`), `errored` includes the unsent
+  ones, and `unsent` says how many of those never reached NotebookLM (`policy run` prints it).
 - OCCTO meeting discovery reads the committee's list JSON first (one request, cacheable; see the
   OCCTO section above). Only when that fails does it fall back to the **linear number probe**
   (one request per meeting number, 1 s apart), which on a cold cache means ~`max_meeting`
@@ -923,8 +933,44 @@ fixed.
     meeting that has never been looked at (`materials_checked_at` NULL) or whose "nothing yet"
     look is older than `RELIST_DAYS` stays `ready`; `summarize_meeting` re-reads the page,
     summarises if something is there, and otherwise returns `deferred` and stamps the look —
-    after which it is `awaiting` for a week. An *empty* listing records no look (it is "page
-    unreachable" as often as "nothing posted"), so it is retried next run.
+    after which it is `awaiting` for a week. Which empty listing earns that stamp is the next bullet.
+  - **An empty listing is a look only when the page was *read*; otherwise the row is
+    `listing_blocked`.** `scraper.list_materials_ex` returns a `Listing` (the materials, `read`, and
+    `error_kind`/`error_detail`/`error_url` when not read); `list_materials` is the thin wrapper that
+    returns just the materials, for `detect`, the late-paper refresh and `backfill_materials`, which
+    read `[]` as "found nothing". A meeting is **read** only when the pages that should hold its
+    documents were fetched *and the meeting was found there*: EGC — the index or log page whose row is
+    this meeting, plus the 配布資料 subpage when the row links one; METI — the index that links the
+    meeting plus the meeting page (the energy-board backup returning its documents also counts as
+    found); OCCTO — its `{num}.html`. **Read, nothing posted** (the row or page loaded and links no
+    document) → `summarize_meeting` records the look (`mark_materials_checked`) and the gate defers
+    the meeting for free until `RELIST_DAYS` have passed. **Not read** is everything else: any fetch
+    failure (**a 404 included** — a page that is not there says nothing about the meeting's
+    documents), an EGC row that no configured page carries, a METI meeting the index does not link
+    when the backup has nothing either. A not-read listing records **no look** and spends **no
+    retry**: the row gets `quality_flag='listing_blocked'` ("Could not read the committee page for
+    第N回 (kind: detail) — will be retried"), `summarize_meeting` returns `'blocked'`, and, like
+    `download_blocked`, it takes no slot, leaves a queued `gen_requested` in place and counts toward
+    `_MAX_BLOCKED_ATTEMPTS`. It stays `ready`, so every run asks again. **Any recorded look clears
+    the flag**, because a meeting the look then leaves `awaiting` would otherwise stay red for a week:
+    that is a store rule, `store._record_look`, which both stampers go through —
+    `mark_materials_checked` (the pipeline) and `add_late_materials` (`detect`'s late-paper refresh,
+    so an agenda-only refresh clears it too). `error` goes back to `detected`, a `done` row keeps its
+    state and its `updated_at`, `retry_count` is untouched, and another failure's flag is left alone;
+    a new place that stamps `materials_checked_at` must use it. Things to keep in mind:
+    (1) Before the split an empty list was ambiguous, so the meeting stayed `ready`, failed
+    `no_sources` (the one charged failure that never bumps `retry_count`, so it never aged out) and took
+    a `--max-per-run` slot every day — an EGC row with no ※ and no links yet (第621回), a METI
+    `saisei_kano` page with no papers, a blocked OCCTO page all did, with ready meetings queued behind
+    them never running. `no_sources` now needs a request (`gen_requested` / `--meeting`) to bypass
+    the gate, and ends `'unsent'`. (2) A **partial** listing — an EGC row's own PDFs when its 配布資料
+    page failed to load — is *not read*, and `summarize_meeting` records none of it: a paper on file
+    would make the next run skip the read and summarise from a partial set. (3) Known cost of the
+    404 rule: a meeting whose page never exists (a gap in OCCTO numbering, an EGC row no configured
+    page carries) is `blocked` on every run, for ever; more than `_MAX_BLOCKED_ATTEMPTS` of them
+    ahead of ready meetings in the worklist would end each round before it reached them.
+    (4) `detect` and the materials backfill still read `[]` as "found nothing" and never stamp an
+    empty one, so only `summarize_meeting` turns an empty page into an `awaiting` meeting.
   - `deferred` is free: no error, no retry spent, no notebook, no `--max-per-run` slot.
     `gen_requested` and an explicit `--meeting N` (`force=True`) override the gate; a `done`
     meeting is never re-gated (a late paper is a deliberate upgrade).
@@ -1082,8 +1128,8 @@ fixed.
   given `material_kinds` by *both* `build_policy_catalog` and `build_policy_snapshot`, whose
   SELECTs therefore carry `materials_checked_at` and `index_note`) leaves a `no_papers` meeting
   out of `pending` and `error`, as its card does; `meetings_missing_materials` and
-  `recent_meeting_nums` skip an unsummarised one, because a listing that finds nothing is never
-  stamped, so every catch-up would repeat it as a forced index fetch. A `done` meeting is never
+  `recent_meeting_nums` skip an unsummarised one, because `detect`'s listing that finds nothing is
+  never stamped, so every catch-up would repeat it as a forced index fetch. A `done` meeting is never
   judged by its note, and the watch tier reads only `done` ones. All three readiness derivations
   in `export_web` go through `_row_readiness`: don't add a fourth. EGC only: METI and OCCTO
   indexes may carry similar notes, which nothing reads yet.

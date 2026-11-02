@@ -793,12 +793,13 @@ const MSTATE: Record<string, { en: string; ja: string; color: string }> = {
 const mstate = (st?: string | null) =>
   MSTATE[st || ''] || { en: st || '—', ja: st || '—', color: 'var(--mut)' }
 
-// `quality_flag` slugs. The first three mark a failure; the last two ride a
+// `quality_flag` slugs. The first four mark a failure; the last two ride a
 // *successful* meeting as a quality warning, so they must not read as errors.
 const FLAG_TEXT: Record<string, [string, string]> = {
   no_sources: ['no usable source documents were found', '利用可能な資料が見つかりません'],
   download_failed: ['the source documents could not be downloaded', '資料をダウンロードできません'],
   download_blocked: ['the source site blocked the download — will be retried', '配信元にブロックされました（再試行されます）'],
+  listing_blocked: ['the committee page could not be read — will be retried', '委員会ページを読めませんでした（再試行されます）'],
   ocr_suspect: ['sources look image-only — the briefing may be thin', '画像PDFの可能性 — 要約が薄い場合があります'],
   short_output: ['the briefing came back unusually short', '要約が異常に短いです'],
 }

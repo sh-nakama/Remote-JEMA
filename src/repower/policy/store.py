@@ -779,6 +779,32 @@ def watch_meeting_nums(
     return out
 
 
+def _record_look(meeting: PolicyMeeting) -> None:
+    """Stamp *meeting* as having had its committee page read just now, and drop a stale
+    ``listing_blocked`` error.
+
+    Every look goes through here — ``mark_materials_checked`` for the pipeline and
+    ``add_late_materials`` for ``detect``'s late-paper refresh — so a row can never carry both
+    "the page was read" and "the page could not be read". A ``listing_blocked`` error says the read
+    could not happen; once one has, it describes nothing, and the look often leaves the meeting
+    ``awaiting`` (nothing posted yet), which would otherwise sit red until the next re-check,
+    RELIST_DAYS away. ``error`` goes back to ``detected``. A ``done`` meeting (an upgrade that hit the
+    block, put back by the run) keeps its state and its ``updated_at``, which the UI reads as when it
+    was summarised: only the flag and its message go. ``retry_count`` is untouched — a failed listing
+    never spent one, and an earlier real failure keeps the one it did — and any other flag is another
+    failure's, and stays.
+    """
+    meeting.materials_checked_at = _now()
+    if meeting.quality_flag != "listing_blocked":
+        return
+    if meeting.state == "error":
+        meeting.state = "detected"
+        meeting.updated_at = _now()
+    meeting.quality_flag = None
+    meeting.last_error = None
+    meeting.last_error_at = None
+
+
 def add_late_materials(key: str, meeting_num: int, materials: list[Material],
                        db_path: str | None = None) -> dict:
     """Merge a re-enumerated document list into an already-known meeting.
@@ -795,7 +821,8 @@ def add_late_materials(key: str, meeting_num: int, materials: list[Material],
 
     Every successful listing stamps ``materials_checked_at``, whether or not it found
     anything, so the re-check schedule can tell "looked and found nothing" from
-    "never looked".
+    "never looked". Like any recorded look it also clears a stale ``listing_blocked``
+    error (:func:`_record_look`).
     """
     with session_scope(db_path) as session:
         meeting = (
@@ -812,7 +839,7 @@ def add_late_materials(key: str, meeting_num: int, materials: list[Material],
             .filter(PolicyMaterial.meeting_num == meeting_num)
             .all()
         }
-        meeting.materials_checked_at = _now()
+        _record_look(meeting)
         added: list[Material] = []
         for m in materials:
             if m.pdf_id in known:
@@ -1344,12 +1371,13 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
 def mark_materials_checked(key: str, meeting_num: int, db_path: str | None = None) -> None:
     """Record that the meeting's document list was just read from its page (see
     :func:`meeting_readiness`: it is what turns "no documents on file" from *unknown* into
-    *looked, nothing yet*)."""
+    *looked, nothing yet*). It also clears a stale ``listing_blocked`` error: see
+    :func:`_record_look`."""
     with session_scope(db_path) as session:
         m = (session.query(PolicyMeeting)
              .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
         if m is not None:
-            m.materials_checked_at = _now()
+            _record_look(m)
 
 
 def meeting_gate(key: str, meeting_num: int, kinds, *, today: date | None = None,

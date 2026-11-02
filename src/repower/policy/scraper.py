@@ -6,7 +6,7 @@ with prior branding stripped. Two responsibilities, kept separate:
 
 - **Pure parse functions** (``parse_*``, ``classify_material``, ``extract_*``) take
   bytes/strings and do no network — these are unit-tested against saved fixtures.
-- **Networked discovery** (``discover_meetings``, ``list_materials``) compose the
+- **Networked discovery** (``discover_meetings``, ``list_materials_ex``) compose the
   parse functions with ``conditional_get`` and the OCCTO meeting-number probe.
 
 Discovery is split into *which meetings exist* (cheap: one cached index fetch, or
@@ -118,6 +118,41 @@ class Discovery:
     meeting_nums: list[int] = field(default_factory=list)
     dates: dict[int, datetime.date] = field(default_factory=dict)
     notes: dict[int, str | None] = field(default_factory=dict)
+    error_kind: str | None = None
+    error_detail: str | None = None
+    error_url: str | None = None
+
+
+@dataclass
+class Listing:
+    """Result of :func:`list_materials_ex`: what a meeting's page(s) hold, and whether they were *read*.
+
+    A meeting is **read** when every page that should hold its documents was fetched and the meeting
+    was found there:
+
+    - EGC: the index or log page whose row is this meeting, plus the 配布資料 subpage when the row
+      links one;
+    - METI: the index that links the meeting and the meeting page itself — or, failing that, the
+      energy-board backup returning the meeting's documents;
+    - OCCTO: the meeting's ``{num}.html``.
+
+    Then ``materials`` is the whole answer, and an empty list means *read, nothing posted*. Anything
+    else is **not read** (``read=False``): a failed fetch (a 404 included — a page that is not there
+    says nothing about the meeting's documents), an EGC row that no configured page carries, a METI
+    meeting the index does not link and the backup does not know. Empty ``materials`` then means *could
+    not look*, which is the opposite of "nothing posted" and must not be recorded as a look.
+
+    ``materials`` may still hold what was found before the failure (an EGC row's own PDFs when its
+    配布資料 page would not load). That is enough for a caller that only asks "anything new?", which is
+    all :func:`list_materials` offers, but it is not a complete list and is never to be taken as one.
+
+    ``error_kind``/``error_detail``/``error_url`` say why a listing was not read, as
+    :class:`Discovery`'s do: a :data:`repower.scrapers.http_cache.FETCH_KINDS` slug, a sentence naming
+    the page, and the page. They are ``None`` when it was.
+    """
+
+    materials: list[Material] = field(default_factory=list)
+    read: bool = True
     error_kind: str | None = None
     error_detail: str | None = None
     error_url: str | None = None
@@ -865,15 +900,20 @@ def _energy_board_materials(committee: Committee, meeting_num: int, *, db_path: 
 
 
 # ── Material enumeration (what a meeting contains) ───────────────────────────
-def list_materials(
+def list_materials_ex(
     committee: Committee,
     meeting_num: int,
     *,
     db_path: str | None = None,
     page_url: str | None = None,
-) -> list[Material]:
-    """Enumerate the source documents for one meeting. One fetch of the meeting's
-    page (METI/OCCTO) or the index row + 配布資料 subpage (EGC).
+) -> Listing:
+    """Enumerate the source documents for one meeting, and say whether its page was *read*.
+
+    One fetch of the meeting's page (METI/OCCTO) or the index row + 配布資料 subpage (EGC). The
+    :class:`Listing` keeps apart what a bare list cannot: ``[]`` from a page that was read and links
+    nothing (the papers are not up yet) and ``[]`` from a page that could not be read at all (blocked,
+    challenged, 404, or a row the index does not carry). The first is a fact about the meeting and may be
+    recorded as a look; the second is a fact about today's fetch and must not be.
 
     ``page_url`` (METI only) lets a caller that already resolved the meeting's
     subpage URL — e.g. from a single shared index fetch via :func:`fetch_meti_url_map`
@@ -884,6 +924,21 @@ def list_materials(
     if committee.is_egc:
         return _list_egc(committee, meeting_num, db_path=db_path)
     return _list_meti(committee, meeting_num, db_path=db_path, page_url=page_url)
+
+
+def list_materials(
+    committee: Committee,
+    meeting_num: int,
+    *,
+    db_path: str | None = None,
+    page_url: str | None = None,
+) -> list[Material]:
+    """:func:`list_materials_ex` without the verdict: just the documents found.
+
+    For callers that only ask "is there anything (new)?" — detection, the late-paper refresh and the
+    materials backfill — and so read ``[]`` as "nothing found" whether the page was empty or unreadable.
+    Anything that records a *look* must use :func:`list_materials_ex` instead."""
+    return list_materials_ex(committee, meeting_num, db_path=db_path, page_url=page_url).materials
 
 
 def fetch_meti_url_map(committee: Committee, *, db_path: str | None = None) -> dict[int, str]:
@@ -898,35 +953,67 @@ def fetch_meti_url_map(committee: Committee, *, db_path: str | None = None) -> d
     return {}
 
 
+def _unread(kind: str, detail: str, url: str | None,
+            materials: list[Material] | None = None) -> Listing:
+    """A :class:`Listing` for a meeting whose page(s) could not be read."""
+    return Listing(materials or [], read=False, error_kind=kind, error_detail=detail, error_url=url)
+
+
+def _unread_fetch(res: FetchResult, materials: list[Material] | None = None) -> Listing:
+    """:func:`_unread` for a fetch that gave no usable body.
+
+    ``conditional_get`` reports a 404 as a *status*, not an exception, so it arrives with no ``kind`` —
+    and it is exactly as unread as a blocked host: a page that is not there says nothing about what the
+    meeting's documents are."""
+    if res.status == "not_found":
+        return _unread("not_found", f"404 for {res.url}", res.url, materials)
+    return _unread(res.kind or "unexpected_status", res.detail or f"{res.status} for {res.url}",
+                   res.url, materials)
+
+
 def _list_meti(
     committee: Committee, meeting_num: int, *, db_path: str | None, page_url: str | None = None
-) -> list[Material]:
+) -> Listing:
+    # Read = the index that links the meeting (unless the caller already resolved ``page_url`` from
+    # one) and the meeting page. ``unread`` is why that did not happen; it stays None when it did.
+    unread: Listing | None = None
     # force=True: detection may have already cached (and 304'd) the index this run;
     # we need a real body to parse, so bypass the conditional cache here. A caller
     # can pass a pre-resolved page_url to skip this index fetch entirely.
     if page_url is None:
-        status, content = _fetch(committee.url, db_path=db_path, force=True)
-        if status == "ok" and content is not None:
-            page_url = parse_meti_meeting_urls(content, committee.url).get(meeting_num)
+        index = _fetch_ex(committee.url, db_path=db_path, force=True)
+        if index.status == "ok" and index.content is not None:
+            page_url = parse_meti_meeting_urls(index.content, committee.url).get(meeting_num)
             if page_url:
                 time.sleep(POLITE_DELAY)
+            else:
+                unread = _unread("not_found", f"第{meeting_num}回 is not linked from {committee.url}",
+                                 committee.url)
+        else:
+            unread = _unread_fetch(index)
     if page_url:
-        s, body = _fetch(page_url, db_path=db_path, force=True)
-        if s == "ok" and body is not None:
-            mats = _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+        page = _fetch_ex(page_url, db_path=db_path, force=True)
+        if page.status == "ok" and page.content is not None:
+            mats = _materials_from_links(meeting_num, parse_pdf_links(page.content, page_url))
             if mats:
-                return mats
-    # METI meeting page unavailable/empty — energy-board backup (same meti.go.jp PDFs).
-    return _energy_board_materials(committee, meeting_num, db_path=db_path)
+                return Listing(mats)
+        else:
+            unread = _unread_fetch(page)
+    # METI meeting page unavailable/empty — energy-board backup (same meti.go.jp PDFs). Documents
+    # found there count as a read: they are the meeting's papers, whichever page they came from.
+    mats = _energy_board_materials(committee, meeting_num, db_path=db_path)
+    if mats:
+        return Listing(mats)
+    return unread or Listing()  # no failure to report → the page loaded and links nothing
 
 
-def _list_occto(committee: Committee, meeting_num: int, *, db_path: str | None) -> list[Material]:
+def _list_occto(committee: Committee, meeting_num: int, *, db_path: str | None) -> Listing:
     base = _occto_base(committee)
     page_url = f"{base}/{meeting_num}.html"
-    s, body = _fetch(page_url, db_path=db_path, force=True)
-    if s != "ok" or body is None:
-        return []
-    return _materials_from_links(meeting_num, parse_pdf_links(body, page_url))
+    page = _fetch_ex(page_url, db_path=db_path, force=True)
+    if page.status != "ok" or page.content is None:
+        return _unread_fetch(page)
+    return Listing(_materials_from_links(meeting_num, parse_pdf_links(page.content, page_url)))
 
 
 # ── Meeting-date discovery (networked) ───────────────────────────────────────
@@ -970,15 +1057,17 @@ def fetch_occto_meeting_date(
     return parse_page_date(body)
 
 
-def _list_egc(committee: Committee, meeting_num: int, *, db_path: str | None) -> list[Material]:
+def _list_egc(committee: Committee, meeting_num: int, *, db_path: str | None) -> Listing:
     # Look on the main index first, then historical log pages if not found.
     pages = [committee.url] + [urljoin(EGC_ACTIVITY_BASE, p) for p in committee.log_pages]
     row: dict | None = None
+    unread: Listing | None = None  # the first page that would not load
     for page in pages:
-        s, body = _fetch(page, db_path=db_path, force=True)  # need a body to parse, not a 304
-        if s != "ok" or body is None:
+        res = _fetch_ex(page, db_path=db_path, force=True)  # need a body to parse, not a 304
+        if res.status != "ok" or res.content is None:
+            unread = unread or _unread_fetch(res)
             continue
-        for m in parse_egc_index(body, page):
+        for m in parse_egc_index(res.content, page):
             if m["meeting_num"] == meeting_num:
                 row = m
                 break
@@ -986,12 +1075,20 @@ def _list_egc(committee: Committee, meeting_num: int, *, db_path: str | None) ->
             break
         time.sleep(POLITE_DELAY)
     if row is None:
-        return []
+        # No page carries the row. If one failed to load it may have been that one, so the meeting
+        # is not read either way; the failure, when there was one, is the better explanation.
+        return unread or _unread(
+            "not_found",
+            f"第{meeting_num}回 is not listed on {committee.url} or its {len(committee.log_pages)} log page(s)",
+            committee.url,
+        )
 
     links = list(row["direct_pdfs"])
     if row.get("haifu_url"):
         time.sleep(POLITE_DELAY)
-        s, body = _fetch(row["haifu_url"], db_path=db_path, force=True)
-        if s == "ok" and body is not None:
-            links.extend(parse_pdf_links(body, row["haifu_url"]))
-    return _materials_from_links(meeting_num, links)
+        res = _fetch_ex(row["haifu_url"], db_path=db_path, force=True)
+        if res.status != "ok" or res.content is None:
+            # The row's own PDFs are in hand but the handouts it links are not: a partial list.
+            return _unread_fetch(res, _materials_from_links(meeting_num, links))
+        links.extend(parse_pdf_links(res.content, row["haifu_url"]))
+    return Listing(_materials_from_links(meeting_num, links))

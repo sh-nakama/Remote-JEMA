@@ -242,6 +242,23 @@ def test_policy_run_meeting_needs_a_committee(stubs):
     assert "run" not in stubs.calls
 
 
+def test_policy_run_says_how_many_failures_never_reached_notebooklm(stubs, monkeypatch):
+    """``errored`` includes the meetings that failed before NotebookLM, which cost no slot, so the
+    line splits them out; a summary from before the split (the stub's) reads as none."""
+    summary = {"processed": 5, "done": 1, "errored": 3, "blocked": 1, "unsent": 2, "synthesized": 1}
+    monkeypatch.setattr("repower.policy.pipeline.run", lambda *a, **k: summary)
+
+    result = CliRunner().invoke(cli.app, ["policy", "run"])
+
+    assert result.exit_code == 0, result.output
+    assert "processed=5 done=1 errored=3 blocked=1 unsent=2 skipped=0 synthesized=1" in result.output
+
+    monkeypatch.setattr("repower.policy.pipeline.run",
+                        lambda *a, **k: {"processed": 1, "done": 1, "errored": 0, "synthesized": 1})
+    result = CliRunner().invoke(cli.app, ["policy", "run"])
+    assert "blocked=0 unsent=0 skipped=0" in result.output
+
+
 def test_backfill_spans_since_to_today_for_every_source(stubs):
     # The weekly re-validation's arguments; TODAY is 2026-09-27, six months after 2026-03.
     argv = ["backfill", "--since", "2026-03", "--jepx-since", "2025", "--eprx-since", "2025"]
