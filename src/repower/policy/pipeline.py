@@ -93,6 +93,15 @@ _ENGLISH_DIGEST_Q = (
     "Key decisions, Points of disagreement, Action items. Base everything strictly on the sources."
 )
 
+# Translates the stored English digest rather than asking for a second summary: two summaries of
+# the same papers would pick different points. The weekly email relies on the bullets lining up.
+_JAPANESE_DIGEST_Q = """次の英語の要約を日本語（だ・である調）に翻訳してください。
+用語・組織名・数値は資料の正式な表記に合わせること。
+見出しは順に「決定事項」「意見の相違」「対応事項」とし、箇条書きは英語と同じ数・同じ順序に保ち、追加・省略・統合・分割をしないこと。
+「**タイトル**: 本文」の形の箇条書きは同じ形を保つこと。前置きや補足は書かないこと。
+
+{digest}"""
+
 _SYNTHESIS_PROMPT = """\
 この委員会のこれまでの会合要約に基づき、現在の政策的な議論の全体像を、会合番号を付して要約してください。
 必ず以下の4部構成とすること。
@@ -509,13 +518,25 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         except nb.NotebookLMError as e:
             logger.warning("topic classification failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
+        # After classification, so that question's conversation is unchanged. Best-effort like the
+        # English digest: without it the weekly email falls back to an extract of the briefing.
+        digest_ja_json = None
+        english = (json.loads(digest_json) or {}).get("answer") if digest_json else None
+        if english:
+            try:
+                digest_ja_json = json.dumps(nb.ask(notebook_id, _JAPANESE_DIGEST_Q.format(digest=english)),
+                                            ensure_ascii=False)
+            except nb.NotebookLMError as e:
+                logger.warning("japanese digest failed for %s 第%d回: %s", committee.key, meeting_num, e)
+
         if quality_flag is None and len(briefing) < 400:
             quality_flag = "short_output"
 
         finished = datetime.now(UTC)
         update_meeting(
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
-            digest_en_json=digest_json, citations_json=citations_json, quality_flag=quality_flag,
+            digest_en_json=digest_json, digest_ja_json=digest_ja_json, citations_json=citations_json,
+            quality_flag=quality_flag,
             gen_seconds=round(time.monotonic() - started, 1),
             # This attempt succeeded, so any message from an earlier failed one no
             # longer describes the meeting — clear it rather than leave the status

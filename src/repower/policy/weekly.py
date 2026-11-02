@@ -13,11 +13,14 @@ when it was summarised, so the backlog catch-up cannot flood the email:
    from detection (all catalog committees), the METI calendar history and the
    energy-board feed, deduplicated.
 
-Each summarised meeting carries two briefs, both deterministic extracts — no model
-call: an English one from the digest (its first "Key decisions" bullets) and a
-Japanese one from the briefing (the first bullets of its 決定事項 section), citation
-markers removed. Building the report reads only the DB; the energy-board feed is
-fetched by the caller and passed in.
+Each summarised meeting carries two briefs, always whole bullets, both deterministic
+extracts with citation markers removed — no model call. The English one is the first
+"Key decisions" bullets of the digest; the Japanese one is the same bullets of the
+Japanese digest, which NotebookLM translates from the English when the meeting is
+summarised. Meetings summarised before that existed, or whose translation did not line
+up, use the first bullets of the briefing's 決定事項 section instead: a separate document,
+so those points can differ, and the email says so. Building the report reads only the
+DB; the energy-board feed is fetched by the caller and passed in.
 """
 
 from __future__ import annotations
@@ -36,8 +39,6 @@ from repower.timeutil import yesterday_jst
 WINDOW_DAYS = 7  # the last 7 complete days (JST): sent Monday morning, Monday–Sunday
 LATE_DAYS = 21  # how long before the window a meeting may be held and still be caught up
 BRIEF_BULLETS = 3
-BRIEF_CHARS = 260
-BRIEF_CHARS_JA = 120  # a Japanese character carries roughly two English ones' worth
 
 SUMMARISED = "Summarised"
 PENDING = "Summary pending"
@@ -60,7 +61,8 @@ class WeeklyItem:
     meeting_num: int | None = None
     url: str | None = None
     brief: list[tuple[str, str]] = field(default_factory=list)  # (title, text); title may be ""
-    brief_ja: list[tuple[str, str]] = field(default_factory=list)  # same shape, from the briefing
+    brief_ja: list[tuple[str, str]] = field(default_factory=list)  # same shape
+    brief_ja_matched: bool = False  # brief_ja is brief's translation, bullet for bullet (else: from the briefing)
     torimatome: bool = False
 
 
@@ -119,32 +121,14 @@ def _undecided_ja(title: str) -> bool:
     return "提案" in t and not re.search(r"決定|確定|合意", t)
 
 
-def _truncate(s: str, n: int = BRIEF_CHARS) -> str:
-    if len(s) <= n:
-        return s
-    cut = s[:n].rsplit(" ", 1)[0].rstrip(",;:—- ")
-    return cut + "…"
-
-
-def _truncate_ja(s: str, n: int = BRIEF_CHARS_JA) -> str:
-    """No spaces to break on: back off to the last 、/。 when one is near the end."""
-    if len(s) <= n:
-        return s
-    cut = s[:n]
-    stop = max(cut.rfind("、"), cut.rfind("。"))
-    if stop >= n * 2 // 3:
-        cut = cut[:stop]
-    return cut.rstrip("、。・：: ") + "…"
-
-
 def _split_bullet(raw: str, ja: bool = False) -> tuple[str, str]:
     """``**Title**: body`` → (title, body). A title-only bullet ("**Title:**", its
     content in sub-bullets) returns an empty body for the caller to fill."""
-    clean, trunc = (_clean_ja, _truncate_ja) if ja else (_clean, _truncate)
+    clean = _clean_ja if ja else _clean
     m = _TITLED_RE.match(raw.strip())
     if m:
-        return clean(m.group(1)).rstrip(":： "), trunc(clean(m.group(2)))
-    return "", trunc(clean(raw))
+        return clean(m.group(1)).rstrip(":： "), clean(m.group(2))
+    return "", clean(raw)
 
 
 def _digest_answer(digest_en_json: str | None) -> str:
@@ -192,16 +176,16 @@ def _bullets(lines: list[str], from_idx: int, *, stop_at_heading: bool, limit: i
 
 
 def extract_brief(answer: str, limit: int = BRIEF_BULLETS) -> list[tuple[str, str]]:
-    """The first ``limit`` top-level bullets of the digest's "Key decisions" section.
+    """The first ``limit`` top-level bullets of the digest's "Key decisions" (決定事項) section.
 
     Falls back to the first top-level bullets anywhere, then to the first paragraph,
     so a digest with a different shape still yields something. Citation markers,
-    bold and LaTeX delimiters are stripped; each bullet is truncated.
+    bold and LaTeX delimiters are stripped; bullets stay whole.
     """
     lines = (answer or "").splitlines()
     for i, ln in enumerate(lines):
         h = _HEADING_RE.match(ln)
-        if h and "key decision" in _clean(h.group(1)).lower():
+        if h and re.search("key decision|決定事項", _clean(h.group(1)).lower()):
             found = _bullets(lines, i + 1, stop_at_heading=True, limit=limit)
             if found:
                 return found
@@ -211,7 +195,7 @@ def extract_brief(answer: str, limit: int = BRIEF_BULLETS) -> list[tuple[str, st
     for para in re.split(r"\n\s*\n", answer or ""):
         text = " ".join(ln for ln in para.splitlines() if not _HEADING_RE.match(ln) and ln.strip() != "---")
         if _clean(text):
-            return [("", _truncate(_clean(text)))]
+            return [("", _clean(text))]
     return []
 
 
@@ -274,8 +258,19 @@ def extract_brief_ja(briefing: str, limit: int = BRIEF_BULLETS) -> list[tuple[st
                 return found
         for b in blocks:
             if text := _first_paragraph_ja(lines, b + 1):
-                return [("", _truncate_ja(text))]
+                return [("", text)]
     return []
+
+
+def _set_briefs(it: WeeklyItem, m: dict) -> None:
+    """Both briefs of a summarised meeting. The Japanese digest counts only when it has as many
+    bullets as the English, the one sign available here that it did not merge or drop any."""
+    en, ja = _digest_answer(m["digest_en_json"]), _digest_answer(m["digest_ja_json"])
+    it.brief = extract_brief(en)
+    if ja and len(extract_brief(ja, limit=999)) == len(extract_brief(en, limit=999)):
+        it.brief_ja, it.brief_ja_matched = extract_brief(ja), True
+    else:
+        it.brief_ja = extract_brief_ja(m["briefing_md"])
 
 
 # ── Assembly ─────────────────────────────────────────────────────────────────
@@ -362,8 +357,7 @@ def build_report(
         it = item(key, day=day, num=num, status=_meeting_status(m["state"]))
         it.torimatome = m["has_torimatome"]
         if it.tracked and m["state"] == "done":
-            it.brief = extract_brief(_digest_answer(m["digest_en_json"]))
-            it.brief_ja = extract_brief_ja(m["briefing_md"])
+            _set_briefs(it, m)
             summarised.append(it)
         else:
             held.append(it)
@@ -418,8 +412,7 @@ def build_report(
             continue
         it = item(m["committee_key"], day=m["meeting_date"], num=m["meeting_num"], status=SUMMARISED)
         it.torimatome = m["has_torimatome"]
-        it.brief = extract_brief(_digest_answer(m["digest_en_json"]))
-        it.brief_ja = extract_brief_ja(m["briefing_md"])
+        _set_briefs(it, m)
         late.append(it)
 
     return WeeklyReport(
@@ -459,7 +452,8 @@ _EMPTY_HELD = "No other committee meetings were recorded last week."
 
 def _briefs(it: WeeklyItem) -> list[tuple[str, str, str, list[tuple[str, str]]]]:
     """(label, lang, title separator, bullets) for each language that has a brief."""
-    out = [("English", "en", ": ", it.brief), ("日本語", "ja", "：", it.brief_ja)]
+    ja = "日本語" if it.brief_ja_matched or not it.brief else "日本語（ブリーフィングより抜粋）"
+    out = [("English", "en", ": ", it.brief), (ja, "ja", "：", it.brief_ja)]
     return [b for b in out if b[3]]
 
 
@@ -510,6 +504,14 @@ _STATUS_COLORS = {
     FAILED: ("#991b1b", "#fee2e2"),
     UNTRACKED: ("#374151", "#e5e7eb"),
 }
+
+
+def _source_note(report: WeeklyReport) -> str:
+    note = "Briefs are extracts of each meeting's English digest and its Japanese translation."
+    if any(it.brief_ja and not it.brief_ja_matched for it in report.summarised + report.late):
+        note += (" Japanese briefs marked ブリーフィングより抜粋 come from the meeting's Japanese briefing, "
+                 "a separate document, so they may cover different points.")
+    return note
 
 
 def render_html(report: WeeklyReport) -> str:
@@ -566,6 +568,5 @@ def render_html(report: WeeklyReport) -> str:
     if report.undated:
         parts.append(f'<p style="color:#6b7280;font-size:12px;margin-top:20px">{e(_undated_note(report.undated))}</p>')
     parts.append('<p style="color:#9ca3af;font-size:12px;margin-top:24px">Sent by the weekly-summary '
-                 "workflow. Briefs are extracts of each meeting's English digest and Japanese "
-                 "briefing.</p></div>")
+                 f"workflow. {e(_source_note(report))}</p></div>")
     return "\n".join(parts)

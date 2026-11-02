@@ -1306,6 +1306,7 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
             if was_done:
                 m.briefing_md = None
                 m.digest_en_json = None
+                m.digest_ja_json = None
                 m.citations_json = None
                 m.report_task_id = None
                 m.summarised_at = None
@@ -1543,6 +1544,7 @@ def meetings_for_week(
                 "state": m.state,
                 "has_torimatome": bool(m.has_torimatome),
                 "digest_en_json": m.digest_en_json,
+                "digest_ja_json": m.digest_ja_json,
                 "briefing_md": m.briefing_md,
                 "summarised_at": m.summarised_at,
             }

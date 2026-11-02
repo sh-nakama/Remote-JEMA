@@ -256,6 +256,9 @@ class PolicyMeeting(Base):
     report_task_id: Mapped[str | None] = mapped_column(String(64))
     briefing_md: Mapped[str | None] = mapped_column(Text)  # detailed Japanese per-meeting briefing
     digest_en_json: Mapped[str | None] = mapped_column(Text)  # English ask --json (answer + references[])
+    # The same digest in Japanese, bullet for bullet: asked in the meeting's notebook right after the
+    # English one, since the notebook is deleted when the meeting is done. NULL on older meetings.
+    digest_ja_json: Mapped[str | None] = mapped_column(Text)
     # Where each digest citation lives: {"v", "resolvedAt", "items": [{n, url, doc, page?, pageEnd?}]}
     # (see repower.policy.citations). Kept apart from digest_en_json so the raw NotebookLM answer
     # stays untouched and the resolver can be re-run. NULL = never attempted; a non-NULL value with
@@ -634,6 +637,7 @@ def _migrate_add_policy_minutes_watch(engine) -> None:
              "ALTER TABLE policy_meeting ADD COLUMN materials_checked_at DATETIME"),
             ("summarised_at", "ALTER TABLE policy_meeting ADD COLUMN summarised_at DATETIME"),
             ("resummarised_at", "ALTER TABLE policy_meeting ADD COLUMN resummarised_at DATETIME"),
+            ("digest_ja_json", "ALTER TABLE policy_meeting ADD COLUMN digest_ja_json TEXT"),
         ],
         "policy_material": [
             ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),
