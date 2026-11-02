@@ -750,16 +750,16 @@ fixed.
   went unseen. The last step now fails the run, after the push, so detection's results still land.
   `web-deploy` triggers whatever the conclusion. Alerts use `curl -fs`: `-f` makes an HTTP error a
   failure, and keep `-s` so curl never prints the webhook URL, whose path is the secret.
-- **The weekly email waits for the morning's summaries by clock alone.** Nothing links the two
-  workflows: its 12:00 JST slot only leaves room for a summaries run that GitHub starts hours late.
-  Raising `DAILY_RUN_CAP` lengthens that run, so check the gap still holds. On Mondays the
-  11:30 JST policy slot may also still be running at 12:00, and the email cannot see what it has
-  not pushed yet.
-- **`policy.yml` runs about every 5 hours, not exactly.** Five slots leave one 4-hour gap, and
-  GitHub starts each one hours late, so two runs can fall closer together than NotebookLM's rate
-  limit needs. Such a run stops on the limit rather than failing. `DAILY_RUN_CAP` is now the cap
-  per run, despite its name. Each run also repeats `policy detect` and `resolve-citations` against
-  the WAF-guarded METI hosts, so watch for more blocks.
+- **The weekly email does not wait for summaries.** Nothing links the two workflows, and policy
+  runs start whenever the gate allows, so one may still be going at 12:00 JST on a Monday. The
+  email cannot see what that run has not pushed yet.
+- **NotebookLM's 5-hour limit is enforced by `policy-gate.yml`, not by a schedule.** GitHub starts
+  crons hours late and a run's length varies, and the limit is measured from a run's end, so a
+  6-hour slot after a 1.5-hour run would land inside it. The gate ticks hourly, and `policy.yml`
+  has no cron of its own and checks the same rule (`policy/run_gate.py`), so a manual run skips
+  summarising too. The rule reads GitHub's run list, so **a local `policy run` on the same account
+  is invisible to it**. `DAILY_RUN_CAP` is the cap per run, despite its name. Each run repeats
+  `policy detect` and `resolve-citations` against the WAF-guarded METI hosts, so watch for blocks.
 - **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
   translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
   when the meeting is done. So meetings summarised earlier have none until they are summarised
@@ -949,7 +949,7 @@ fixed.
   *ahead*, so before this the daily run summarised papers for meetings that had not happened
   (`chousei_jukyu` 第123回, six days early) and then spent a second quota slot rewriting them
   when the late-paper requeue fired. Rules that are easy to break:
-  - `upcoming` is `meeting_date >= today` (JST), not `>`: the 06:30 run precedes a same-day meeting.
+  - `upcoming` is `meeting_date >= today` (JST), not `>`: a run can precede a same-day meeting.
   - Only `CONTENT_KINDS` (minutes / brief / compilation / handout) make a meeting readable. An
     agenda lists what *will* be discussed and an appendix is a data sheet, so neither counts.
   - `no_papers` (EGC only) is the index's "nothing to read"; papers on file outrank it. See the EGC entry.

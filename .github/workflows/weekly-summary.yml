@@ -10,9 +10,8 @@ name: Weekly Summary Email
 
 on:
   schedule:
-    # 03:00 UTC = 12:00 JST Monday. GitHub starts both this and the summaries job
-    # (06:30 JST slot) hours late, and a 12-meeting summaries run takes 1–2 hours,
-    # so an earlier slot could email before that morning's summaries have landed.
+    # 03:00 UTC = 12:00 JST Monday. Summaries runs start whenever policy-gate.yml allows,
+    # so one may still be going then; the email cannot see what it has not pushed yet.
     - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:

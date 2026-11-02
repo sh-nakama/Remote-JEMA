@@ -1,19 +1,14 @@
 name: Daily Policy Summaries
 
 # Detection runs daily (folded into the data pipeline's `run-all`). This separate
-# job does the slow, *authenticated* NotebookLM summarisation every 5 hours, which is how
-# long NotebookLM's rate limit takes to clear, and emits a digest. Each run mints a NotebookLM session from the NOTEBOOKLM_MASTER_TOKEN_JSON secret,
+# job does the slow, *authenticated* NotebookLM summarisation and emits a digest. It has no
+# schedule of its own: policy-gate.yml starts it when NotebookLM's 5-hour limit has cleared, up
+# to 4 times per JST day, and the job checks that limit again itself. Each run mints a NotebookLM session from the NOTEBOOKLM_MASTER_TOKEN_JSON secret,
 # then gates on `auth check --test`: if that fails (secret missing, token revoked) it alerts,
 # pushes what detection found and then marks the run failed (never fabricating summaries),
 # so a dead login cannot hide behind green runs.
 
 on:
-  schedule:
-    # 11:30, 16:30, 21:30, 02:30 and 06:30 JST. The 06:30 slot follows the daily data cron +
-    # detection, and the slot before it is only 4 hours earlier because five runs don't divide
-    # 24 hours evenly. GitHub starts them hours late (06:30 ran about 09:00–10:50 JST in October);
-    # a run that starts while another is going waits in the hf-dataset queue.
-    - cron: "30 2,7,12,17,21 * * *"
   workflow_dispatch:
     inputs:
       committee:
@@ -27,9 +22,11 @@ on:
         type: boolean
         default: false
 
-# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo.
+# Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo
+# and this workflow's earlier runs.
 permissions:
   contents: read
+  actions: read
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -107,8 +104,18 @@ jobs:
           ok=$(python -c "import json; d=json.load(open('auth.json')); print('true' if d.get('status')=='ok' and d.get('checks',{}).get('token_fetch') else 'false')" 2>/dev/null || echo false)
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
+      - name: Check the 5-hour NotebookLM limit
+        id: gate
+        # Here as well as in policy-gate.yml so a run started by hand obeys it. If the check
+        # itself fails, `due` stays unset and the run does not summarise.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          POLICY_RUN_ID: ${{ github.run_id }}
+        run: python src/repower/policy/run_gate.py
+
       - name: Summarise pending meetings + emit digest
-        if: steps.auth.outputs.ok == 'true'
+        if: steps.auth.outputs.ok == 'true' && steps.gate.outputs.due == 'true'
         # Inputs go through env: spliced into the script, a crafted value would run as shell
         # in a job that holds the NotebookLM session.
         env:

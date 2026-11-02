@@ -187,7 +187,7 @@ The work is split by whether it needs NotebookLM authentication:
   OCCTO probe). It folds into the daily `run-all` pipeline, so the worklist of
   unsummarised meetings stays current with no cookies required.
 - **Summarisation needs a live NotebookLM session.** Google rotates NotebookLM
-  cookies quickly, so summarisation runs **about every 5 hours** (`policy.yml`) on a session minted
+  cookies quickly, so summarisation runs **up to 4 times a day, at least 5 hours apart** (`policy.yml`) on a session minted
   from a master token, gated on a network-validated auth check; if that fails the job
   alerts, pushes what detection found and marks the run failed, **without fabricating
   summaries**.
@@ -293,7 +293,9 @@ behind one another instead of racing. A push from your own machine is not in tha
   scrape → analyze → policy detect, dates, topic tags, upcoming schedule and committee
   discovery → notify), prunes the HTTP cache, pushes back, then runs `check-freshness`
   so a silently stale source fails the run.
-- **`policy.yml`** — about every 5 hours + `workflow_dispatch` authenticated
+- **`policy-gate.yml`** — hourly: starts `policy.yml` when at least 5 hours have passed since the
+  last summarising run ended and fewer than 4 have run that JST day.
+- **`policy.yml`** — started by `policy-gate.yml` or `workflow_dispatch`: authenticated
   NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
   pending meetings (`--committee`, `--max-per-run` inputs), post a list of what finished, then resolve
   the source page behind citations for up to 5 earlier meetings (`resolve-citations`;

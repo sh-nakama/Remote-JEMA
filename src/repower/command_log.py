@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 PATH = POLICY_DIR / ".cli_runs.json"  # gitignored with the rest of data/policy
 KEEP = 60
-# The policy runs write to the shared dataset about every 5 hours; a copy pulled earlier than this
+# The policy runs write to the shared dataset several times a day; a copy pulled earlier than this
 # is likely to be missing something. A heuristic, so the pane warns rather than refuses.
 PULL_FRESH_HOURS = 12
 
