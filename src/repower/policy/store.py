@@ -14,8 +14,10 @@ import logging
 import re
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, or_
+from sqlalchemy.orm import InstrumentedAttribute, load_only
 
 from repower.config import POLICY_DIR
 from repower.db import (
@@ -1714,6 +1716,44 @@ def meetings_missing_materials(key: str, db_path: str | None = None) -> list[int
                 if state != "done" and num not in with_mats and note != NO_PAPERS]
 
 
+# SQLite refuses a statement with more bound values than its variable limit (999 before 3.32), and
+# the committee key takes one of them.
+_SQLITE_IN_CHUNK = 500
+
+
+def _set_meeting_field(key: str, column: InstrumentedAttribute[Any], values: dict[int, Any], *,
+                       skip_none: bool, db_path: str | None) -> int:
+    """Write *column* of committee *key*'s meetings from ``{meeting_num: value}``; the number changed.
+
+    What :func:`set_meeting_dates` and :func:`set_meeting_index_notes` have in common. A committee's
+    index covers hundreds of meetings, so the rows come back one ``meeting_num IN (...)`` query per
+    chunk rather than one query per number. A row is written only when its value differs, numbers
+    with no row are ignored, and ``updated_at`` is never touched: a backfill must not reshuffle the
+    views ordered by it. *skip_none* says what ``None`` means: "unknown" for a date, which must not
+    blank one already known, but a value for a note, where it clears a stale one.
+    """
+    if not values:
+        return 0
+    nums = [n for n, v in values.items() if not (skip_none and v is None)]
+    with session_scope(db_path) as session:
+        changed = 0
+        for i in range(0, len(nums), _SQLITE_IN_CHUNK):
+            rows = (
+                session.query(PolicyMeeting)
+                # A row can carry a whole briefing; only the number and the field are needed here.
+                .options(load_only(PolicyMeeting.meeting_num, column))
+                .filter(PolicyMeeting.committee_key == key,
+                        PolicyMeeting.meeting_num.in_(nums[i:i + _SQLITE_IN_CHUNK]))
+                .all()
+            )
+            for m in rows:
+                value = values[m.meeting_num]
+                if getattr(m, column.key) != value:
+                    setattr(m, column.key, value)
+                    changed += 1
+        return changed
+
+
 def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = None) -> int:
     """Set ``meeting_date`` for the given ``{meeting_num: date}`` of committee *key*.
 
@@ -1721,20 +1761,7 @@ def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = No
     is deliberately left alone so a pure date backfill doesn't reshuffle
     recency-ordered views. Returns the number of rows updated.
     """
-    if not dates:
-        return 0
-    with session_scope(db_path) as session:
-        n = 0
-        for num, d in dates.items():
-            m = (
-                session.query(PolicyMeeting)
-                .filter_by(committee_key=key, meeting_num=num)
-                .one_or_none()
-            )
-            if m is not None and d is not None and m.meeting_date != d:
-                m.meeting_date = d
-                n += 1
-        return n
+    return _set_meeting_field(key, PolicyMeeting.meeting_date, dates, skip_none=True, db_path=db_path)
 
 
 def index_notes_due(key: str, *, now: datetime | None = None, db_path: str | None = None) -> bool:
@@ -1766,20 +1793,7 @@ def set_meeting_index_notes(key: str, notes: dict[int, str | None],
     meeting keeps its briefing whatever its row says, so only the note is recorded for it.
     Returns the number of rows changed.
     """
-    if not notes:
-        return 0
-    with session_scope(db_path) as session:
-        n = 0
-        for num, note in notes.items():
-            m = (
-                session.query(PolicyMeeting)
-                .filter_by(committee_key=key, meeting_num=num)
-                .one_or_none()
-            )
-            if m is not None and m.index_note != note:
-                m.index_note = note
-                n += 1
-        return n
+    return _set_meeting_field(key, PolicyMeeting.index_note, notes, skip_none=False, db_path=db_path)
 
 
 # ── Upcoming (scheduled) meetings ────────────────────────────────────────────
