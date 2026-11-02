@@ -53,6 +53,15 @@ def _app_entry(file: str) -> str:
     return CONTENT[start : end if end > 0 else CONTENT.find("]\n", start)]
 
 
+def test_a_stale_login_fails_the_policy_run_only_after_the_push():
+    """Green runs hid weeks of skipped summaries; failing any earlier would lose detection's results."""
+    text = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
+    steps = re.findall(r"^\s*- name: (.+)$", text, re.MULTILINE)
+    assert steps[-1] == "Mark the run failed when auth is stale"
+    assert steps.index("Push updated DB to Hugging Face") < steps.index("Alert on failure") < len(steps) - 1
+    assert "curl -s " not in text  # a failed alert must not pass for a sent one
+
+
 def test_there_are_workflows_to_check():
     assert len(FILES) >= 8
 

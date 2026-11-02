@@ -36,7 +36,7 @@ from repower.policy import store
 from repower.policy.energy_board import committee_meti_dir
 from repower.timeutil import yesterday_jst
 
-WINDOW_DAYS = 7  # the last 7 complete days (JST): sent Monday morning, Monday–Sunday
+WINDOW_DAYS = 7  # the last 7 complete days (JST): sent on Monday, Monday–Sunday
 LATE_DAYS = 21  # how long before the window a meeting may be held and still be caught up
 BRIEF_BULLETS = 3
 
@@ -312,7 +312,7 @@ def build_report(
 ) -> WeeklyReport:
     """Assemble the weekly report for the ``days`` ending on *end* (inclusive).
 
-    *end* defaults to yesterday (JST): only complete days, so the Monday-morning run
+    *end* defaults to yesterday (JST): only complete days, so the Monday run
     covers the previous Monday–Sunday and never lists that morning's meetings as held.
     *board* is the energy-board feed (``energy_board.BoardEntry`` list), fetched by
     the caller so this function never touches the network.

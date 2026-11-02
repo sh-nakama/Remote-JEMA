@@ -195,7 +195,7 @@ def test_japanese_brief_falls_back_to_prose_but_never_to_the_agenda():
 
 # ── What goes in which section ───────────────────────────────────────────────
 def test_by_default_the_window_is_the_previous_monday_to_sunday(policy_db, monkeypatch):
-    """Sent Monday 08:00 JST: the window is the 7 complete days before it, never that morning."""
+    """Sent Monday 12:00 JST: the window is the 7 complete days before it, never that morning."""
     monday = date(2026, 10, 12)
     monkeypatch.setattr(weekly, "yesterday_jst", lambda: monday - timedelta(days=1))
     _meeting(policy_db, "system_review", 50, monday)  # today: not held yet

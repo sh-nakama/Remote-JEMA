@@ -10,9 +10,10 @@ name: Weekly Summary Email
 
 on:
   schedule:
-    # 23:00 UTC Sunday = 08:00 JST Monday — after Monday's detection (05:30) and
-    # summaries (06:30) runs.
-    - cron: "0 23 * * 0"
+    # 03:00 UTC = 12:00 JST Monday. GitHub starts both this and the summaries job
+    # (06:30 JST slot) hours late, and a 12-meeting summaries run takes 1–2 hours,
+    # so an earlier slot could email before that morning's summaries have landed.
+    - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
       dry_run:

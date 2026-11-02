@@ -216,8 +216,8 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     file: 'policy.yml', cron: '30 21 * * *', jst: '06:30',
     nameEn: 'Policy summaries', nameJa: '政策の要約',
     whenEn: 'Every day, 06:30 JST', whenJa: '毎日 06:30 JST',
-    doesEn: 'Detects new meetings, then — only if the NotebookLM login is valid — resumes stuck meetings, summarises up to 8 and builds the digest. Then, login or not, it resolves the source pages behind citations for up to 5 earlier meetings. A stale login skips the summaries and raises an alert.',
-    doesJa: '新規会合を検出し、NotebookLMのログインが有効な場合のみ、中断分の再開、最大8件の要約、ダイジェスト作成を実行。その後、ログインの有無にかかわらず、過去の会合最大5件の引用元ページを特定します。ログインが切れていると要約を省略してアラートを出します。',
+    doesEn: 'Detects new meetings, then — only if the NotebookLM login is valid — resumes stuck meetings, summarises up to 12 and builds the digest. Then, login or not, it resolves the source pages behind citations for up to 5 earlier meetings. A stale login skips the summaries, raises an alert and ends the run as failed.',
+    doesJa: '新規会合を検出し、NotebookLMのログインが有効な場合のみ、中断分の再開、最大12件の要約、ダイジェスト作成を実行。その後、ログインの有無にかかわらず、過去の会合最大5件の引用元ページを特定します。ログインが切れていると要約を省略し、アラートを出して実行を失敗扱いで終了します。',
     writes: true,
   },
   {
@@ -237,9 +237,9 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     writes: true,
   },
   {
-    file: 'weekly-summary.yml', cron: '0 23 * * 0', jst: '08:00',
+    file: 'weekly-summary.yml', cron: '0 3 * * 1', jst: '12:00',
     nameEn: 'Weekly summary email', nameJa: '週次サマリーのメール',
-    whenEn: 'Mondays, 08:00 JST', whenJa: '毎週月曜 08:00 JST',
+    whenEn: 'Mondays, 12:00 JST', whenJa: '毎週月曜 12:00 JST',
     doesEn: 'Emails the committee meetings held the previous Monday–Sunday: tracked ones with a summary (and a short brief), summaries that just landed for meetings held in the three weeks before, and every other meeting held, tracked or not.',
     doesJa: '前週（月曜〜日曜）に開催された委員会の会合をメールで送信します。要約済みの追跡中会合（短い要旨付き）、その前3週間に開催され直近1週間で要約が完成した会合、追跡の有無を問わずその他の開催会合を含みます。',
     writes: false,

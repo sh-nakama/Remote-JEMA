@@ -718,6 +718,14 @@ fixed.
   from its page's `<h1>` and uses the label only when the page can't be fetched. When that fallback
   stores a wrong name, add the page's real one to `committees.CATALOG_NAMES_JA`, which
   `sync_committees` applies to every run (editing the row alone is undone by the next HF pull).
+- **A stale NotebookLM login must end `policy.yml` red.** The run used to stay green, so its only
+  signal was a webhook alert that was silently failing, and about four weeks of skipped summaries
+  went unseen. The last step now fails the run, after the push, so detection's results still land.
+  `web-deploy` triggers whatever the conclusion. Alerts use `curl -fs`: `-f` makes an HTTP error a
+  failure, and keep `-s` so curl never prints the webhook URL, whose path is the secret.
+- **The weekly email waits for the morning's summaries by clock alone.** Nothing links the two
+  workflows: its 12:00 JST slot only leaves room for a summaries run that GitHub starts hours late.
+  Raising `DAILY_RUN_CAP` lengthens that run, so check the gap still holds.
 - **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
   translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
   when the meeting is done. So meetings summarised earlier have none until they are summarised
@@ -970,9 +978,9 @@ fixed.
 - **The Queue view is `pending_meetings`, not a second opinion.** `store.queue_snapshot` calls the
   very function `policy run --committee all` uses (tracked, breadth-first, upgrades included), so the
   order cannot drift from the run; a test pins that. Things that must stay true:
-  - `DAILY_RUN_CAP` (8) mirrors the `policy.yml` default; `test_daily_run_cap_matches_the_workflow_default`
+  - `DAILY_RUN_CAP` (12) mirrors the `policy.yml` default; `test_daily_run_cap_matches_the_workflow_default`
     fails if either changes alone. The real limiter is usually the NotebookLM daily quota, so the view
-    says "first 8", never "will run".
+    says "first 12", never "will run".
   - `items` is the first 100 by rank **plus every update/retry/moved-to-front meeting wherever it
     ranks**. A plain cap hid the one `Update` meeting — it ranked 291 of 291 then — so the chip said 1
     and the filtered list said nothing (found in the running app, not by a test).
@@ -1013,8 +1021,8 @@ fixed.
 - **The weekly email is keyed on `meeting_date`.** Undated meetings never appear (the footer
   counts them instead), so meeting-date coverage (`policy dates`, OCCTO JSON, energy-board)
   is what decides what the email can show. The window is the 7 complete days ending
-  *yesterday* (JST), so the Monday 08:00 JST run covers Monday–Sunday and never counts that
-  morning's meetings as held; a manual run mid-week covers the 7 days before it. A skipped
+  *yesterday* (JST), so the Monday 12:00 JST run covers Monday–Sunday and never counts that
+  day's meetings as held; a manual run mid-week covers the 7 days before it. A skipped
   Monday run is not caught up: windows are relative to the run date, not "since the last email".
 - **`smtplib.SMTPException` is an `OSError`.** In `notify/mail.py` the server-reply branch
   (`SMTPResponseException`: bad credentials, rejected recipient — never retried) must come
