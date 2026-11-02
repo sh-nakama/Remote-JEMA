@@ -96,7 +96,7 @@ def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
 
     Judged in this order:
 
-    * ``upcoming`` — dated *today or later*. The daily run starts at 06:30 JST, before a
+    * ``upcoming`` — dated *today or later*. A run can start before a
       same-day meeting, and committee pages post the agenda and handouts days ahead, so a
       briefing written now describes papers, not a meeting that happened.
     * ``ready`` when any of :data:`CONTENT_KINDS` is on file, whatever the index note says.

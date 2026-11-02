@@ -571,8 +571,8 @@ def _require_auth_or_exit() -> None:
             typer.echo(problem, err=True)
             raise typer.Exit(code=2)
         typer.echo("NotebookLM auth is missing/stale.", err=True)
-        typer.echo("Run `notebooklm login` locally (or refresh the NOTEBOOKLM_AUTH_JSON "
-                   "secret), then retry.", err=True)
+        typer.echo("Run `notebooklm login` locally (on GitHub, check the "
+                   "NOTEBOOKLM_MASTER_TOKEN_JSON secret), then retry.", err=True)
         raise typer.Exit(code=2)
 
 
@@ -946,8 +946,8 @@ def policy_login(
 
     Wraps ``notebooklm login``, which saves the session by itself once sign-in is detected (no
     terminal input), so it can run from the web app's button as well as from a terminal. This
-    refreshes the LOCAL session; the daily GitHub Action reads the NOTEBOOKLM_AUTH_JSON secret,
-    which is updated separately."""
+    refreshes the LOCAL session; the daily GitHub Action mints its own session from the
+    NOTEBOOKLM_MASTER_TOKEN_JSON secret."""
     import os
     import subprocess
 
@@ -982,8 +982,8 @@ def policy_login(
     if not auth_ok():
         typer.echo("Signed in, but the session did not validate — try again.", err=True)
         raise typer.Exit(code=1)
-    typer.echo("NotebookLM session is valid. (The daily GitHub Action uses the NOTEBOOKLM_AUTH_JSON "
-               "secret — update that separately if the cron needs the new session.)")
+    typer.echo("NotebookLM session is valid. (The daily GitHub Action signs in separately, with the "
+               "NOTEBOOKLM_MASTER_TOKEN_JSON secret.)")
 
 
 @policy_app.command("resume")

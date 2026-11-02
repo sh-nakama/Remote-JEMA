@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from repower.policy import run_gate
+
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
 GUIDE = (ROOT / "docs" / "USER-GUIDE.md").read_text(encoding="utf-8")
@@ -26,9 +28,11 @@ def _crons(text: str) -> list[str]:
 
 
 def _jst(cron: str) -> str:
-    """Clock time in JST of a cron that fires at a fixed hour and minute (all of ours do)."""
-    minute, hour = cron.split()[:2]
-    return f"{(int(hour) + 9) % 24:02d}:{int(minute):02d}"
+    """Clock times in JST of a cron that fires at fixed hours or hourly, at a fixed minute (all of ours do)."""
+    minute, hours = cron.split()[:2]
+    if hours == "*":
+        return f"hourly at :{int(minute):02d}"
+    return ", ".join(f"{(int(hour) + 9) % 24:02d}:{int(minute):02d}" for hour in hours.split(","))
 
 
 def _commands(text: str) -> list[str]:
@@ -51,6 +55,28 @@ def _app_entry(file: str) -> str:
     assert start >= 0, f"{file} has no entry in AUTOMATED_RUNS (web/src/lib/guideContent.ts)"
     end = CONTENT.find("file: '", start + 1)
     return CONTENT[start : end if end > 0 else CONTENT.find("]\n", start)]
+
+
+def test_policy_run_signs_in_with_the_master_token():
+    """Inline cookies die within minutes and bypass the library's mid-run re-mint."""
+    text = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
+    steps = re.findall(r"^\s*- name: (.+)$", text, re.MULTILINE)
+    assert steps.index("Mint a NotebookLM session from the master token") < steps.index("Check NotebookLM auth")
+    assert "secrets.NOTEBOOKLM_AUTH_JSON" not in text
+    assert text.count("secrets.NOTEBOOKLM_MASTER_TOKEN_JSON") == 1  # the mint step only, not the whole job
+    assert "umask 077" in text
+
+
+def test_summarising_is_gated_on_the_notebooklm_limit():
+    """Clock slots cannot hold a 5-hour gap, so only the gate starts runs and each run checks again."""
+    policy = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
+    assert not _crons(policy)
+    assert f"- name: {run_gate.SUMMARISE_STEP}" in policy
+    assert "if: steps.auth.outputs.ok == 'true' && steps.gate.outputs.due == 'true'" in policy
+    assert "POLICY_RUN_ID: ${{ github.run_id }}" in policy
+    gate = (WORKFLOWS / "policy-gate.yml").read_text(encoding="utf-8")
+    assert f"gh workflow run {run_gate.WORKFLOW} --ref main" in gate
+    assert "hf-dataset" not in gate.split("permissions:")[1]  # it must not queue behind a run it would start
 
 
 def test_a_stale_login_fails_the_policy_run_only_after_the_push():

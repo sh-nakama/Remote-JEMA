@@ -164,10 +164,10 @@ COMMANDS: tuple[Command, ...] = (
         ("Opens a browser window on this machine for Google sign-in and saves the session.",
          "この端末でブラウザを開き、Googleにログインしてセッションを保存します。"),
         ("Only needed when the check above fails. Finish signing in within 5 minutes; no terminal input "
-         "is needed. This refreshes the LOCAL session only — the daily GitHub Action uses the "
-         "NOTEBOOKLM_AUTH_JSON secret, which you update separately. While it waits, other commands are blocked.",
+         "is needed. This refreshes the LOCAL session only — the daily GitHub Action signs in "
+         "separately, with the NOTEBOOKLM_MASTER_TOKEN_JSON secret. While it waits, other commands are blocked.",
          "上のログイン確認が失敗したときのみ。5分以内にログインを完了してください（ターミナル入力は不要）。"
-         "更新されるのはローカルのセッションのみで、日次のGitHub Actionが使うNOTEBOOKLM_AUTH_JSONシークレットは別途更新が必要です。"
+         "更新されるのはローカルのセッションのみで、日次のGitHub ActionはNOTEBOOKLM_MASTER_TOKEN_JSONシークレットで別途サインインします。"
          "待機中は他のコマンドは実行できません。"),
         (Param("browser", "choice", "--browser", ("Browser", "ブラウザ"), default="chromium",
                choices=("chromium", "chrome", "msedge")),),

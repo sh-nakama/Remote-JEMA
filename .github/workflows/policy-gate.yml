@@ -1,0 +1,33 @@
+name: Policy Run Gate
+
+# Starts policy.yml when NotebookLM's 5-hour limit has cleared, at most 4 runs per JST day. It
+# ticks hourly because GitHub starts crons hours late and a run's length varies, so fixed slots
+# could not promise the gap. This job touches no dataset, so it stays out of the hf-dataset queue
+# and web-deploy's triggers. See src/repower/policy/run_gate.py for the rule.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write # to read policy.yml's runs and start it
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check the 5-hour NotebookLM limit
+        id: gate
+        run: python3 src/repower/policy/run_gate.py
+
+      - name: Start the policy run
+        if: steps.gate.outputs.due == 'true'
+        run: gh workflow run policy.yml --ref main

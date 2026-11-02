@@ -176,13 +176,13 @@ switched from the toggle in its header:
   document count and when it was last written. A meeting that is waiting to be
   summarised carries a chip with its place in the queue (`NEW next run #5`,
   `UPDATE #291`).
-- **Queue** — what the daily run will work through, **in the order it takes it**, and
+- **Queue** — what the policy runs will work through, **in the order it takes it**, and
   what it has just worked through. Filter chips count the whole queue by kind: **New**
   (never summarised), **Update** (already summarised and still showing that summary,
   but a paper — usually the minutes — arrived afterwards, so it is written again),
   **Retry** (an earlier attempt failed) and **Moved to front** (set with the ↑ button
   or `policy queue`). A chip per committee narrows the list to it. A dashed line marks
-  where one daily run stops by count (`--max-per-run`, 12) — an **Update** is placed after every committee's newest pending meeting and ahead of deeper backlog, so it is normally inside that first 8: rows below the line carry a rough
+  where one run stops by count (`--max-per-run`, 12) — an **Update** is placed after every committee's newest pending meeting and ahead of deeper backlog, so it is normally inside that first 8: rows below the line carry a rough
   `~day N`. That is a floor — NotebookLM's daily quota usually stops a run sooner, and
   a committee whose source site is blocked that day is skipped. **Drained** lists the
   meetings summarised in the last 7 days, marked `NEW` or `UPDATE` (or `SUMMARISED`
@@ -338,7 +338,7 @@ worklist of **pending, tracked** meetings:
 3. Render the bilingual **digest** sections and mark the meeting **done**.
 4. Fold the new briefing into the committee-level **synthesis** (running doc).
 
-On the hosted setup this runs in the daily policy job (cron 06:30 JST — GitHub can start
+On the hosted setup this runs in the policy job (up to 4 times a day, at least 5 hours apart — GitHub can start
 scheduled jobs hours late); locally you can run
 it on demand.
 
@@ -464,7 +464,8 @@ the in-app copy) against the workflow files, so it cannot quietly go stale.
 | Workflow | When (UTC cron → JST) | What it runs | Writes the dataset |
 | --- | --- | --- | --- |
 | `daily.yml` — Daily Scrape & Analyze | `30 20 * * *` → 05:30 JST, every day | `repower pull-hf`, then `repower run-all` (scrape every TSO area, JEPX, fuels, news and EPRX; analyse; policy detect, dates, topic tags, upcoming schedule and committee discovery; post the webhook), `repower cache prune`, `repower push-hf`, then `repower check-freshness` as the outage alarm. | Yes |
-| `policy.yml` — Daily Policy Summaries | `30 21 * * *` → 06:30 JST, every day | `repower pull-hf`, `repower policy detect`; then, only if the NotebookLM login is valid, `repower policy resume`, `repower policy run` (up to 12 meetings) and `repower policy digest` (posts a short list of what the run finished); then, with or without a login, `repower policy resolve-citations --max-meetings 5` (finds the source page behind older digests' citations, a few meetings a day; a failure never fails the run); `repower push-hf`, retried up to 3 times. A stale login skips the summaries, raises an alert and ends the run as failed, after the push. | Yes |
+| `policy.yml` — Daily Policy Summaries | Started by `policy-gate.yml`, up to 4 times a day; manual | `repower pull-hf`, `repower policy detect`; then, only if the NotebookLM login is valid, `repower policy resume`, `repower policy run` (up to 12 meetings) and `repower policy digest` (posts a short list of what the run finished); then, with or without a login, `repower policy resolve-citations --max-meetings 5` (finds the source page behind older digests' citations, a few meetings a day; a failure never fails the run); `repower push-hf`, retried up to 3 times. A stale login skips the summaries, raises an alert and ends the run as failed, after the push. | Yes |
+| `policy-gate.yml` — Policy Run Gate | `17 * * * *` → hourly at :17 JST | Starts `policy.yml` when at least 5 hours have passed since the last summarising run ended and fewer than 4 have run that JST day; `policy.yml` checks the same rule before summarising, so a manual run obeys it too. Runs no `repower` command. | No |
 | `weekly-backfill.yml` — Weekly Deep Re-validation | `30 19 * * 0` → 04:30 JST, Mondays | `repower pull-hf`, `repower backfill` over a deeper window (about 6 months of TSO data, JEPX from last year, EPRX from FY2025) to catch late upstream revisions, `repower push-hf`. | Yes |
 | `policy-crosscheck.yml` — Monthly Committee Cross-check | `0 22 1 * *` → 07:00 JST on the 2nd of each month | `repower pull-hf`, `repower policy crosscheck` (adds energy committees the energy-board feed has and we lack, as untracked), `repower push-hf`. | Yes |
 | `weekly-summary.yml` — Weekly Summary Email | `0 3 * * 1` → 12:00 JST, Mondays | `repower pull-hf`, then `repower policy weekly`: emails the committee meetings *held* the previous Monday–Sunday — tracked ones that have a summary (with a short brief), summaries that landed in the past week for meetings held in the three weeks before, and every other meeting held, tracked or not. Manual runs can be a dry run; the HTML email is kept as a run artifact. Needs the `SMTP_USER`, `SMTP_PASSWORD` and `MAIL_TO` secrets. | No (read only) |
@@ -479,10 +480,10 @@ the in-app copy) against the workflow files, so it cannot quietly go stale.
   other*. Your own `repower push-hf` is not in that queue — it can overwrite a run that
   finished after your last pull.
 - So the safe rhythm is the one the Commands pane enforces: pull, work, push, and pull again
-  if a 05:30 or 06:30 JST run has happened in between.
+  if the 05:30 JST run or a policy run has happened in between.
 - Because the daily runs already do detect, dates, tags, schedule and discovery, you only run
   those by hand after an outage or to heal the back catalogue. The daily summaries stop at 8
-  meetings and need a valid `NOTEBOOKLM_AUTH_JSON` secret — the back catalogue is why the
+  meetings and need a valid `NOTEBOOKLM_MASTER_TOKEN_JSON` secret — the back catalogue is why the
   Backflow flow exists.
 
 ### CLI reference
@@ -529,7 +530,7 @@ only if this copy was pulled recently.
 | 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
 | 5 | `repower policy reclassify` | Re-type stored documents with the current classifier — numbered papers once filed as `other` (never summarised), rosters and glossaries filed as handouts. No network, no login; report-only unless `--apply`. The report breaks the changes down by committee and names the summarised meetings that would gain a paper. `--queue` (needs `--apply`, and acts only on the documents that same run re-types) flags those meetings for a new briefing, drained behind never-summarised meetings; without it nothing is queued (re-run one with `policy run --committee <key> --meeting <N>`). |
 | 6 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 8–10. |
-| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
+| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action signs in separately, with the `NOTEBOOKLM_MASTER_TOKEN_JSON` secret. Refuses to run while `NOTEBOOKLM_AUTH_JSON` is set. |
 | 8 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
 | 9 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
 | 10 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |

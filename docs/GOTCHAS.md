@@ -324,8 +324,9 @@ fixed.
     against it — walk `.commands` by duck-typing, as the test does.
   - `policy login` wraps `notebooklm login` (no terminal input; waits up to 5 min) and holds the
     single-flight job slot while it waits, so every other command 409s until it finishes. It
-    refreshes the *local* session only — the cron reads the `NOTEBOOKLM_AUTH_JSON` secret — and
-    `notebooklm` refuses to log in while that env var is set.
+    refreshes the *local* session only — the cron mints its own from the
+    `NOTEBOOKLM_MASTER_TOKEN_JSON` secret — and `notebooklm` refuses to log in while
+    `NOTEBOOKLM_AUTH_JSON` is set.
 
 ## GitHub Actions semantics (learned the hard way)
 
@@ -715,9 +716,19 @@ fixed.
   OCCTO section above). Only when that fails does it fall back to the **linear number probe**
   (one request per meeting number, 1 s apart), which on a cold cache means ~`max_meeting`
   sequential requests.
-- NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
-  a human `notebooklm login` can refresh; `policy.yml` alerts on staleness and must never
+- **A copied cookie snapshot does not work for CI.** Another active client on the same account
+  supersedes it within minutes (notebooklm-py's docs say about 10), so a `storage_state.json` in a
+  secret can be dead before the run starts: one copied from a 3-hour-old file failed its first
+  check, while the local session it came from still passed. `policy.yml` therefore mints from the
+  `NOTEBOOKLM_MASTER_TOKEN_JSON` secret, and `NOTEBOOKLM_AUTH_JSON` must stay unset in the job
+  because inline auth bypasses the re-mint. It still alerts when the check fails and must never
   fabricate summaries.
+- **The master token is a full-account credential.** It survives a password change, so a leak is
+  only contained by removing the device (Google Account → Security → Your devices). Use a dedicated
+  account, and keep the account name and token out of the public run logs.
+- **Summarising runs share one account's quota and session.** Anything else summarising on that
+  account (such as a local round) spends the same NotebookLM quota and drains the same queue, and
+  its `push-hf` can overwrite a run that finished after its pull. Run one summariser per account.
 - **"NotebookLM is not logged in" can really mean "the `notebooklm` program wasn't found".** It
   used to be looked up by bare name on PATH, so `repower web-api` started without its virtualenv
   activated (e.g. running `.venv/Scripts/repower.exe` directly) couldn't find it — and
@@ -739,9 +750,16 @@ fixed.
   went unseen. The last step now fails the run, after the push, so detection's results still land.
   `web-deploy` triggers whatever the conclusion. Alerts use `curl -fs`: `-f` makes an HTTP error a
   failure, and keep `-s` so curl never prints the webhook URL, whose path is the secret.
-- **The weekly email waits for the morning's summaries by clock alone.** Nothing links the two
-  workflows: its 12:00 JST slot only leaves room for a summaries run that GitHub starts hours late.
-  Raising `DAILY_RUN_CAP` lengthens that run, so check the gap still holds.
+- **The weekly email does not wait for summaries.** Nothing links the two workflows, and policy
+  runs start whenever the gate allows, so one may still be going at 12:00 JST on a Monday. The
+  email cannot see what that run has not pushed yet.
+- **NotebookLM's 5-hour limit is enforced by `policy-gate.yml`, not by a schedule.** GitHub starts
+  crons hours late and a run's length varies, and the limit is measured from a run's end, so a
+  6-hour slot after a 1.5-hour run would land inside it. The gate ticks hourly, and `policy.yml`
+  has no cron of its own and checks the same rule (`policy/run_gate.py`), so a manual run skips
+  summarising too. The rule reads GitHub's run list, so **a local `policy run` on the same account
+  is invisible to it**. `DAILY_RUN_CAP` is the cap per run, despite its name. Each run repeats
+  `policy detect` and `resolve-citations` against the WAF-guarded METI hosts, so watch for blocks.
 - **The Japanese digest can only be made at summary time.** `digest_ja_json` is NotebookLM's
   translation of `digest_en_json`, asked in the meeting's notebook, and that notebook is deleted
   when the meeting is done. So meetings summarised earlier have none until they are summarised
@@ -931,7 +949,7 @@ fixed.
   *ahead*, so before this the daily run summarised papers for meetings that had not happened
   (`chousei_jukyu` 第123回, six days early) and then spent a second quota slot rewriting them
   when the late-paper requeue fired. Rules that are easy to break:
-  - `upcoming` is `meeting_date >= today` (JST), not `>`: the 06:30 run precedes a same-day meeting.
+  - `upcoming` is `meeting_date >= today` (JST), not `>`: a run can precede a same-day meeting.
   - Only `CONTENT_KINDS` (minutes / brief / compilation / handout) make a meeting readable. An
     agenda lists what *will* be discussed and an appendix is a data sheet, so neither counts.
   - `no_papers` (EGC only) is the index's "nothing to read"; papers on file outrank it. See the EGC entry.

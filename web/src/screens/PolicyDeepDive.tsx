@@ -244,7 +244,7 @@ export function PolicyDeepDiveScreen() {
   }
   const queueMeeting = (key: string) => {
     setQueued((s2) => ({ ...s2, [key]: true }))
-    toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (daily, about 06:30 JST) · 追跡し、要約キューに登録しました')
+    toast('Tracked & queued — NotebookLM summarises it on the next catch-up run (up to 4 a day, 5+ hours apart) · 追跡し、要約キューに登録しました')
   }
 
   // Run catch-up (interactive/local only): kick the auth-free refresh on the local
@@ -662,7 +662,7 @@ export function PolicyDeepDiveScreen() {
   const dEmptySub = dIsUn
     ? 'Track this committee to add its meetings to the NotebookLM summarisation queue · 追跡するとNotebookLM要約キューに追加されます'
     : (dQueued && dM.untracked)
-      ? 'NotebookLM picks this up on the next catch-up run (daily, about 06:30 JST) · 次回の差分取得で要約されます'
+      ? 'NotebookLM picks this up on the next catch-up run (up to 4 a day, 5+ hours apart) · 次回の差分取得で要約されます'
       : dM.emptySub || ''
   const dSections = hasDigest && dM.digest ? dM.digest : []
   const dJp = hasDigest && dM.jp ? dM.jp : []
