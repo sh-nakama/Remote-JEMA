@@ -7,6 +7,7 @@ import { FreshnessChip, fmtStamp, policyCounts } from '../lib/freshness'
 import { parseDay, parseDbTs } from '../lib/time'
 import { type Meeting, type Upcoming } from './PolicyDeepDive.data'
 import { usePolicyLive } from './PolicyDeepDive.live'
+import { isNotifNew, stChip } from './PolicyDeepDive.view'
 import { filterChipBase, MONTHS, orgColor } from '../lib/chartkit'
 import { POLICY_RECENT_DAYS as RECENT_DAYS, POLICY_RECENT_MS as RECENT_MS } from '../lib/policyActivity'
 import { IconRail, TopBar, PageHeader } from '../lib/chrome'
@@ -495,19 +496,6 @@ export function PolicyDeepDiveScreen() {
   }
 
   // ---- feed ----
-  const stChip = (st: string): { txt: string; s: CSS } => {
-    const base: CSS = { fontSize: 10, fontWeight: 600, borderRadius: 999, padding: '1px 8px', flexShrink: 0, whiteSpace: 'nowrap' }
-    if (st === 'done') return { txt: 'Summarised 済', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
-    if (st === 'scheduled') return { txt: 'Scheduled 開催予定', s: { ...base, background: 'var(--upBg)', color: 'var(--up)' } }
-    if (st === 'upcoming') return { txt: 'Upcoming 開催前', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
-    if (st === 'awaiting') return { txt: 'Awaiting materials 資料待ち', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
-    if (st === 'no_papers') return { txt: 'No papers published 資料なし', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
-    if (st === 'running') return { txt: 'Summarising…', s: { ...base, background: 'var(--acTint)', color: 'var(--acT)' } }
-    if (st === 'failed') return { txt: 'Failed — retry', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
-    if (st === 'error') return { txt: 'Errored 要約エラー', s: { ...base, background: 'var(--dnBg)', color: 'var(--dn)' } }
-    if (st === 'untracked') return { txt: 'Untracked 未追跡', s: { ...base, border: '1px dashed var(--fnt2)', color: 'var(--mut)', background: 'transparent' } }
-    return { txt: 'Pending · Queued', s: { ...base, background: 'var(--bg2)', color: 'var(--mut)' } }
-  }
   const followedSet: Record<string, boolean> = {}
   committees.forEach((c) => { followedSet[c.key] = isFol(c) })
   // `tracked` = summarised by the pipeline (undefined on fixtures → treat as tracked).
@@ -793,16 +781,7 @@ export function PolicyDeepDiveScreen() {
     meta: numTag(m) + fmtDay(m.updatedAt) + (orgOf(m) ? ' · ' + orgOf(m) : ''),
   }))
   const notifNew = meetings
-    .filter(
-      (m) =>
-        m.status !== 'done' &&
-        m.status !== 'error' &&
-        m.status !== 'scheduled' &&
-        m.status !== 'upcoming' &&
-        m.status !== 'awaiting' &&
-        m.status !== 'no_papers' &&
-        nowMs - tsOf(m.updatedAt) <= RECENT_MS,
-    )
+    .filter((m) => isNotifNew(m, nowMs))
     .sort((a, b) => tsOf(b.updatedAt) - tsOf(a.updatedAt))
     .slice(0, 5)
     .map((m) => ({

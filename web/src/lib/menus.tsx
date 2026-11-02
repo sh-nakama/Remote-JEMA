@@ -8,6 +8,7 @@ import { getSnapshot, refreshSnapshots, useManifest } from './data'
 import { parseDbTs } from './policyActivity'
 import { QueueView } from './QueueView'
 import { indexQueue, KIND_META, positionLabel, type QueuePayload } from './policyQueue'
+import { isUnready, UNREADY_LABEL, type Readiness } from './readiness'
 import type { AreaKey, Level, PolicyJob } from './types'
 import { Hoverable, RawSvg, s, press } from './style'
 import { orgColor } from './chartkit'
@@ -751,7 +752,7 @@ interface MeetingStatus {
    *  held (or while only its agenda is posted) the daily run leaves it out; so it does when the
    *  committee's index says there is nothing to read (no_papers: a written, closed or
    *  video-removed meeting whose row links no document). */
-  readiness?: string
+  readiness?: Readiness
   flag: string | null
   error: string | null
   errorAt: string | null
@@ -836,17 +837,14 @@ const TH =
   "font-size:9.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--mut);white-space:nowrap;overflow:hidden;font-feature-settings:'tnum' 1"
 const TD = "font-size:11.5px;color:var(--tx2);min-width:0;font-feature-settings:'tnum' 1"
 
-function StateChip({ state, readiness, lang }: { state: string; readiness?: string; lang: string }) {
+// `readiness` is a plain string here although the payload types it: a snapshot written by another
+// build can carry a value this one has no label for, and that must fall back to the state's label.
+export function StateChip({ state, readiness, lang }: { state: string; readiness?: string; lang: string }) {
   // A meeting not worth summarising yet reads as that, not as "detected" (which implies queued).
-  const unready =
-    state !== 'done' && (readiness === 'upcoming' || readiness === 'awaiting' || readiness === 'no_papers')
-  const m = unready
-    ? readiness === 'upcoming'
-      ? { en: 'upcoming', ja: '開催前', color: 'var(--mut)' }
-      : readiness === 'no_papers'
-        ? { en: 'no papers published', ja: '資料なし', color: 'var(--mut)' }
-        : { en: 'awaiting materials', ja: '資料待ち', color: 'var(--mut)' }
-    : mstate(state)
+  const m =
+    state !== 'done' && isUnready(readiness)
+      ? { ...UNREADY_LABEL[readiness], color: 'var(--mut)' }
+      : mstate(state)
   return (
     <span style={s('display:inline-flex;align-items:center;gap:5px;min-width:0')}>
       <span style={s(`width:7px;height:7px;border-radius:999px;flex-shrink:0;background:${m.color}`)}></span>
