@@ -694,6 +694,16 @@ fixed.
   `NotebookLMTimeout` spends no retry, so a meeting whose questions always outlast `ask`'s 180s
   would halt every run at that meeting. If `stopped_early` keeps saying `timed_out` on the same
   meeting, look there first.
+- **A failed question must not erase the answer already on file.** `digest_en_json`,
+  `digest_ja_json` and `citations_json` are one set: the translation lines up bullet for bullet
+  and the citations are numbered within the digest. On a re-run, a new English answer replaces all
+  three even if the translation failed, because the weekly email's bullet-count check cannot catch
+  an old translation of different bullets with the same count. With no new English answer all
+  three stay beside the new briefing, flagged `digest_stale`, and nothing retries it until the
+  meeting is next re-run. So a digest can be older than its briefing, by design. A committee's
+  `running_digest_en_md` works the same way, but with no flag: a failed overview question keeps
+  the old one until the committee's next meeting. An account-wide error there saves the report,
+  which is already paid for, and only then stops the run.
 - **A full synthesis notebook rolls over to a new one, it does not compact.** At
   `NOTEBOOKLM_SOURCE_CAP` the committee's synthesis continues in a fresh notebook titled
   `<key> synthesis (第N回〜)`; the full one is left intact and `archive_watermark_meeting` records

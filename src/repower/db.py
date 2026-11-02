@@ -268,7 +268,7 @@ class PolicyMeeting(Base):
     has_torimatome: Mapped[bool | None] = mapped_column(Boolean, default=False)  # とりまとめ present → milestone
     # detected → downloading → ingesting → generating → done | error
     state: Mapped[str] = mapped_column(String(16), default="detected", nullable=False)
-    quality_flag: Mapped[str | None] = mapped_column(String(32))  # e.g. ocr_suspect, short_output
+    quality_flag: Mapped[str | None] = mapped_column(String(32))  # e.g. ocr_suspect, short_output, digest_stale
     # Why the last attempt failed, in words. `quality_flag` is a coarse slug and is
     # NULL for the generic NotebookLM failure path, which left "state = error" as
     # the only trace — enough to know a meeting broke, never enough to know why.

@@ -41,6 +41,7 @@ from repower.policy.store import (
     get_committee,
     mark_materials_checked,
     mark_synthesized,
+    meeting_digest,
     meeting_gate,
     meeting_materials,
     meetings_for_synthesis,
@@ -584,10 +585,24 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
         if quality_flag is None and len(briefing) < 400:
             quality_flag = "short_output"
 
+        # The English digest, its translation and its citations are one set: the translation has
+        # to line up bullet for bullet and the citations are numbered within the digest. So a new
+        # English answer replaces all three, even if that leaves the translation empty, and without
+        # one all three stay. An earlier digest is still true of the papers it read, the briefing
+        # now covers more, and this notebook is about to go, so nothing could fill the gap later.
+        digest_fields: dict[str, str | None] = {}
+        if english:
+            digest_fields = {"digest_en_json": digest_json, "digest_ja_json": digest_ja_json,
+                             "citations_json": citations_json}
+        elif meeting_digest(committee.key, meeting_num, db_path=db_path):
+            logger.warning("policy %s 第%d回: no new English digest; keeping the earlier one beside "
+                           "the new briefing", committee.key, meeting_num)
+            quality_flag = quality_flag or "digest_stale"
+
         finished = datetime.now(UTC)
         update_meeting(
             meeting_row, db_path=db_path, state="done", briefing_md=briefing,
-            digest_en_json=digest_json, digest_ja_json=digest_ja_json, citations_json=citations_json,
+            **digest_fields,
             quality_flag=quality_flag,
             gen_seconds=round(time.monotonic() - started, 1),
             # This attempt succeeded, so any message from an earlier failed one no
@@ -790,13 +805,20 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         out_md = work / "synthesis.md"
         synthesis_md = out_md.read_text(encoding="utf-8") if nb.download_report(nb_id, task_id, out_md) else None
 
+        # The overview only replaces the one on file when there is a new one: nothing asks again
+        # until the committee's next meeting, and a slightly old overview beats none. An account-wide
+        # error still stops the run, but only after the save below: the report is already paid for,
+        # and nothing would generate it again before the committee's next meeting either.
         digest_md = None
+        halted: nb.NotebookLMError | None = None
         try:
             d = nb.ask(nb_id, "Give a one-paragraph English overview of where this committee's "
                               "discussion currently stands.")
             digest_md = (d or {}).get("answer")
-        except nb.NotebookLMError:
-            pass
+        except _HALTING as e:
+            halted = e
+        except nb.NotebookLMError as e:
+            logger.warning("synthesis overview failed for %s; keeping the earlier one: %s", committee.key, e)
 
         # last_synth_meeting is now informational (the highest meeting in the synthesis);
         # selection is driven by the per-meeting synth_done flag, not this value.
@@ -804,10 +826,13 @@ def synthesize_committee(committee: Committee, *, db_path: str | None = None) ->
         latest_num = max([prior, *added_nums, *folded]) if (added_nums or folded) else prior
         update_committee(
             committee.key, db_path=db_path,
-            running_summary_md=synthesis_md, running_digest_en_md=digest_md,
+            running_summary_md=synthesis_md,
+            **({"running_digest_en_md": digest_md} if digest_md else {}),
             last_synth_meeting=latest_num, source_count=src_count,
         )
         regenerate_running_doc(committee.key, db_path=db_path)
+        if halted:
+            raise halted
         return True
     finally:
         shutil.rmtree(work, ignore_errors=True)
