@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
+from repower.db import PolicyMaterial, PolicyMeeting
 from repower.policy import store
 from repower.policy.energy_board import committee_meti_dir
 from repower.timeutil import yesterday_jst
@@ -40,6 +41,7 @@ SUMMARISED = "Summarised"
 PENDING = "Summary pending"
 FAILED = "Summary failed"
 NOT_PUBLISHED = "Materials not yet published"
+NO_PAPERS = "No papers published"  # the web view's wording for readiness ``store.NO_PAPERS``
 UNTRACKED = "Not tracked"
 
 
@@ -175,12 +177,46 @@ def _match_registry(name: str | None, committees: list[dict]) -> str | None:
     return best[1] if best else None
 
 
-def _meeting_status(state: str | None) -> str:
+def _meeting_status(state: str | None, readiness: str | None = None) -> str:
     if state == "done":
         return SUMMARISED
+    # The committee's index says there is nothing to read, so no summary is coming and "pending"
+    # would promise one. Ahead of the error branch because the web view does the same: the
+    # no_sources failure of such a meeting is not a failure, and the next detect pass clears it.
+    if readiness == store.NO_PAPERS:
+        return NO_PAPERS
     if state == "error":
         return FAILED
     return PENDING
+
+
+def _readiness(meetings: list[dict], *, today: date, db_path: str | None) -> dict[tuple[str, int], str]:
+    """``store.meeting_readiness`` of each meeting not yet summarised — the rule the web export
+    judges "No papers published" by, fed the same inputs.
+
+    The rule needs the index note, when the page was last read and the document kinds on file;
+    ``store.meetings_for_week`` carries none of them, so they are read here. A summarised
+    meeting is left out: it reads ``Summarised`` whatever its row says.
+    """
+    held = {(m["committee_key"], m["meeting_num"]): m["meeting_date"] for m in meetings if m["state"] != "done"}
+    if not held:
+        return {}
+    keys = {key for key, _ in held}
+    with store.session_scope(db_path, commit=False) as session:
+        kinds: dict[tuple[str, int], set[str | None]] = {}
+        for key, num, kind in session.query(
+            PolicyMaterial.committee_key, PolicyMaterial.meeting_num, PolicyMaterial.kind,
+        ).filter(PolicyMaterial.committee_key.in_(keys)):
+            kinds.setdefault((key, num), set()).add(kind)
+        rows = session.query(
+            PolicyMeeting.committee_key, PolicyMeeting.meeting_num, PolicyMeeting.index_note,
+            PolicyMeeting.materials_checked_at,
+        ).filter(PolicyMeeting.committee_key.in_(keys))
+        return {
+            (key, num): store.meeting_readiness(
+                held[(key, num)], kinds.get((key, num), ()), today=today, checked_at=checked, index_note=note)
+            for key, num, note, checked in rows if (key, num) in held
+        }
 
 
 def _sort(items: list[WeeklyItem]) -> list[WeeklyItem]:
@@ -236,10 +272,14 @@ def build_report(
     seen_day: set[tuple[str, date]] = set()
     seen_name: dict[date, list[str]] = {}
 
-    # 1) Detected meetings (any catalog committee) held in the window.
-    for m in store.meetings_for_week(start, end, db_path=db_path):
+    # 1) Detected meetings (any catalog committee) held in the window. Readiness is judged as of
+    # the day after it (the day the email goes out, by default): every meeting listed was held
+    # before then, so none can read as upcoming.
+    week = store.meetings_for_week(start, end, db_path=db_path)
+    readiness = _readiness(week, today=end + timedelta(days=1), db_path=db_path)
+    for m in week:
         key, num, day = m["committee_key"], m["meeting_num"], m["meeting_date"]
-        it = item(key, day=day, num=num, status=_meeting_status(m["state"]))
+        it = item(key, day=day, num=num, status=_meeting_status(m["state"], readiness.get((key, num))))
         it.torimatome = m["has_torimatome"]
         if it.tracked and m["state"] == "done":
             it.brief = extract_brief(_digest_answer(m["digest_en_json"]))
@@ -375,6 +415,7 @@ _STATUS_COLORS = {
     SUMMARISED: ("#065f46", "#d1fae5"),
     PENDING: ("#92400e", "#fef3c7"),
     NOT_PUBLISHED: ("#92400e", "#fef3c7"),
+    NO_PAPERS: ("#92400e", "#fef3c7"),
     FAILED: ("#991b1b", "#fee2e2"),
     UNTRACKED: ("#374151", "#e5e7eb"),
 }
