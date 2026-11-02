@@ -77,10 +77,12 @@ class Material:
     kind: str  # minutes | brief | compilation | appendix | handout | agenda | other
 
 
-# What an EGC index row says about its own documents, from the ※ note beside the date.
+# What an EGC index row says about its own documents, from the ※ remark in its last cell. That
+# cell is 動画 (the meeting video), so the remark explains a missing *video* — 書面開催 / 非公開開催
+# (no meeting to film) or 削除[済み] (the recording was taken down) — and says nothing about the
+# papers in the cells before it; it only counts when the row links no document either.
 # Stored on the meeting as ``index_note`` (see ``store.meeting_readiness``).
-NOTE_NO_PAPERS = "no_papers"  # 書面開催 / 非公開開催 whose row links no document at all
-NOTE_REMOVED = "removed"  # ※削除済み — METI took the documents down; the links are dead
+NOTE_NO_PAPERS = "no_papers"  # a ※ remark (書面開催 / 非公開開催 / 削除[済み]) on a row that links no document
 
 
 @dataclass
@@ -99,10 +101,11 @@ class Discovery:
     list JSON carries dates too; only the (fallback) number probe cannot, since it
     learns nothing but which pages exist.
 
-    ``notes`` maps ``meeting_num → index note`` (:data:`NOTE_NO_PAPERS` /
-    :data:`NOTE_REMOVED`, or ``None`` for a row that carries no note) for every meeting the
-    index lists — EGC only. ``None`` entries matter: they are how a note that METI later
-    drops (papers finally posted) gets cleared.
+    ``notes`` maps ``meeting_num → index note`` (:data:`NOTE_NO_PAPERS`, or ``None`` for a row
+    that carries no note) for every meeting the index lists — EGC only. ``None`` entries matter:
+    they are how a note that METI later drops (papers finally posted) gets cleared. Only the
+    committee's main index (``committee.url``) is read, and on EGC that lists just the current
+    fiscal year, so a meeting that has moved to a log page is absent here and keeps its last note.
 
     ``error_kind``/``error_detail``/``error_url`` say *why* a failure happened.
     Without them ``status == "error"`` collapses a blocked host, an uncleared WAF
@@ -382,14 +385,15 @@ def parse_meti_meeting_urls(content: bytes | str, index_url: str) -> dict[int, s
 def egc_row_note(row_text: str, *, has_links: bool) -> str | None:
     """The index note for one EGC meeting row, or ``None``.
 
-    Judged on the row, not the label alone: a ``※書面開催`` meeting can still publish papers
-    (a 議事要旨 PDF or a 配布資料 page), and those must be summarised. So a written/closed
-    meeting is :data:`NOTE_NO_PAPERS` only when its row links nothing. ``※削除`` (also written
-    ``※削除済み``) wins regardless of links: they are what was removed.
+    The ※ remarks sit in the row's last cell, 動画 (the meeting video), and explain why there is
+    no video: ``※書面開催`` / ``※非公開開催`` (a written or closed meeting) and ``※削除`` (also
+    written ``※削除済み``: the video was taken down). They say nothing about the papers, which are
+    linked from the cells before it — a ``※書面開催`` meeting can still publish a 議事要旨 PDF or a
+    配布資料 page (第617回), and a ``※削除済み`` row usually still links its 議事要旨 / 議事録 /
+    配布資料 (rate review 第35回). Those must be summarised, so the row is judged on its links:
+    any of the remarks is :data:`NOTE_NO_PAPERS` only when the row links no document at all.
     """
-    if "※削除" in row_text:
-        return NOTE_REMOVED
-    if not has_links and re.search(r"書面開催|非公開開催", row_text):
+    if not has_links and re.search(r"書面開催|非公開開催|※削除", row_text):
         return NOTE_NO_PAPERS
     return None
 
@@ -406,6 +410,10 @@ def parse_egc_index(content: bytes | str, page_url: str, min_meeting: int | None
     frontier. Archive navigation rows list meeting *ranges* (``第1回～第25回``) and header
     rows carry neither materials nor a date, so they are dropped. First row per meeting
     number wins (main index before older log pages when the caller merges).
+
+    ``note`` is :func:`egc_row_note`'s reading of the row's ※ remark (it sits in the last,
+    動画, cell): :data:`NOTE_NO_PAPERS` when there is one and the row links no document,
+    otherwise ``None``.
     """
     soup = _soup(content)
     meetings: list[dict] = []

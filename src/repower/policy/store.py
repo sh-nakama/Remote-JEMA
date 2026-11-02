@@ -33,7 +33,7 @@ from repower.policy.committees import (
     committee_by_key,
     committee_priority,
 )
-from repower.policy.scraper import NOTE_NO_PAPERS, NOTE_REMOVED, Material
+from repower.policy.scraper import NOTE_NO_PAPERS, Material
 from repower.timeutil import today_jst
 
 logger = logging.getLogger(__name__)
@@ -67,10 +67,10 @@ def _months_before(d: date, months: int) -> date:
 CONTENT_KINDS = frozenset({"minutes", "brief", "compilation", "handout"})
 
 READY, UPCOMING, AWAITING = "ready", "upcoming", "awaiting"
-# The committee's own index says there is nothing to read: a written/closed meeting whose row
-# links no document, or documents METI took down. Same strings as the ``index_note`` they come
-# from, so a readiness value and a stored note never need translating.
-NO_PAPERS, REMOVED = NOTE_NO_PAPERS, NOTE_REMOVED
+# The committee's own index says there is nothing to read: a ※ remark (書面開催 / 非公開開催 /
+# 削除済み) on a row that links no document. Same string as the ``index_note`` it comes from, so a
+# readiness value and a stored note never need translating.
+NO_PAPERS = NOTE_NO_PAPERS
 
 # How long a "looked, found nothing to read" verdict is trusted before the meeting's page is
 # read again. Papers appear over days; a week bounds the cost to one page fetch per awaiting
@@ -81,17 +81,25 @@ RELIST_DAYS = 7
 def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
                       checked_at: datetime | None = None, index_note: str | None = None) -> str:
     """Whether a meeting is worth summarising yet: ``ready`` / ``upcoming`` / ``awaiting`` /
-    ``no_papers`` / ``removed``.
+    ``no_papers``.
 
-    * ``no_papers`` / ``removed`` — the committee's index (``index_note``) says there is
-      nothing to read: a written (書面開催) or closed (非公開開催) meeting whose row links no
-      document, or documents METI deleted (削除済み). Unlike ``awaiting`` this is not "not yet" —
-      it is not re-checked on a timer, and it outranks the documents on file because those are
-      the dead links. It is cleared when a later ``detect`` sees the note gone.
+    Judged in this order:
 
     * ``upcoming`` — dated *today or later*. The daily run starts at 06:30 JST, before a
       same-day meeting, and committee pages post the agenda and handouts days ahead, so a
       briefing written now describes papers, not a meeting that happened.
+    * ``ready`` when any of :data:`CONTENT_KINDS` is on file, whatever the index note says.
+      The note only records that the row linked no document when it was read, so a paper on
+      file is the stronger evidence — and ranking the note first would strand a meeting that
+      is already mid-pipeline, or errored with a notebook to clean up, because
+      ``pending_meetings`` would stop offering it to ``resume`` or a retry.
+    * ``no_papers`` — nothing readable is on file and the committee's index (``index_note``)
+      says there is nothing to read: a ※ remark (書面開催 / 非公開開催 / 削除済み) on a row
+      that links no document. Unlike ``awaiting`` this is not "not yet" — it is not re-checked
+      on a timer. Notes are re-derived only from the committee's *main* index
+      (``committee.url``), which on EGC lists just the current fiscal year: a note is cleared
+      when a later ``detect`` sees it gone from there, but a row that has since moved to a log
+      page keeps its last note — which is why papers on file outrank it.
     * ``awaiting`` — held (or undated) and *looked at recently* (``checked_at``, within
       :data:`RELIST_DAYS`) with none of :data:`CONTENT_KINDS` on file: an agenda alone, or
       nothing yet.
@@ -101,16 +109,18 @@ def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
       backlog that has never been listed unreachable forever. ``summarize_meeting`` lists
       it, summarises if there is something to read, and otherwise defers and records the look.
 
-    Derived from the date, the document list and the last look, never stored, so it corrects
-    itself the day the date passes or a paper appears and no row can be left stuck. An undated
-    meeting is judged on its documents alone: a missing date must not block real work.
+    Derived from the date, the document list, the last look and the index note, never stored,
+    so it corrects itself the day the date passes or a paper appears and no row can be left
+    stuck. An undated meeting is judged on its documents alone: a missing date must not block
+    real work. Any note other than ``no_papers`` (a stale ``removed`` from an earlier version)
+    is ignored.
     """
     if meeting_date is not None and meeting_date >= today:
         return UPCOMING
-    if index_note in (NO_PAPERS, REMOVED):
-        return index_note
     if CONTENT_KINDS.intersection(kinds):
         return READY
+    if index_note == NO_PAPERS:
+        return NO_PAPERS
     if checked_at is not None and (today - checked_at.date()).days < RELIST_DAYS:
         return AWAITING
     return READY
@@ -666,18 +676,25 @@ def recent_meeting_nums(key: str, since: date, db_path: str | None = None) -> li
 
     An undated meeting falls back to the day it was detected, so a committee whose
     index carries no dates still gets its latest meetings refreshed.
+
+    A not-yet-summarised meeting the committee's index marks ``no_papers`` is left out: its
+    row links nothing, so a re-read finds nothing (and costs a forced index fetch each pass).
+    ``detect`` clears the note once the main-index row links something, and the meeting is
+    refreshed normally from then on. A ``done`` meeting is never judged by its note.
     """
     with session_scope(db_path, commit=False) as session:
         rows = (
             session.query(PolicyMeeting.meeting_num, PolicyMeeting.meeting_date,
-                          PolicyMeeting.detected_at)
+                          PolicyMeeting.detected_at, PolicyMeeting.state, PolicyMeeting.index_note)
             .filter(PolicyMeeting.committee_key == key,
                     PolicyMeeting.state.in_(_REFRESHABLE_STATES))
             .order_by(PolicyMeeting.meeting_num.desc())
             .all()
         )
     out = []
-    for num, held, detected in rows:
+    for num, held, detected, state, note in rows:
+        if state != "done" and note == NO_PAPERS:
+            continue
         when = held or (detected.date() if detected else None)
         if when is not None and when >= since:
             out.append(num)
@@ -1010,7 +1027,7 @@ def pending_meetings(key: str | None = None, db_path: str | None = None,
 
     **Readiness.** With ``ready_only`` (the default) a never-summarised meeting that is not
     yet worth a briefing — ``upcoming``, ``awaiting``, or one the index says has nothing to read
-    (``no_papers`` / ``removed``), see :func:`meeting_readiness` — is
+    and that has no paper on file (``no_papers``), see :func:`meeting_readiness` — is
     left out, so it neither takes a quota slot nor counts as backlog. A meeting someone
     asked for (``gen_requested``) and a ``done`` meeting flagged for a new briefing are
     exempt. Every row carries its ``"readiness"``; ``ready_only=False`` returns them all
@@ -1256,9 +1273,10 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
       and retry count reset; the per-meeting notebook id is kept so the next run deletes it.
     * ``error`` with ``no_sources`` that is still not ready — an upcoming meeting with no
       papers is "not yet", not a failure; the red row and the spent retry go away. So is any
-      ``error`` on a meeting whose index says it has nothing to read (``no_papers`` /
-      ``removed``): a written meeting with no papers, or documents METI deleted, is not a
-      failure and retrying it only repeats the download that cannot work.
+      ``error`` on a meeting whose index says it has nothing to read (``no_papers``) and that
+      has no paper on file: a written or closed meeting with nothing posted is not a failure
+      and retrying it only repeats a page read that finds nothing. An error on a noted meeting
+      that *does* have papers on file is a real failure and is left as it is.
 
     Idempotent and cheap, so ``detect`` runs it every pass — which is also what carries the
     fix through the Hugging Face round trip. Returns ``{"unsummarised": n, "cleared": n}``.
@@ -1275,7 +1293,7 @@ def reset_unready_summaries(db_path: str | None = None, *, today: date | None = 
                     (PolicyMeeting.state == "done") & (PolicyMeeting.meeting_date >= day),
                     (PolicyMeeting.state == "error") & (
                         (PolicyMeeting.quality_flag == "no_sources")
-                        | PolicyMeeting.index_note.in_((NO_PAPERS, REMOVED))),
+                        | (PolicyMeeting.index_note == NO_PAPERS)),
                 )).all())
         for m in rows:
             if meeting_readiness(m.meeting_date, kinds_by.get((m.committee_key, m.meeting_num), ()),
@@ -1334,14 +1352,6 @@ def meeting_gate(key: str, meeting_num: int, kinds, *, today: date | None = None
         return (meeting_readiness(m.meeting_date, kinds, today=today or today_jst(),
                                   checked_at=m.materials_checked_at, index_note=m.index_note),
                 bool(m.gen_requested))
-
-
-def meeting_index_note(key: str, meeting_num: int, db_path: str | None = None) -> str | None:
-    """The committee index's note on one meeting (``no_papers`` / ``removed``), or ``None``."""
-    with session_scope(db_path, commit=False) as session:
-        row = (session.query(PolicyMeeting.index_note)
-               .filter_by(committee_key=key, meeting_num=meeting_num).one_or_none())
-        return row[0] if row else None
 
 
 def meeting_materials(key: str, meeting_num: int, db_path: str | None = None) -> list[dict]:
@@ -1629,6 +1639,12 @@ def meetings_missing_materials(key: str, db_path: str | None = None) -> list[int
     outage) keeps zero materials — and the Policy Deep Dive hides material-less,
     non-error meetings, so such a meeting never appears even though its committee is
     tracked. This lists them so a catch-up can re-fetch their materials.
+
+    A meeting the committee's index marks ``no_papers`` is left out: its row links nothing,
+    so listing it finds nothing, and a listing that finds nothing is never stamped — every
+    catch-up would repeat it, each time as a forced EGC index fetch against the host's
+    request allowance. ``detect`` clears the note once the main-index row links something,
+    and the meeting is listed normally from then on.
     """
     with session_scope(db_path, commit=False) as session:
         with_mats = {
@@ -1639,12 +1655,13 @@ def meetings_missing_materials(key: str, db_path: str | None = None) -> list[int
             .all()
         }
         rows = (
-            session.query(PolicyMeeting.meeting_num, PolicyMeeting.state)
+            session.query(PolicyMeeting.meeting_num, PolicyMeeting.state, PolicyMeeting.index_note)
             .filter_by(committee_key=key)
             .order_by(PolicyMeeting.meeting_num.desc())
             .all()
         )
-        return [num for (num, state) in rows if state != "done" and num not in with_mats]
+        return [num for (num, state, note) in rows
+                if state != "done" and num not in with_mats and note != NO_PAPERS]
 
 
 def set_meeting_dates(key: str, dates: dict[int, date], db_path: str | None = None) -> int:

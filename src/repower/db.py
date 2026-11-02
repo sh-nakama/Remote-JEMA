@@ -287,10 +287,10 @@ class PolicyMeeting(Base):
     # since it was first recorded). Drives the sparse re-check for late minutes.
     materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # What the committee's index says about this meeting's own documents, read from the index
-    # row beside the date (EGC's ※書面開催 / ※非公開開催 / ※削除済み): ``no_papers`` (a written or
-    # closed meeting whose row links nothing) or ``removed`` (METI took the documents down).
-    # NULL = nothing noted. Either value means there is nothing to summarise, so the meeting
-    # leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
+    # row beside the date (EGC's ※書面開催 / ※非公開開催 / ※削除済み, remarks in the 動画 video cell:
+    # the last means the video was taken down): ``no_papers`` when the row also links no document.
+    # NULL = nothing noted. With no paper on file that means there is nothing to summarise, so the
+    # meeting leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
     # Refreshed on every ``detect`` pass, so a document posted later clears it.
     index_note: Mapped[str | None] = mapped_column(String(16))
     # When the pipeline last finished writing this meeting's briefing, and — when that

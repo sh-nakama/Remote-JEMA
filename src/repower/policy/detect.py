@@ -171,10 +171,11 @@ def detect(
         known = known_meeting_nums(c.key, db_path)
         known_latest = max(known) if known else None
 
-        # EGC's index is read in full every pass rather than conditionally: its ※ notes
-        # (書面開催 / 削除済み) describe meetings that are already known, so a 304 would leave
-        # them unread for as long as the index stays unchanged. It is one small page per
-        # committee, on a host that has not needed the WAF-friendly pacing METI does.
+        # EGC's index is fetched with a body every pass rather than conditionally: the ※ remarks
+        # in its rows are what each known meeting's ``index_note`` is read from, and a 304
+        # would leave them unread for as long as the index is unchanged. That costs bytes, not
+        # extra requests — a 304 spends the host's allowance (_HOST_BUDGET) just as a 200 does —
+        # and the budget check above this still stops the pass when it is spent.
         disc = discover_meetings(c, db_path=db_path, known_latest=known_latest,
                                  force=c.is_egc)
 

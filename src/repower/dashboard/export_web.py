@@ -798,6 +798,28 @@ def _as_datetime(v) -> datetime | None:
         return None
 
 
+def _row_readiness(m, kinds, day: date) -> str:
+    """``store.meeting_readiness`` of a raw ``policy_meeting`` row.
+
+    The Deep Dive cards (:func:`build_policy_snapshot`), the Manage table
+    (:func:`build_policy_status`) and the committee rollup (:func:`build_committees_payload`)
+    must call a meeting the same thing, so all three come through here and are fed the same
+    inputs: its date, the document *kinds* on file, when its page was last read and the
+    committee index's note. A summarised meeting is always ``ready``. Raw ``text()`` SELECTs hand
+    dates back as strings, hence the parsing.
+    """
+    from repower.policy.store import READY, meeting_readiness  # local: keeps the export's import graph unchanged
+
+    if m["state"] == "done":
+        return READY
+    try:
+        held = date.fromisoformat(str(m["meeting_date"])[:10]) if m["meeting_date"] else None
+    except ValueError:
+        held = None
+    return meeting_readiness(held, kinds, today=day, checked_at=_as_datetime(m["materials_checked_at"]),
+                             index_note=m["index_note"])
+
+
 def _coverage_day(meeting_date, detected_at) -> date | None:
     """A meeting's day for coverage ageing: its real date, else when we detected it.
 
@@ -812,7 +834,8 @@ def _coverage_day(meeting_date, detected_at) -> date | None:
     return None
 
 
-def build_committees_payload(committees, meetings, material_counts=None) -> list[dict]:
+def build_committees_payload(committees, meetings, material_counts=None, *,
+                             material_kinds=None, today: date | None = None) -> list[dict]:
     """Build the ``committees.json`` payload from raw committee + meeting rows.
 
     Shared by the static export (:func:`export_policy`) and the live web API
@@ -828,8 +851,25 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
     committees whose synthesis hasn't run yet (the column is only written by the
     synthesis step, so a freshly-backfilled committee would otherwise report 0
     sources while its meetings list real documents).
+
+    ``material_kinds`` (``{(committee_key, meeting_num): {kind, …}}``) makes the rollup agree
+    with the meeting cards. A not-yet-summarised meeting whose readiness is ``no_papers`` (the
+    committee's index says it has nothing to read and nothing readable is on file) shows as "No
+    papers published", so it counts as neither ``pending`` nor ``error``, and an ``error`` on it
+    is not the committee's last update either. Every meeting row must then carry
+    ``meeting_date``, ``materials_checked_at`` and ``index_note``, and readiness is judged
+    against *today* (JST by default). Left out, meetings are bucketed by raw state alone.
     """
     from repower.policy.committees import committee_keys
+    from repower.policy.store import NO_PAPERS  # local: see _row_readiness
+
+    day = today or today_jst()
+
+    def _nothing_to_read(m, st) -> bool:
+        """Only a noted, not-yet-summarised meeting can read ``no_papers``, so judge just those."""
+        return (material_kinds is not None and st not in (None, "done") and m["index_note"] == NO_PAPERS
+                and _row_readiness(m, material_kinds.get((m["committee_key"], m["meeting_num"]), ()), day)
+                == NO_PAPERS)
 
     config_keys = set(committee_keys())
     last_date_by_com: dict[str, str] = {}
@@ -854,15 +894,20 @@ def build_committees_payload(committees, meetings, material_counts=None) -> list
         ))
         n_meetings_by_com[k] = n_meetings_by_com.get(k, 0) + 1
         st = m["state"] if "state" in m.keys() else None
+        quiet = _nothing_to_read(m, st)
         if st is not None:
             r = rollup.setdefault(k, {"done": 0, "pending": 0, "error": 0})
-            r["done" if st == "done" else "error" if st == "error" else "pending"] += 1
+            if not quiet:
+                r["done" if st == "done" else "error" if st == "error" else "pending"] += 1
         if m["meeting_date"]:
             ds = str(m["meeting_date"])[:10]
             if k not in last_date_by_com or ds > last_date_by_com[k]:
                 last_date_by_com[k] = ds
         upd = str(m["updated_at"]) if "updated_at" in m.keys() and m["updated_at"] else None
-        if upd:
+        # Its card says "No papers published", so a failure on it must not read as the
+        # committee's newest pipeline event either — that is half of what the Manage
+        # "failing" filter looks at (the other half is the ``error`` count above).
+        if upd and not (quiet and st == "error"):
             # Tie-break on meeting number. Two meetings touched in the same pass can
             # share a timestamp to the microsecond, and without a second key the
             # winner is whatever order the SELECT happened to return — so the row
@@ -975,7 +1020,8 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
         )).mappings().all()
         meetings = con.execute(text(
             "SELECT committee_key, meeting_num, meeting_date, state, quality_flag, "
-            "last_error, updated_at, detected_at, tags, " + _HAS_MATERIALS + " FROM policy_meeting"
+            "last_error, updated_at, detected_at, tags, materials_checked_at, index_note, "
+            + _HAS_MATERIALS + " FROM policy_meeting"
         )).mappings().all()
         mat_counts = {
             r["committee_key"]: r["n"]
@@ -983,7 +1029,11 @@ def build_policy_catalog(db_path: str | None = None) -> list[dict]:
                 "SELECT committee_key, COUNT(*) AS n FROM policy_material GROUP BY committee_key"
             )).mappings()
         }
-    return build_committees_payload(committees, meetings, mat_counts)
+        # What is on file per meeting, so the rollup judges readiness as the cards do.
+        mat_kinds: dict[tuple, set] = {}
+        for r in con.execute(text("SELECT committee_key, meeting_num, kind FROM policy_material")).mappings():
+            mat_kinds.setdefault((r["committee_key"], r["meeting_num"]), set()).add(r["kind"])
+    return build_committees_payload(committees, meetings, mat_counts, material_kinds=mat_kinds)
 
 
 # Per-committee cap for the status payload. Meetings that failed or are mid-flight
@@ -1042,20 +1092,10 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 got + (1 if r["status"] == "ingested" else 0),
             )
 
-    from repower.policy.store import READY, meeting_readiness
-
     day = today_jst()
 
     def _readiness(m) -> str:
-        if m["state"] == "done":
-            return READY
-        try:
-            held = date.fromisoformat(str(m["meeting_date"])[:10]) if m["meeting_date"] else None
-        except ValueError:
-            held = None
-        return meeting_readiness(held, mat_kinds.get((m["committee_key"], m["meeting_num"]), ()),
-                                 today=day, checked_at=_as_datetime(m["materials_checked_at"]),
-                                 index_note=m["index_note"])
+        return _row_readiness(m, mat_kinds.get((m["committee_key"], m["meeting_num"]), ()), day)
 
     def _stamp(m) -> tuple:
         """Newest-first sort key: chronological, not scrape order.
@@ -1095,10 +1135,10 @@ def build_policy_status(db_path: str | None = None) -> dict:
                 "date": str(m["meeting_date"])[:10] if m["meeting_date"] else None,
                 # Raw lifecycle state, NOT the Deep Dive's done/pending/error rollup.
                 "state": m["state"],
-                # ready | upcoming | awaiting | no_papers | removed — whether the meeting is worth
+                # ready | upcoming | awaiting | no_papers — whether the meeting is worth
                 # summarising yet. Only meaningful before it is summarised; the daily run leaves
-                # the others out. The last two are the committee's index saying there is nothing
-                # to read (a written meeting with no papers; documents METI deleted).
+                # the others out. The last is the committee's index saying there is nothing to
+                # read (a written, closed or video-removed meeting whose row links no paper).
                 "readiness": _readiness(m),
                 "flag": m["quality_flag"],
                 "error": m["last_error"],
@@ -1188,36 +1228,30 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
             upcoming = []
 
     mats_by_mtg: dict[tuple, list] = {}
+    mat_kinds: dict[tuple, set] = {}
     mat_counts: dict[str, int] = {}
     for x in materials:
         mats_by_mtg.setdefault((x["committee_key"], x["meeting_num"]), []).append(x)
+        mat_kinds.setdefault((x["committee_key"], x["meeting_num"]), set()).add(x["kind"])
         mat_counts[x["committee_key"]] = mat_counts.get(x["committee_key"], 0) + 1
     com_by_key = {c["committee_key"]: c for c in committees}
 
-    committees_data = build_committees_payload(committees, meetings, mat_counts)
+    day = today_jst()
+    # The committee rollup is judged on the same inputs as the cards below (``_row_readiness``), so
+    # the counts in a committee's header agree with the meetings listed under it.
+    committees_data = build_committees_payload(committees, meetings, mat_counts,
+                                               material_kinds=mat_kinds, today=day)
 
     from repower.policy.store import (  # local: see build_policy_status
         AWAITING,
         NO_PAPERS,
         READY,
-        REMOVED,
         UPCOMING,
-        meeting_readiness,
     )
 
-    day = today_jst()
-
     def readiness_of(m: RowMapping) -> str:
-        """``ready`` / ``upcoming`` / ``awaiting`` / ``no_papers`` / ``removed`` for a not-yet-summarised meeting."""
-        if m["state"] == "done":
-            return READY
-        try:
-            held = date.fromisoformat(str(m["meeting_date"])[:10]) if m["meeting_date"] else None
-        except ValueError:
-            held = None
-        kinds = {x["kind"] for x in mats_by_mtg.get((m["committee_key"], m["meeting_num"]), [])}
-        return meeting_readiness(held, kinds, today=day, checked_at=_as_datetime(m["materials_checked_at"]),
-                                 index_note=m["index_note"])
+        """``ready`` / ``upcoming`` / ``awaiting`` / ``no_papers`` for a not-yet-summarised meeting."""
+        return _row_readiness(m, mat_kinds.get((m["committee_key"], m["meeting_num"]), ()), day)
 
     def build_meeting(m: RowMapping) -> dict:
         c = com_by_key.get(m["committee_key"])
@@ -1239,7 +1273,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         # Likewise any failure on a meeting whose index says there is nothing to read.
         is_error = m["state"] == "error" and not (
             (readiness != READY and m["quality_flag"] == "no_sources")
-            or readiness in (NO_PAPERS, REMOVED))
+            or readiness == NO_PAPERS)
         out_m: dict = {
             "key": "m" + str(m["id"]),
             "com": m["committee_key"],
@@ -1315,14 +1349,9 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
         elif readiness == NO_PAPERS:
             out_m["emptyTitle"] = "No papers published · 資料なし"
             out_m["emptySub"] = (
-                "Held as a written or closed meeting, and the committee page links no document · "
-                "書面開催・非公開開催で、資料は公開されていません"
-            )
-        elif readiness == REMOVED:
-            out_m["emptyTitle"] = "Documents removed · 資料削除済み"
-            out_m["emptySub"] = (
-                "The committee page marks this meeting's documents as deleted · "
-                "委員会ページで資料が削除済みとされています"
+                "The committee page links no document for this meeting (a written or closed "
+                "meeting, or one whose recording was removed) · "
+                "委員会ページに資料へのリンクがありません（書面開催・非公開開催・動画削除済み）"
             )
         elif readiness == AWAITING:
             out_m["emptyTitle"] = "Awaiting materials · 資料待ち"
@@ -1340,15 +1369,17 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
     # Keep: summarised meetings, meetings with detected materials (pending), and
     # errored meetings (even material-less ones) — otherwise a committee can claim
     # "2 errored" in its rollup while its sessions list shows no trace of them. A meeting
-    # the index says has nothing to read is kept for the same reason: it used to be that
-    # error row, and silently dropping it would look like the meeting never happened.
+    # the index says has nothing to read is kept too, labelled "No papers published": it used
+    # to be that error row, and silently dropping it would look like the meeting never
+    # happened. The rollup leaves it out of pending and errored (``build_committees_payload``),
+    # as its card here does, so the counts and this list still agree.
     kept = [
         m
         for m in meetings
         if (m["state"] == "done" and m["digest_en_json"])
         or m["state"] == "error"
         or mats_by_mtg.get((m["committee_key"], m["meeting_num"]))
-        or readiness_of(m) in (UPCOMING, NO_PAPERS, REMOVED)
+        or readiness_of(m) in (UPCOMING, NO_PAPERS)
     ]
     kept.sort(key=lambda m: (
         0 if (m["state"] == "done" and m["digest_en_json"]) else 2 if m["state"] == "error" else 1,

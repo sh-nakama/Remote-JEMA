@@ -884,15 +884,16 @@ fixed.
   moved-to-front still outranks the tier; a single-committee run ignores it. This is the one
   outer sort key above `_tier` — it composes with the update slot rather than being a rival rule.
 - **A meeting is summarised only once it has been held and has a paper to read** —
-  `store.meeting_readiness` → `ready` / `upcoming` / `awaiting`, **derived** from the date, the
-  document kinds on file and `materials_checked_at`, never stored (so it corrects itself and no
-  row can stick). Committee pages post the agenda and handouts days *ahead*, so before this the
-  daily run summarised papers for meetings that had not happened (`chousei_jukyu` 第123回, six
-  days early) and then spent a second quota slot rewriting them when the late-paper requeue
-  fired. Rules that are easy to break:
+  `store.meeting_readiness` → `ready` / `upcoming` / `awaiting` / `no_papers`, **derived** from the
+  date, the document kinds on file, `materials_checked_at` and `index_note`, never stored (so it
+  corrects itself and no row can stick). Committee pages post the agenda and handouts days
+  *ahead*, so before this the daily run summarised papers for meetings that had not happened
+  (`chousei_jukyu` 第123回, six days early) and then spent a second quota slot rewriting them
+  when the late-paper requeue fired. Rules that are easy to break:
   - `upcoming` is `meeting_date >= today` (JST), not `>`: the 06:30 run precedes a same-day meeting.
   - Only `CONTENT_KINDS` (minutes / brief / compilation / handout) make a meeting readable. An
     agenda lists what *will* be discussed and an appendix is a data sheet, so neither counts.
+  - `no_papers` (EGC only) is the index's "nothing to read"; papers on file outrank it. See the EGC entry.
   - **"No documents on file" means *unknown*, not *none*.** Detection lists only the newest few
     meetings' documents; the other ~530 backlog meetings had no rows at all. Treating that as
     `awaiting` made the whole backlog unreachable (measured on the live DB: 532 of 643). So a
@@ -909,7 +910,7 @@ fixed.
     a `no_sources` error for a not-ready meeting is cleared. It is idempotent and it is what
     carries the fix through the HF round trip; a date that arrives *after* the summary is how a
     summary can turn out to predate its meeting.
-  - The Deep Dive shows `upcoming` / `awaiting` statuses; a calendar (`policy_upcoming`) entry
+  - The Deep Dive shows `upcoming` / `awaiting` / `no_papers` statuses; a calendar (`policy_upcoming`) entry
     for a meeting the committee page already lists ahead is dropped so it is not two cards.
 - **A late paper flags a meeting; it does not un-summarise it.** `resummarise_requested` is a
   separate column, not a state change: the meeting stays `done` and its briefing stays on the
@@ -1014,21 +1015,45 @@ fixed.
   (with a Gmail hint per code). Also: SMTP from the office network is intercepted (no AUTH or
   STARTTLS advertised), so test sending from Actions, not locally.
 
-- **An EGC index row can say "nothing to read" (`policy_meeting.index_note`).** EGC marks rows
-  `※書面開催` / `※非公開開催` (written or closed meeting) and `※削除済み` / `※削除` (documents
-  taken down). A written meeting with no links used to fail `no_sources` on every run (emsc_emsc
-  第619回, with no retry ever spent, so it took a slot each day); deleted documents download-failed
-  until the retry cap. `parse_egc_index` now reads the note, `detect` stores it, and
-  `meeting_readiness` returns `no_papers` / `removed`, so such a meeting leaves the worklist and
-  the queue (the export labels it, and `reset_unready_summaries` clears errors already on file).
-  Three things to keep in mind: (1) the note is judged on the **row**, not the label — `※書面開催`
-  with a 議事要旨 PDF or 配布資料 page (第617回) still has papers and is summarised, so `no_papers`
-  needs the row to link nothing at all; `removed` wins regardless of links. (2) EGC's index is
-  fetched **unconditionally** on every `detect` (a 304 would leave the notes of known meetings
-  unread while the page is unchanged); this is one small page per EGC committee. (3) It is
-  re-derived every pass, so a document posted later clears the note and the meeting returns —
-  nothing else needs to un-stick it. EGC only: METI and OCCTO indexes may carry similar notes,
-  which nothing reads yet.
+- **An EGC index row can say "nothing to read" (`policy_meeting.index_note`).** A row is
+  date | 第N回 | 議事要旨 | 議事録 | 配布資料 | 動画, and the `※` remarks sit in the **last (動画 =
+  video) cell**: `※書面開催` / `※非公開開催` (written or closed meeting) and `※削除` / `※削除済み`
+  all explain why there is *no video*. `削除済み` means the **recording** was taken down, never the
+  papers: the rate-review page's 第35回 is `※削除済み` and still links its 議事要旨, 議事録 and
+  配布資料. A written meeting with no links used to fail `no_sources` on every run (emsc_emsc
+  第619回, with no retry ever spent, so it took a slot each day). `parse_egc_index` now reads the
+  remark, `detect` stores it, and `meeting_readiness` returns `no_papers`, so such a meeting
+  leaves the worklist and the queue (the export labels it, and `reset_unready_summaries` clears
+  errors already on file). Things to keep in mind: (1) the remark is judged on the **row**, not
+  the label: any of the three is `no_papers` only when the row links no document at all, and a row
+  that links papers gets no note (`※書面開催` with a 議事要旨 PDF or 配布資料 page, 第617回, is
+  summarised). `no_papers` is the **only** note. PR #102 first read `削除` as "documents removed"
+  whatever the row linked, which dropped 35 of 39 rate-review meetings whose papers were all still
+  there, so don't add a note that outranks links. A stored `index_note='removed'` from that
+  version may linger in old databases and means nothing: compare with `NO_PAPERS`, never
+  `index_note is not None`. (2) **Documents on file outrank the note** in `meeting_readiness`
+  (order: upcoming, papers on file → ready, `no_papers`, awaiting). A meeting already mid-pipeline,
+  or errored while owning a notebook, stays in the worklist for `resume` / retry, and
+  `reset_unready_summaries` leaves real errors on a noted meeting that has papers alone. For the
+  same reason `summarize_meeting` has no shortcut on the note: a requested meeting bypasses the
+  gate, so with nothing readable on file it must read the page rather than trust a note that is
+  only as fresh as the last `detect`. (3) EGC's index is fetched **unconditionally** on every
+  `detect` (a 304 would leave the notes of known meetings unread while the page is unchanged).
+  That costs bytes, not requests: a 304 spends the host's `_HOST_BUDGET` allowance (16 per 300 s)
+  exactly as a 200 does, and EGC is behind the same WAF challenge as METI. (4) Notes are
+  re-derived only from the committee's **main index** (`committee.url`), which on EGC lists just
+  the current fiscal year. A note is cleared when a later `detect` sees it gone from there, so a
+  document posted later returns the meeting; but a row that has moved to a log page is never read
+  for notes again and **keeps its last one** (which is why (2) matters). (5) Whatever counts or
+  re-lists meetings has to honour the note too. The committee rollup (`build_committees_payload`,
+  given `material_kinds` by *both* `build_policy_catalog` and `build_policy_snapshot`, whose
+  SELECTs therefore carry `materials_checked_at` and `index_note`) leaves a `no_papers` meeting
+  out of `pending` and `error`, as its card does; `meetings_missing_materials` and
+  `recent_meeting_nums` skip an unsummarised one, because a listing that finds nothing is never
+  stamped, so every catch-up would repeat it as a forced index fetch. A `done` meeting is never
+  judged by its note, and the watch tier reads only `done` ones. All three readiness derivations
+  in `export_web` go through `_row_readiness`: don't add a fourth. EGC only: METI and OCCTO
+  indexes may carry similar notes, which nothing reads yet.
 
 ## Streamlit dashboard
 
