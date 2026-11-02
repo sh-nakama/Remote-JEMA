@@ -20,6 +20,7 @@ from repower.policy import pipeline, store
 from repower.policy.scraper import (
     NOTE_NO_PAPERS,
     Discovery,
+    Listing,
     Material,
     egc_row_note,
     parse_egc_index,
@@ -328,7 +329,7 @@ def test_summarize_defers_a_noted_meeting_with_nothing_on_file_once_the_page_sti
     mid = _meeting(db, "emsc_system", 619, kinds=(), meeting_date=today_jst() - timedelta(days=5),
                    index_note=NOTE_NO_PAPERS)
     listed: list[int] = []
-    monkeypatch.setattr(pipeline, "list_materials", lambda c, n, **k: listed.append(n) or [])
+    monkeypatch.setattr(pipeline, "list_materials_ex", lambda c, n, **k: listed.append(n) or Listing())
     monkeypatch.setattr(nb_mod, "create_notebook",
                         lambda *a, **k: pytest.fail("a deferred meeting must not reach NotebookLM"))
 
@@ -346,12 +347,12 @@ def test_summarize_goes_ahead_on_a_noted_meeting_that_has_papers_on_file(policy_
     _meeting(db, "emsc_system", 619, kinds=("handout", "minutes"),
              meeting_date=today_jst() - timedelta(days=5), index_note=NOTE_NO_PAPERS)
     monkeypatch.setattr(pipeline, "_scratch", lambda: tmp_path / "scratch")
-    monkeypatch.setattr(pipeline, "list_materials",
+    monkeypatch.setattr(pipeline, "list_materials_ex",
                         lambda *a, **k: pytest.fail("papers are on file: there is nothing to look up"))
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")  # stops short of NotebookLM
     monkeypatch.setattr(nb_mod, "create_notebook", lambda *a, **k: pytest.fail("download was stubbed to fail"))
 
-    assert pipeline.summarize_meeting(_egc_committee(db), 619, db_path=db) == "error"
+    assert pipeline.summarize_meeting(_egc_committee(db), 619, db_path=db) == "unsent"
 
     assert _row(db, "emsc_system", 619)["flag"] == "download_failed"   # it got as far as its papers
 
@@ -371,12 +372,13 @@ def test_a_requested_noted_meeting_reads_the_page_instead_of_trusting_the_note(
              index_note=NOTE_NO_PAPERS, gen_requested=True)
     listed: list[int] = []
     monkeypatch.setattr(pipeline, "_scratch", lambda: tmp_path / "scratch")
-    monkeypatch.setattr(pipeline, "list_materials",
-                        lambda c, n, **k: listed.append(n) or [_mat(n, kind) for kind in page])
+    monkeypatch.setattr(pipeline, "list_materials_ex",
+                        lambda c, n, **k: listed.append(n) or Listing([_mat(n, kind) for kind in page]))
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")  # stops short of NotebookLM
     monkeypatch.setattr(nb_mod, "create_notebook", lambda *a, **k: pytest.fail("download was stubbed to fail"))
 
-    assert pipeline.summarize_meeting(_egc_committee(db), 619, db_path=db) == "error"
+    # Neither failure reached NotebookLM, so the run charges neither a slot.
+    assert pipeline.summarize_meeting(_egc_committee(db), 619, db_path=db) == "unsent"
 
     assert listed == [619]
     row = _row(db, "emsc_system", 619)

@@ -31,7 +31,7 @@ from repower.policy import citations
 from repower.policy import notebook as nb
 from repower.policy import tags as topic_tags
 from repower.policy.committees import Committee
-from repower.policy.scraper import list_materials
+from repower.policy.scraper import list_materials_ex
 from repower.policy.store import (
     CONTENT_KINDS,
     READY,
@@ -153,8 +153,19 @@ def _batch_interval(n: int) -> float:
 # ``max_per_run`` — but a run still has to stop looking eventually. This bounds one
 # round to roughly a single sweep of the tracked set (~85 committees) rather than
 # letting a host-wide outage walk a backlog of thousands. Hitting it is logged, not
-# silent.
+# silent. A meeting whose committee page could not be *read* is blocked too: it
+# stays ready, so every run asks again.
 _MAX_BLOCKED_ATTEMPTS = 50
+
+# The same for meetings that fail before anything reaches NotebookLM for reasons of
+# their own (``unsent``: nothing to ingest, or documents that are gone). They cost no
+# slot either, but each can be a whole download burst — up to a dozen paced requests
+# at a WAF-guarded host — so the bound is much tighter than the one for blocked
+# meetings, which fail on their first request. A bad day (an index re-pointed so every
+# document 404s) then costs a handful of bursts instead of walking the backlog. A few
+# dead meetings ahead of live ones cannot starve them for long either: each attempt
+# spends the dead meeting's retry, and it leaves the worklist after MAX_RETRIES.
+_MAX_UNSENT_ATTEMPTS = 10
 
 # Errors that are properties of the *account or session*, not of the meeting being
 # worked on: the quota is spent, the browser cookie lapsed mid-run, or NotebookLM
@@ -268,30 +279,24 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
     """Summarise one meeting end-to-end. Returns the final state.
 
     ``'done'`` | ``'error'`` | ``'generating'`` (left for resume) | ``'blocked'`` |
-    ``'deferred'``. ``'blocked'`` means the source host stopped us before anything reached
-    NotebookLM: the DB row is still marked errored, but no quota was spent, so the
-    caller must not charge it against the run's budget. ``'deferred'`` means the meeting
-    is not ready to summarise (see :func:`~repower.policy.store.meeting_readiness`): it is
-    untouched — no error, no retry spent — and simply comes round again once it is held and
-    has papers. A meeting someone asked for (``gen_requested``) or targeted by number
-    (*force*) skips that check.
+    ``'unsent'`` | ``'deferred'``. Only ``'done'``, ``'error'`` and ``'generating'`` are attempts
+    that reached NotebookLM (got as far as the call that creates a notebook), which is what the
+    caller's ``max_per_run`` budget counts; the other three are what it must not charge.
+
+    ``'blocked'`` means the source host stopped us before anything reached NotebookLM: either the
+    meeting's committee page could not be *read* (``listing_blocked``) or its documents could not be
+    downloaded because of the host (``download_blocked``). The DB row is marked errored, no retry is
+    spent, and the meeting comes round again. ``'unsent'`` is the meeting's own failure before
+    anything reached NotebookLM: ``no_sources`` (a requested meeting whose page was read and lists no
+    usable document) or a permanent ``download_failed`` (documents that are gone — this one spends a
+    retry). The row is marked errored as for ``'error'``, but nothing changed in NotebookLM.
+    ``'deferred'`` means the meeting is not ready to summarise (see
+    :func:`~repower.policy.store.meeting_readiness`): it is untouched — no error, no retry spent —
+    and simply comes round again once it is held and has papers. A meeting someone asked for
+    (``gen_requested``) or targeted by number (*force*) skips that check.
 
     Looks up the meeting by (committee, number); the caller ensures the row exists.
     """
-    # Ensure materials are enumerated (detection may have only recorded the number).
-    materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
-    if not CONTENT_KINDS.intersection(m["kind"] for m in materials):
-        # Nothing to read on file: either the list was never taken (detection lists only the
-        # newest few meetings) or it is stale (an agenda-only list from before the papers were
-        # posted). Read the page now; the gate below decides what the answer is worth. An empty
-        # answer is "page unreachable" as often as "nothing posted", so it records no look.
-        found = list_materials(committee, meeting_num, db_path=db_path)
-        record_meeting(committee.key, meeting_num, found, db_path=db_path)
-        if found:
-            mark_materials_checked(committee.key, meeting_num, db_path=db_path)
-        materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
-
-    selected = _select_materials(materials)
     found_row = _meeting_id(committee.key, meeting_num, db_path)
     if found_row is None:
         record_meeting(committee.key, meeting_num, None, db_path=db_path)
@@ -299,6 +304,42 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
     if found_row is None:
         raise RuntimeError(f"{committee.key} #{meeting_num}: meeting row missing after record_meeting")
     meeting_row: int = found_row
+
+    # Ensure materials are enumerated (detection may have only recorded the number).
+    materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
+    if not CONTENT_KINDS.intersection(m["kind"] for m in materials):
+        # Nothing to read on file: either the list was never taken (detection lists only the
+        # newest few meetings) or it is stale (an agenda-only list from before the papers were
+        # posted). Read the page now; the gate below decides what the answer is worth.
+        #
+        # An empty list is two different facts. If the page was *read* and links nothing, the papers
+        # are not up yet: that is a look, so it is recorded and the gate rates the meeting
+        # ``awaiting`` for RELIST_DAYS instead of offering it every run. If the page could not be
+        # read (blocked, challenged, 404, a row the index does not carry) nothing is known: no look
+        # is recorded, so it stays ready and is asked again, and it is flagged, not failed — a retry
+        # spent on a page we never saw would age out a meeting for the host's mood.
+        listing = list_materials_ex(committee, meeting_num, db_path=db_path)
+        if not listing.read:
+            # What was found before the failure is not the meeting's list — recording it would let
+            # the next run see a paper on file, skip this read and summarise from a partial set.
+            why = f"{listing.error_kind}: {listing.error_detail}"
+            if listing.error_url and listing.error_url not in why:
+                why += f"; {listing.error_url}"
+            logger.warning("policy %s 第%d回: committee page not read (%s) — will retry on a later "
+                           "run without burning a retry", committee.key, meeting_num, why)
+            _fail_meeting(
+                meeting_row, db_path, flag="listing_blocked",
+                message=f"Could not read the committee page for 第{meeting_num}回 ({why}) — will be retried",
+            )
+            # Like download_blocked: nothing reached NotebookLM, so no slot is spent.
+            return "blocked"
+        record_meeting(committee.key, meeting_num, listing.materials, db_path=db_path)
+        # Recording the look also drops a stale ``listing_blocked`` error from an earlier run: the
+        # read it describes has now happened (see ``store._record_look``).
+        mark_materials_checked(committee.key, meeting_num, db_path=db_path)
+        materials = meeting_materials(committee.key, meeting_num, db_path=db_path)
+
+    selected = _select_materials(materials)
     if not force:
         readiness, requested = meeting_gate(
             committee.key, meeting_num, {m["kind"] for m in materials}, db_path=db_path)
@@ -314,7 +355,8 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
                 "material(s), none of an ingestable kind."
             ),
         )
-        return "error"
+        # Not "error" to the caller: nothing reached NotebookLM, so this must not spend a slot.
+        return "unsent"
 
     work = _scratch() / committee.key / str(meeting_num)
     started = time.monotonic()
@@ -408,7 +450,9 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
                              committee.key, meeting_num, len(failures), len(selected), detail)
                 _fail_meeting(meeting_row, db_path, flag="download_failed", message=why,
                               retry_count=_bump_retry(committee.key, meeting_num, db_path))
-            return "error"
+            # Errored, and a retry spent, but not "error" to the caller: it never got as far as
+            # NotebookLM, so it takes no slot — see `_MAX_UNSENT_ATTEMPTS` for why it is bounded.
+            return "unsent"
 
         title = f"{committee.key} 第{meeting_num}回"
         # A resumed/retried meeting may still own the notebook from its earlier
@@ -738,6 +782,12 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
     priority order) rather than draining one committee's backlog — see
     ``pending_meetings``. Returns a summary dict.
 
+    ``max_per_run`` counts only attempts that reached NotebookLM. ``processed`` counts every
+    attempt that was not deferred (so it is more than ``max_per_run`` whenever some cost no
+    slot): ``blocked`` (the host stopped us, see :func:`summarize_meeting`) and ``unsent`` (the
+    meeting failed before NotebookLM, and is also counted in ``errored``) are the two that did
+    not. Each is bounded per round, by ``_MAX_BLOCKED_ATTEMPTS`` and ``_MAX_UNSENT_ATTEMPTS``.
+
     ``meeting_num`` (with exactly one committee key) targets that one meeting and
     nothing else, *bypassing the pending worklist entirely* — so an already-``done``
     meeting can be re-summarised. That is the repair path for a briefing written
@@ -771,11 +821,15 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             work = [m for m in work if m["state"] in states]
 
     # ``max_per_run`` exists to guard the NotebookLM daily quota, so it counts the
-    # attempts that actually reach NotebookLM. A meeting whose source host blocked
-    # the downloads never got that far and cost nothing, so it does not spend a
-    # slot — pre-slicing the worklist instead let a bad METI day silently halve the
-    # round (4 of 8 slots produced nothing on the day this was written).
-    done = errored = blocked = charged = deferred = 0
+    # attempts that actually reach NotebookLM (got as far as creating a notebook). A
+    # meeting whose source host blocked the page or the downloads never got that far
+    # and cost nothing, so it does not spend a slot — pre-slicing the worklist
+    # instead let a bad METI day silently halve the round (4 of 8 slots produced
+    # nothing on the day this was written). Nor does one that failed on its own
+    # account before then (``unsent``): a requested meeting with nothing posted, or
+    # documents that are gone. Charging those let a meeting whose page lists nothing
+    # take a slot every day, on every source, ahead of ready work that never ran.
+    done = errored = blocked = unsent = charged = deferred = 0
     stop_reason: str | None = None
     touched_committees: set[str] = set()
     # Meetings passed over because their source host is cooling down, per host.
@@ -789,7 +843,15 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             logger.warning(
                 "policy run: %d meetings blocked by their source hosts before reaching "
                 "NotebookLM — stopping this round early with %d meeting(s) still pending",
-                blocked, len(work) - charged - blocked,
+                blocked, len(work) - charged - blocked - unsent,
+            )
+            break
+        if unsent >= _MAX_UNSENT_ATTEMPTS:
+            logger.warning(
+                "policy run: %d meetings failed before reaching NotebookLM (nothing usable to "
+                "ingest, or documents that could not be downloaded) — stopping this round early "
+                "with %d meeting(s) still pending",
+                unsent, len(work) - charged - blocked - unsent,
             )
             break
         committee = committee_or_config(item["committee_key"], db_path=db_path)
@@ -816,17 +878,28 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
             logger.warning("NotebookLM %s — stopping run after %d meeting(s); the rest stay "
                            "pending: %s", stop_reason, charged, e)
             break
-        if upgrade and state in ("error", "blocked"):
+        if upgrade and state in ("error", "blocked", "unsent"):
             _keep_briefing_visible(item["committee_key"], item["meeting_num"], db_path)
         if state == "deferred":
-            # Upcoming, or held with nothing to read yet. Nothing was spent and nothing
-            # changed, so it takes no slot; the worklist normally filters these out first.
+            # Upcoming, or held with nothing to read yet (the page was read and links nothing —
+            # that look is recorded, so it is not offered again for a week). Nothing was spent and
+            # nothing changed, so it takes no slot; the worklist normally filters these out first.
             deferred += 1
             continue
         if state == "blocked":
-            # Host trouble, not quota. Leave any queued dashboard request in place
+            # Host trouble, not quota: the committee page could not be read, or the host
+            # refused the downloads. Leave any queued dashboard request in place
             # so the meeting stays at the front of the next round's worklist.
             blocked += 1
+            continue
+        if state == "unsent":
+            # The meeting failed on its own account before anything reached NotebookLM. It is
+            # errored like any other failure and a person's request is spent (retrying a request
+            # for documents that are not there would only repeat it), but nothing changed in
+            # NotebookLM: no slot to charge, and no synthesis to refresh for its committee.
+            unsent += 1
+            errored += 1
+            clear_generation_request(item["committee_key"], item["meeting_num"], db_path=db_path)
             continue
         charged += 1
         touched_committees.add(item["committee_key"])
@@ -867,9 +940,10 @@ def run(keys: list[str] | None = None, *, max_per_run: int | None = None,
         )
 
     # 'processed' counts meetings actually attempted, not the whole worklist the
-    # run was free to draw from.
-    return {"processed": charged + blocked, "done": done, "errored": errored,
-            "blocked": blocked, "deferred": deferred, "synthesized": synthesized,
+    # run was free to draw from. 'errored' includes the 'unsent' ones (which cost no slot),
+    # so 'unsent' says how many of them never reached NotebookLM.
+    return {"processed": charged + blocked + unsent, "done": done, "errored": errored,
+            "blocked": blocked, "unsent": unsent, "deferred": deferred, "synthesized": synthesized,
             "skipped": sum(skipped_hosts.values()), "skipped_hosts": skipped_hosts,
             "rate_limited": stop_reason == "rate_limited", "stopped_early": stop_reason}
 

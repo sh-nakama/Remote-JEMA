@@ -221,7 +221,7 @@ def test_a_successful_rerun_replaces_the_briefing_and_clears_the_flag(monkeypatc
     assert {r["status"] for r in store.meeting_materials(KEY, 9, db_path=db)} == {"ingested"}
 
 
-@pytest.mark.parametrize("outcome", ["error", "blocked"])
+@pytest.mark.parametrize("outcome", ["error", "blocked", "unsent"])
 def test_a_failed_rerun_keeps_the_old_briefing_on_the_page(monkeypatch, policy_db, outcome):
     db = policy_db
     _no_auth_no_synthesis(monkeypatch)

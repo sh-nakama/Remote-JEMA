@@ -16,7 +16,7 @@ from repower.policy import detect as detect_mod
 from repower.policy import notebook as nb_mod
 from repower.policy import pipeline, store
 from repower.policy.committees import committee_by_key
-from repower.policy.scraper import Discovery, Material
+from repower.policy.scraper import Discovery, Listing, Material
 from repower.policy.store import AWAITING, READY, UPCOMING, meeting_readiness
 from repower.timeutil import today_jst
 
@@ -142,8 +142,8 @@ def test_summarize_relists_then_defers_a_held_meeting_with_only_an_agenda(policy
     past = today_jst() - timedelta(days=3)
     _meeting(db, "santeii", 2, kinds=("agenda",), meeting_date=past)
     listed: list[int] = []
-    monkeypatch.setattr(pipeline, "list_materials",
-                        lambda c, n, **k: listed.append(n) or [_mat(n, "agenda")])
+    monkeypatch.setattr(pipeline, "list_materials_ex",
+                        lambda c, n, **k: listed.append(n) or Listing([_mat(n, "agenda")]))
     monkeypatch.setattr(nb_mod, "create_notebook", lambda *a, **k: pytest.fail("no quota for this"))
 
     assert pipeline.summarize_meeting(committee_by_key("santeii"), 2, db_path=db) == "deferred"
@@ -158,7 +158,8 @@ def test_summarize_relists_then_defers_a_held_meeting_with_only_an_agenda(policy
 def test_summarize_goes_ahead_when_the_relisted_page_has_a_paper(policy_db, monkeypatch):
     db = policy_db
     _meeting(db, "santeii", 2, kinds=("agenda",), meeting_date=today_jst() - timedelta(days=3))
-    monkeypatch.setattr(pipeline, "list_materials", lambda c, n, **k: [_mat(n, "agenda"), _mat(n, "handout")])
+    monkeypatch.setattr(pipeline, "list_materials_ex",
+                        lambda c, n, **k: Listing([_mat(n, "agenda"), _mat(n, "handout")]))
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
     out = pipeline.summarize_meeting(committee_by_key("santeii"), 2, db_path=db)
     assert out != "deferred"
@@ -169,7 +170,7 @@ def test_an_unlisted_backlog_meeting_is_listed_not_deferred_forever(policy_db, m
     db = policy_db
     _meeting(db, "santeii", 3, kinds=(), meeting_date=today_jst() - timedelta(days=400))
     assert [m["meeting_num"] for m in store.pending_meetings(db_path=db)] == [3]
-    monkeypatch.setattr(pipeline, "list_materials", lambda c, n, **k: [_mat(n, "handout")])
+    monkeypatch.setattr(pipeline, "list_materials_ex", lambda c, n, **k: Listing([_mat(n, "handout")]))
     monkeypatch.setattr(pipeline, "_download_pdf", lambda *a, **k: "not_found")
     assert pipeline.summarize_meeting(committee_by_key("santeii"), 3, db_path=db) != "deferred"
 

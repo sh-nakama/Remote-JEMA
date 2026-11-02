@@ -238,7 +238,11 @@ a briefing written from a subset reads exactly like a complete one, and the case
 forced this rule produced a fluent summary of nothing but a table of contents. A host
 that blocked us leaves the meeting **pending** with no retry burned (try again on a
 calm day); a document that is genuinely gone (404) counts a retry and the meeting
-eventually drops off the worklist.
+eventually drops off the worklist. The committee's own page works the same way: if it
+cannot be read (blocked, or a page that returns 404) the meeting shows *the committee
+page could not be read — will be retried*, no retry is burned, and every run asks
+again; a page that *was* read and lists nothing yet is shown as **Awaiting materials**
+and looked at again a week later.
 
 The **DOCS IN** column shows `ingested/total` per meeting. A summarised meeting
 reading `0/13` or `3/12` was written before this rule and did **not** see all its
