@@ -146,8 +146,8 @@ def require_auth(*, timeout: float = 60.0) -> None:
         if problem:
             raise NotebookLMAuthError(problem)  # not a lapsed login — `notebooklm login` cannot fix this
         raise NotebookLMAuthError(
-            "NotebookLM auth missing/stale — run `notebooklm login` (or refresh the "
-            "NOTEBOOKLM_AUTH_JSON secret) before summarising."
+            "NotebookLM auth missing/stale — run `notebooklm login` (on GitHub, check the "
+            "NOTEBOOKLM_MASTER_TOKEN_JSON secret) before summarising."
         )
 
 

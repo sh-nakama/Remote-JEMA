@@ -2,10 +2,10 @@ name: Daily Policy Summaries
 
 # Detection runs daily (folded into the data pipeline's `run-all`). This separate
 # daily job does the slow, *authenticated* NotebookLM summarisation and emits a
-# digest. NotebookLM cookies go stale and only a human can re-login, so the job
-# gates on `auth check --test`: if auth is stale it alerts, pushes what detection found
-# and then marks the run failed (never fabricating summaries), so a stale session cannot
-# hide behind green runs, until the NOTEBOOKLM_AUTH_JSON secret is refreshed.
+# digest. Each run mints a NotebookLM session from the NOTEBOOKLM_MASTER_TOKEN_JSON secret,
+# then gates on `auth check --test`: if that fails (secret missing, token revoked) it alerts,
+# pushes what detection found and then marks the run failed (never fabricating summaries),
+# so a dead login cannot hide behind green runs.
 
 on:
   schedule:
@@ -43,8 +43,6 @@ jobs:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
       WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-      # storage_state.json contents from a manual `notebooklm login` (see README).
-      NOTEBOOKLM_AUTH_JSON: ${{ secrets.NOTEBOOKLM_AUTH_JSON }}
       NOTEBOOKLM_TIER: ${{ vars.NOTEBOOKLM_TIER || 'standard' }}
 
     steps:
@@ -75,11 +73,35 @@ jobs:
       - name: Detect new meetings (no auth required)
         run: python -m repower.cli policy detect
 
+      - name: Mint a NotebookLM session from the master token
+        # A copied cookie snapshot is superseded by any other active client within minutes, so
+        # the secret holds a master token, which does not rotate. Writing it to the profile
+        # also lets the library re-mint if the cookies lapse mid-run; inline
+        # NOTEBOOKLM_AUTH_JSON would bypass that, so it must stay unset in this job.
+        # The check below decides the outcome, so a failure here does not end the run. Output
+        # stays out of the log because this repo's run logs are public.
+        env:
+          NOTEBOOKLM_MASTER_TOKEN_JSON: ${{ secrets.NOTEBOOKLM_MASTER_TOKEN_JSON }}
+        run: |
+          set +e
+          if [ -z "$NOTEBOOKLM_MASTER_TOKEN_JSON" ]; then
+            echo "::warning::The NOTEBOOKLM_MASTER_TOKEN_JSON secret is not set"
+            exit 0
+          fi
+          umask 077
+          mkdir -p ~/.notebooklm/profiles/default
+          printf '%s' "$NOTEBOOKLM_MASTER_TOKEN_JSON" > ~/.notebooklm/profiles/default/master_token.json
+          unset NOTEBOOKLM_MASTER_TOKEN_JSON
+          notebooklm auth refresh --quiet > /dev/null 2>&1
+          echo "auth refresh exit code: $?"
+
       - name: Check NotebookLM auth
         id: auth
         run: |
           set +e
           notebooklm auth check --test --json > auth.json 2>/dev/null
+          # Only these fields: the rest of auth.json names the account, and run logs are public.
+          python -c "import json; d=json.load(open('auth.json')); print('status:', d.get('status'), 'checks:', d.get('checks'))" 2>/dev/null
           ok=$(python -c "import json; d=json.load(open('auth.json')); print('true' if d.get('status')=='ok' and d.get('checks',{}).get('token_fetch') else 'false')" 2>/dev/null || echo false)
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
@@ -108,14 +130,14 @@ jobs:
         continue-on-error: true
         run: python -m repower.cli policy resolve-citations --max-meetings 5
 
-      - name: Alert when auth is stale (manual re-login needed)
+      - name: Alert when auth is stale (master token needs replacing)
         if: steps.auth.outputs.ok != 'true'
         run: |
-          echo "::warning::NotebookLM auth missing/stale — run 'notebooklm login' locally and update the NOTEBOOKLM_AUTH_JSON secret, then re-run this workflow."
+          echo "::warning::NotebookLM sign-in failed — check the NOTEBOOKLM_MASTER_TOKEN_JSON secret (see the README's runbook), then re-run this workflow."
           if [ -n "$WEBHOOK_URL" ]; then
             # -f so an HTTP error counts as a failure; -s also keeps curl from printing the URL.
             curl -fs -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
-              -d '{"content":"⚠️ Daily policy summaries skipped: NotebookLM auth is stale. Run `notebooklm login` and update the NOTEBOOKLM_AUTH_JSON secret."}' \
+              -d '{"content":"⚠️ Daily policy summaries skipped: NotebookLM sign-in failed. Check the NOTEBOOKLM_MASTER_TOKEN_JSON secret."}' \
               || echo "::warning::The stale-auth webhook alert could not be sent"
           fi
 
@@ -154,5 +176,5 @@ jobs:
         # GitHub's own failure email. web-deploy runs whatever this run's conclusion.
         if: steps.auth.outputs.ok != 'true'
         run: |
-          echo "::error::NotebookLM auth is stale, so nothing was summarised. Run 'notebooklm login' and update the NOTEBOOKLM_AUTH_JSON secret."
+          echo "::error::NotebookLM sign-in failed, so nothing was summarised. Check the NOTEBOOKLM_MASTER_TOKEN_JSON secret (see the README's runbook)."
           exit 1

@@ -319,8 +319,8 @@ export const COMMANDS_GUIDE: GuideSection[] = [
         ja: '要約（遡及要約・再開・要約）とノートブック監査にはNotebookLMのログインが必要です。まず「NotebookLMのログイン確認」を実行し、失敗したら「NotebookLMにログイン」を実行します。' },
       { en: 'Sign in opens a browser window on this machine. Finish signing in to Google within 5 minutes; no terminal input is needed and the session is saved automatically. Other commands are blocked while it waits.',
         ja: 'ログインはこの端末でブラウザを開きます。5分以内にGoogleへのログインを完了してください。ターミナル入力は不要で、セッションは自動保存されます。待機中は他のコマンドは実行できません。' },
-      { en: 'This refreshes the LOCAL session only. The daily GitHub Action uses the NOTEBOOKLM_AUTH_JSON secret, which you update separately when the cron reports a stale session.',
-        ja: '更新されるのはローカルのセッションのみです。日次のGitHub Actionが使うNOTEBOOKLM_AUTH_JSONシークレットは、cronがセッション期限切れを通知したときに別途更新します。' },
+      { en: 'This refreshes the LOCAL session only. The daily GitHub Action signs in separately, with the NOTEBOOKLM_MASTER_TOKEN_JSON secret.',
+        ja: '更新されるのはローカルのセッションのみです。日次のGitHub ActionはNOTEBOOKLM_MASTER_TOKEN_JSONシークレットで別途サインインします。' },
     ],
   },
   {

@@ -482,7 +482,7 @@ the in-app copy) against the workflow files, so it cannot quietly go stale.
   if a 05:30 or 06:30 JST run has happened in between.
 - Because the daily runs already do detect, dates, tags, schedule and discovery, you only run
   those by hand after an outage or to heal the back catalogue. The daily summaries stop at 8
-  meetings and need a valid `NOTEBOOKLM_AUTH_JSON` secret — the back catalogue is why the
+  meetings and need a valid `NOTEBOOKLM_MASTER_TOKEN_JSON` secret — the back catalogue is why the
   Backflow flow exists.
 
 ### CLI reference
@@ -529,7 +529,7 @@ only if this copy was pulled recently.
 | 4 | `repower policy materials --committee <key\|all> --limit <n>` | Fetch the PDF lists for meetings detected without any (which is what makes them visible). `--limit 0` = unbounded (a full heal). |
 | 5 | `repower policy reclassify` | Re-type stored documents with the current classifier — numbered papers once filed as `other` (never summarised), rosters and glossaries filed as handouts. No network, no login; report-only unless `--apply`. The report breaks the changes down by committee and names the summarised meetings that would gain a paper. `--queue` (needs `--apply`, and acts only on the documents that same run re-types) flags those meetings for a new briefing, drained behind never-summarised meetings; without it nothing is queued (re-run one with `policy run --committee <key> --meeting <N>`). |
 | 6 | `repower policy auth` | Check that the NotebookLM session is valid (a live test). Run before steps 8–10. |
-| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action reads the `NOTEBOOKLM_AUTH_JSON` secret, updated separately. Refuses to run while that env var is set. |
+| 7 | `repower policy login` | Sign in to NotebookLM: opens a browser window on this machine and saves the session when sign-in is detected (no terminal input; waits up to 5 minutes). Refreshes the **local** session only — the daily Action signs in separately, with the `NOTEBOOKLM_MASTER_TOKEN_JSON` secret. Refuses to run while `NOTEBOOKLM_AUTH_JSON` is set. |
 | 8 | `repower policy backfill --committee <key> --since-meeting <N>` | Summarise one committee's older meetings, newest first. Needs a NotebookLM login; budget-limited per run, so re-run to continue. |
 | 9 | `repower policy resume` | Finish meetings left mid-flight by an interrupted or rate-limited run. |
 | 10 | `repower policy run` | Summarise pending meetings of tracked committees (`--committee <key> --meeting <N>` for exactly one, even an already-summarised one; `--max-per-run 1` for "latest only"). The daily run already does this. |

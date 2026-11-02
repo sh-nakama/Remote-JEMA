@@ -324,8 +324,9 @@ fixed.
     against it — walk `.commands` by duck-typing, as the test does.
   - `policy login` wraps `notebooklm login` (no terminal input; waits up to 5 min) and holds the
     single-flight job slot while it waits, so every other command 409s until it finishes. It
-    refreshes the *local* session only — the cron reads the `NOTEBOOKLM_AUTH_JSON` secret — and
-    `notebooklm` refuses to log in while that env var is set.
+    refreshes the *local* session only — the cron mints its own from the
+    `NOTEBOOKLM_MASTER_TOKEN_JSON` secret — and `notebooklm` refuses to log in while
+    `NOTEBOOKLM_AUTH_JSON` is set.
 
 ## GitHub Actions semantics (learned the hard way)
 
@@ -715,9 +716,19 @@ fixed.
   OCCTO section above). Only when that fails does it fall back to the **linear number probe**
   (one request per meeting number, 1 s apart), which on a cold cache means ~`max_meeting`
   sequential requests.
-- NotebookLM auth is a browser cookie (`NOTEBOOKLM_AUTH_JSON` secret) that goes stale and only
-  a human `notebooklm login` can refresh; `policy.yml` alerts on staleness and must never
+- **A copied cookie snapshot does not work for CI.** Another active client on the same account
+  supersedes it within minutes (notebooklm-py's docs say about 10), so a `storage_state.json` in a
+  secret can be dead before the run starts: one copied from a 3-hour-old file failed its first
+  check, while the local session it came from still passed. `policy.yml` therefore mints from the
+  `NOTEBOOKLM_MASTER_TOKEN_JSON` secret, and `NOTEBOOKLM_AUTH_JSON` must stay unset in the job
+  because inline auth bypasses the re-mint. It still alerts when the check fails and must never
   fabricate summaries.
+- **The master token is a full-account credential.** It survives a password change, so a leak is
+  only contained by removing the device (Google Account → Security → Your devices). Use a dedicated
+  account, and keep the account name and token out of the public run logs.
+- **Summarising runs share one account's quota and session.** Anything else summarising on that
+  account (such as a local round) spends the same NotebookLM quota and drains the same queue, and
+  its `push-hf` can overwrite a run that finished after its pull. Run one summariser per account.
 - **"NotebookLM is not logged in" can really mean "the `notebooklm` program wasn't found".** It
   used to be looked up by bare name on PATH, so `repower web-api` started without its virtualenv
   activated (e.g. running `.venv/Scripts/repower.exe` directly) couldn't find it — and

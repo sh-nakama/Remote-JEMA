@@ -187,30 +187,34 @@ The work is split by whether it needs NotebookLM authentication:
   OCCTO probe). It folds into the daily `run-all` pipeline, so the worklist of
   unsummarised meetings stays current with no cookies required.
 - **Summarisation needs a live NotebookLM session.** Google rotates NotebookLM
-  cookies and only an interactive browser login can mint a fresh session — no CI or
-  HF compute can do it. So summarisation runs **daily** (`policy.yml`), gated on a
-  network-validated auth check; if auth is stale the job alerts, pushes what detection
-  found and marks the run failed, **without fabricating summaries**.
+  cookies quickly, so summarisation runs **daily** (`policy.yml`) on a session minted
+  from a master token, gated on a network-validated auth check; if that fails the job
+  alerts, pushes what detection found and marks the run failed, **without fabricating
+  summaries**.
 
 ### Operator runbook — keeping summarisation alive
 
-Summaries are produced only while the `NOTEBOOKLM_AUTH_JSON` secret holds a valid
-session. Refresh it whenever the daily job reports stale auth (roughly weekly):
+Summaries on GitHub sign in with a master token held in the `NOTEBOOKLM_MASTER_TOKEN_JSON`
+secret. Each run mints fresh cookies from it and the library re-mints them if they lapse mid-run,
+so the secret needs no regular refresh. A copied `storage_state.json` does not work for this:
+another active client supersedes it within minutes.
+
+Set it up once, on a trusted machine and with a **dedicated Google account**. The token is a
+full-account credential that survives password changes. `NOTEBOOKLM_HOME` keeps this sign-in apart
+from any local session on your main account:
 
 ```bash
-# 1. Re-authenticate locally (opens a browser for Google OAuth).
-notebooklm login
-notebooklm auth check --test          # confirm status: ok AND token_fetch: true
-
-# 2. Push the fresh session to the repo secret the policy workflow reads.
-#    bash / Git Bash:
-gh secret set NOTEBOOKLM_AUTH_JSON < ~/.notebooklm/profiles/default/storage_state.json
-#    PowerShell:
-#    Get-Content -Raw "$env:USERPROFILE\.notebooklm\profiles\default\storage_state.json" | gh secret set NOTEBOOKLM_AUTH_JSON
+# bash / Git Bash, with the project's virtualenv active.
+pip install gpsoauth==2.0.0 pycryptodomex==3.24.1
+NOTEBOOKLM_HOME=~/.notebooklm-ci notebooklm login --master-token --account you@example.com
+gh secret set NOTEBOOKLM_MASTER_TOKEN_JSON < ~/.notebooklm-ci/profiles/default/master_token.json
 ```
 
-`auth refresh` (server-side cookie keepalive) is tried automatically, but once Google
-has hard-expired the session it cannot recover it — only `notebooklm login` can.
+Delete the local copy once the secret is set. Replace the secret only if a run reports that
+sign-in failed. If the token may have leaked, a password change will not stop it: remove the
+device under Google Account → Security → Your devices, then repeat these steps.
+
+Only one thing should summarise on an account at a time, since runs share its quota and queue.
 
 If the NotebookLM account is on a paid plan, set the source-cap tier so ingestion
 and synthesis are sized correctly (default `standard` = 50 sources/notebook):
@@ -294,7 +298,7 @@ behind one another instead of racing. A push from your own machine is not in tha
   pending meetings (`--committee`, `--max-per-run` inputs), post a list of what finished, then resolve
   the source page behind citations for up to 5 earlier meetings (`resolve-citations`;
   needs no login and never fails the run), push DB.
-  Skips summarising, sends a webhook alert and ends failed when `NOTEBOOKLM_AUTH_JSON` is stale (see the
+  Skips summarising, sends a webhook alert and ends failed when NotebookLM sign-in fails (see the
   operator runbook above).
 - **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
   over a wider window (last ~6 months of TSO, JEPX from last year, EPRX from FY2025)

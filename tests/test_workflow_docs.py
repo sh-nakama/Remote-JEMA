@@ -53,6 +53,16 @@ def _app_entry(file: str) -> str:
     return CONTENT[start : end if end > 0 else CONTENT.find("]\n", start)]
 
 
+def test_policy_run_signs_in_with_the_master_token():
+    """Inline cookies die within minutes and bypass the library's mid-run re-mint."""
+    text = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
+    steps = re.findall(r"^\s*- name: (.+)$", text, re.MULTILINE)
+    assert steps.index("Mint a NotebookLM session from the master token") < steps.index("Check NotebookLM auth")
+    assert "secrets.NOTEBOOKLM_AUTH_JSON" not in text
+    assert text.count("secrets.NOTEBOOKLM_MASTER_TOKEN_JSON") == 1  # the mint step only, not the whole job
+    assert "umask 077" in text
+
+
 def test_a_stale_login_fails_the_policy_run_only_after_the_push():
     """Green runs hid weeks of skipped summaries; failing any earlier would lose detection's results."""
     text = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
