@@ -674,6 +674,26 @@ fixed.
   purely for callers that predate `stopped_early` — new code should read `stopped_early`, and
   **any new NotebookLM error class that is account-wide belongs in `_HALTING`**, or it will
   quietly burn the whole worklist's retry budget one meeting at a time.
+- **A `--json` command reports its failure on stdout, not stderr.** The CLI prints
+  `{"error": true, "code": "RATE_LIMITED", ...}` to stdout and exits 1, with stderr holding only
+  what got logged on the way. An RPC logs its failure, so a rate-limited `generate report` was
+  recognised, but `ask` logs nothing, so its rate limit and a session lapsing during it looked
+  like plain exit 1s, and so did every `--json` command's error text. `notebook._run` now reads the
+  envelope (`_cli_error`) as well as stderr; check both when classifying anything new.
+- **Best-effort stops at the meeting's own failures.** The English digest, the topic tags and the
+  Japanese digest are asked after the briefing, and a meeting-specific failure of any of them
+  still saves the meeting. An `_HALTING` error must not: saving marks it `done`, replaces the old
+  digest with NULL, clears `gen_requested`/`resummarise_requested`, and the notebook that could
+  answer is deleted, so nothing would ever retry it (`industrial_restructuring` 第39回, 2026-11).
+  So each question re-raises `_HALTING`, and the meeting goes back whole, its old briefing and
+  digest untouched. The tags halt too, though the rules can stand in for them: the translation is
+  next and would hit the same limit. An auth lapse goes back the same way but keeps `notebook_id`,
+  since deleting takes the dead session; the next attempt deletes it first. The price is that a
+  limit reached here discards a report already generated. Chat and report quotas may run out
+  separately, so a spent chat quota could cost one report per run until it recovers. And
+  `NotebookLMTimeout` spends no retry, so a meeting whose questions always outlast `ask`'s 180s
+  would halt every run at that meeting. If `stopped_early` keeps saying `timed_out` on the same
+  meeting, look there first.
 - **A full synthesis notebook rolls over to a new one, it does not compact.** At
   `NOTEBOOKLM_SOURCE_CAP` the committee's synthesis continues in a fresh notebook titled
   `<key> synthesis (第N回〜)`; the full one is left intact and `archive_watermark_meeting` records

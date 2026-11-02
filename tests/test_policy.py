@@ -8,6 +8,7 @@ a temporary SQLite path holds the policy tables; POLICY_DIR is redirected to tmp
 from __future__ import annotations
 
 import datetime
+import json
 import subprocess
 from pathlib import Path
 
@@ -637,6 +638,52 @@ def test_run_classifies_a_lapsed_session_as_an_auth_error(monkeypatch):
     )
     with pytest.raises(nb_mod.NotebookLMAuthError):
         nb_mod._run(["create", "x"], timeout=5)
+
+
+def _cli_json_error(code: str, message: str) -> str:
+    return json.dumps({"error": True, "code": code, "message": message}, indent=2)
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("RATE_LIMITED", nb_mod.NotebookLMRateLimitError),
+    ("AUTH_ERROR", nb_mod.NotebookLMAuthError),
+])
+def test_ask_classifies_the_error_the_cli_prints_on_stdout(monkeypatch, code, expected):
+    """With --json the CLI reports a failure on stdout and leaves stderr empty. Output captured
+    from notebooklm-py's own error handler; reading only stderr made these plain exit 1s."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(1, "", _cli_json_error(code, "Error: nope")))
+    with pytest.raises(expected):
+        nb_mod.ask("nb-1", "question")
+
+
+def test_an_unrelated_cli_error_stays_plain_and_says_what_went_wrong(monkeypatch):
+    monkeypatch.setattr(subprocess, "run",
+                        lambda *a, **k: _FakeProc(1, "", _cli_json_error("NOT_FOUND", "Error: no such notebook")))
+    with pytest.raises(nb_mod.NotebookLMError) as ei:
+        nb_mod.ask("nb-1", "question")
+    assert type(ei.value) is nb_mod.NotebookLMError
+    assert "-> exit 1: Error: no such notebook" in str(ei.value)  # stderr alone left this blank
+
+
+def test_a_rate_limit_is_recognised_in_the_clis_plain_text_too(monkeypatch):
+    """Commands run without --json (`source wait`) get the same limit as words on stderr."""
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(1, "Error: Rate limited. Retry after 30s."))
+    with pytest.raises(nb_mod.NotebookLMRateLimitError):
+        nb_mod._run(["source", "wait", "s"], timeout=5)
+
+
+def test_add_source_does_not_retry_a_rate_limit_reported_on_stdout(monkeypatch):
+    """A plain exit 1 from `source add` counts as a dropped upload and is retried."""
+    calls: list[list[str]] = []
+
+    def limited(cmd, **k):
+        calls.append(cmd)
+        return _FakeProc(1, "", _cli_json_error("RATE_LIMITED", "Error: Rate limited."))
+
+    monkeypatch.setattr(subprocess, "run", limited)
+    with pytest.raises(nb_mod.NotebookLMRateLimitError):
+        nb_mod.add_source("nb-1", "a.pdf")
+    assert len(calls) == 1
 
 
 def test_create_notebook_adopts_the_notebook_a_timed_out_create_left_behind(monkeypatch):
