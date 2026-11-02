@@ -103,7 +103,7 @@ Installed as the `repower` console script (equivalently `python -m repower.cli`)
 | `policy enable` / `policy disable` | Start/stop tracking a committee (kept in the DB; disabled committees are skipped by detect/run). |
 | `policy tags` / `policy tag` / `policy tag-set` | Topic tags (renewable technology + grid infrastructure) for committees and meetings. `tags` lists the vocabulary; `tag` applies the keyword rules (**dry run unless `--apply`**, no auth); `tag-set` pins a committee's or one meeting's tags by hand. The daily run keeps them current. |
 | `policy coverage` | How much each committee covers each topic, 0-100% (recency-weighted share of its meetings, shrunk on thin evidence). Options: `--topic <tag>` (rank committees), `--committee <key>` (rank its topics), `--committee <key> --meetings` (that committee's meetings with date, tags and document titles — the audit view). Read-only, no auth. |
-| `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--dry-run`. |
+| `policy digest` | Assemble + post a digest of recently summarised meetings. Options: `--since-days`, `--since <ISO time>` (a short list of what finished since then, nothing posted if none did), `--dry-run`. |
 | `policy weekly` | Email the weekly summary of committee meetings *held* in the 7 days ending yesterday, JST (tracked + summarised with a brief, summaries now available for the 3 weeks before, everything else held). Options: `--days`, `--dry-run`, `--out <file.html>`, `--no-board`. Needs `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_TO`. |
 
 Examples:
@@ -189,8 +189,8 @@ The work is split by whether it needs NotebookLM authentication:
 - **Summarisation needs a live NotebookLM session.** Google rotates NotebookLM
   cookies and only an interactive browser login can mint a fresh session — no CI or
   HF compute can do it. So summarisation runs **daily** (`policy.yml`), gated on a
-  network-validated auth check; if auth is stale the job alerts and exits cleanly
-  **without fabricating summaries**.
+  network-validated auth check; if auth is stale the job alerts, pushes what detection
+  found and marks the run failed, **without fabricating summaries**.
 
 ### Operator runbook — keeping summarisation alive
 
@@ -221,7 +221,7 @@ gh variable set NOTEBOOKLM_TIER --body plus   # standard | plus | pro | ultra
 
 ### Weekly summary email
 
-`weekly-summary.yml` emails a summary every Monday at 08:00 JST, covering the previous
+`weekly-summary.yml` emails a summary every Monday at 12:00 JST, covering the previous
 Monday–Sunday (complete days only). Everything in it is
 keyed on when a meeting was **held** (`meeting_date`), not when it was summarised, so the
 backlog catch-up never floods it:
@@ -291,10 +291,10 @@ behind one another instead of racing. A push from your own machine is not in tha
   so a silently stale source fails the run.
 - **`policy.yml`** — daily (06:30 JST) + `workflow_dispatch` authenticated
   NotebookLM summarisation: pull DB, detect, gate on `auth check --test`, summarise
-  pending meetings (`--committee`, `--max-per-run` inputs), post a digest, then resolve
+  pending meetings (`--committee`, `--max-per-run` inputs), post a list of what finished, then resolve
   the source page behind citations for up to 5 earlier meetings (`resolve-citations`;
   needs no login and never fails the run), push DB.
-  Skips cleanly with a webhook alert when `NOTEBOOKLM_AUTH_JSON` is stale (see the
+  Skips summarising, sends a webhook alert and ends failed when `NOTEBOOKLM_AUTH_JSON` is stale (see the
   operator runbook above).
 - **`weekly-backfill.yml`** — scheduled deep re-validation (Mondays 04:30 JST)
   over a wider window (last ~6 months of TSO, JEPX from last year, EPRX from FY2025)
@@ -303,7 +303,7 @@ behind one another instead of racing. A push from your own machine is not in tha
   Cross-checks the committees the energy-board aggregator lists against our catalog,
   adds any energy committees we lack as discovered / untracked rows, posts the report
   to the webhook and pushes the DB. No NotebookLM login needed.
-- **`weekly-summary.yml`** — Mondays 08:00 JST (23:00 UTC Sunday) + `workflow_dispatch`
+- **`weekly-summary.yml`** — Mondays 12:00 JST (03:00 UTC) + `workflow_dispatch`
   (with a `dry_run` input). Pulls the DB and runs `policy weekly`, which emails the
   committee meetings held the previous Monday–Sunday — see [Weekly summary email](#weekly-summary-email).
   Read only: it never pushes, so it is not in the `hf-dataset` queue. The HTML email

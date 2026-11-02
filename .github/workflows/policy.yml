@@ -3,12 +3,14 @@ name: Daily Policy Summaries
 # Detection runs daily (folded into the data pipeline's `run-all`). This separate
 # daily job does the slow, *authenticated* NotebookLM summarisation and emits a
 # digest. NotebookLM cookies go stale and only a human can re-login, so the job
-# gates on `auth check --test`: if auth is stale it alerts and exits cleanly
-# (never fabricating summaries) until the NOTEBOOKLM_AUTH_JSON secret is refreshed.
+# gates on `auth check --test`: if auth is stale it alerts, pushes what detection found
+# and then marks the run failed (never fabricating summaries), so a stale session cannot
+# hide behind green runs, until the NOTEBOOKLM_AUTH_JSON secret is refreshed.
 
 on:
   schedule:
-    # 21:30 UTC = 06:30 JST — after the daily data cron + detection.
+    # 21:30 UTC = 06:30 JST — after the daily data cron + detection. GitHub starts it
+    # hours late: about 09:00–10:50 JST in October.
     - cron: "30 21 * * *"
   workflow_dispatch:
     inputs:
@@ -17,7 +19,7 @@ on:
         default: "all"
       max_per_run:
         description: "Max meetings to summarise this run"
-        default: "8"
+        default: "12"
       bootstrap:
         description: "First run only: continue from an empty DB if the HF pull fails (overwrites the dataset)"
         type: boolean
@@ -36,7 +38,7 @@ concurrency:
 jobs:
   summarise:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 240
     env:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
       HF_DATASET_REPO: ${{ secrets.HF_DATASET_REPO }}
@@ -54,8 +56,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -e ".[browser,pdf]" -c constraints.txt
-          pip install "notebooklm-py[browser]" -c constraints.txt
+          pip install -e ".[browser,pdf,policy]" -c constraints.txt
           # meti.go.jp answers every tokenless client with an AWS WAF challenge,
           # and only a real browser can mint the aws-waf-token that clears it.
           # The pip extras bring the playwright package but not the browser it
@@ -88,11 +89,12 @@ jobs:
         # in a job that holds the NotebookLM session.
         env:
           COMMITTEE: ${{ github.event.inputs.committee || 'all' }}
-          MAX_PER_RUN: ${{ github.event.inputs.max_per_run || '8' }}
+          MAX_PER_RUN: ${{ github.event.inputs.max_per_run || '12' }}
         run: |
+          started="$(date -u +%Y-%m-%dT%H:%M:%S+00:00)"
           python -m repower.cli policy resume
           python -m repower.cli policy run --committee "$COMMITTEE" --max-per-run "$MAX_PER_RUN"
-          python -m repower.cli policy digest --since-days 7
+          python -m repower.cli policy digest --since "$started"
 
       - name: Resolve citation pages for earlier meetings
         # Auth-free, so it runs even when the NotebookLM session is stale. New summaries
@@ -111,8 +113,10 @@ jobs:
         run: |
           echo "::warning::NotebookLM auth missing/stale — run 'notebooklm login' locally and update the NOTEBOOKLM_AUTH_JSON secret, then re-run this workflow."
           if [ -n "$WEBHOOK_URL" ]; then
-            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
-              -d '{"content":"⚠️ Policy summariser skipped this week: NotebookLM auth is stale. Run `notebooklm login` and update the NOTEBOOKLM_AUTH_JSON secret."}' || true
+            # -f so an HTTP error counts as a failure; -s also keeps curl from printing the URL.
+            curl -fs -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d '{"content":"⚠️ Daily policy summaries skipped: NotebookLM auth is stale. Run `notebooklm login` and update the NOTEBOOKLM_AUTH_JSON secret."}' \
+              || echo "::warning::The stale-auth webhook alert could not be sent"
           fi
 
       - name: Push updated DB to Hugging Face
@@ -121,14 +125,34 @@ jobs:
         # (only an explicit bootstrap run may do that). Keep the bootstrap test in
         # sync with the pull step's continue-on-error.
         if: always() && (steps.pull.outcome == 'success' || inputs.bootstrap == true)
-        run: python -m repower.cli push-hf
+        # Retried: this is the only copy of the run's summaries, and they cost quota to redo.
+        # A repeat is safe because each attempt uploads the whole database again.
+        run: |
+          set +e
+          for attempt in 1 2 3; do
+            python -m repower.cli push-hf
+            [ $? -eq 0 ] && exit 0
+            echo "::warning::push-hf failed (attempt $attempt of 3)"
+            [ "$attempt" -lt 3 ] && sleep $((attempt * 60))
+          done
+          exit 1
 
       - name: Alert on failure
         if: failure()
         run: |
           url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          echo "::error::Weekly policy summaries failed — $url"
+          echo "::error::Daily policy summaries failed — $url"
           if [ -n "$WEBHOOK_URL" ]; then
-            curl -s -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
-              -d "{\"content\":\"🔴 Weekly policy summaries failed — $url\"}" || true
+            curl -fs -X POST "$WEBHOOK_URL" -H 'Content-Type: application/json' \
+              -d "{\"content\":\"🔴 Daily policy summaries failed — $url\"}" \
+              || echo "::warning::The failure webhook alert could not be sent"
           fi
+
+      - name: Mark the run failed when auth is stale
+        # Last, so detection's results are pushed first and the step above does not post a
+        # second alert. A green run here hid weeks of skipped summaries; red also triggers
+        # GitHub's own failure email. web-deploy runs whatever this run's conclusion.
+        if: steps.auth.outputs.ok != 'true'
+        run: |
+          echo "::error::NotebookLM auth is stale, so nothing was summarised. Run 'notebooklm login' and update the NOTEBOOKLM_AUTH_JSON secret."
+          exit 1

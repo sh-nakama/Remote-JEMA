@@ -141,7 +141,7 @@ def meeting_readiness(meeting_date: date | None, kinds, *, today: date,
 # Meetings one daily run takes (``policy run --max-per-run``). Mirrors the default in
 # .github/workflows/policy.yml, which a test holds equal; the real limiter is usually the
 # account's daily NotebookLM quota, which stops a run sooner.
-DAILY_RUN_CAP = 8
+DAILY_RUN_CAP = 12
 
 # Documents to ingest per meeting, in priority order (code-enforced, not agent
 # judgment), keeping a meeting to a handful of sources well under any tier cap.
@@ -1557,6 +1557,26 @@ def recent_done_meetings(since_days: int, db_path: str | None = None) -> list[di
                 "meeting_num": m.meeting_num,
                 "has_torimatome": m.has_torimatome,
                 "digest_en_json": m.digest_en_json,
+            }
+            for m in rows
+        ]
+
+
+def meetings_summarised_since(since: datetime, db_path: str | None = None) -> list[dict]:
+    """Meetings whose summary landed at or after *since*, oldest first: what one run finished."""
+    with session_scope(db_path, commit=False) as session:
+        rows = (
+            session.query(PolicyMeeting)
+            .filter(PolicyMeeting.state == "done", PolicyMeeting.summarised_at >= since)
+            .order_by(PolicyMeeting.summarised_at)
+            .all()
+        )
+        return [
+            {
+                "committee_key": m.committee_key,
+                "meeting_num": m.meeting_num,
+                "has_torimatome": bool(m.has_torimatome),
+                "redo": m.resummarised_at is not None and m.resummarised_at == m.summarised_at,
             }
             for m in rows
         ]

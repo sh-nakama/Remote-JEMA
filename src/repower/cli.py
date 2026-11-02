@@ -1682,12 +1682,26 @@ def policy_crosscheck(
 @policy_app.command("digest")
 def policy_digest(
     since_days: int = typer.Option(7, help="Window of recently summarised meetings to include"),
+    since: str | None = typer.Option(
+        None, help="ISO time: instead, a short list of what finished since then; posts nothing if none did"),
     dry_run: bool = typer.Option(False, help="Print the digest without posting to the webhook"),
 ):
-    """Assemble a digest of recently summarised meetings (for the weekly run)."""
-    from repower.policy.digest import build_digest, post_digest
+    """Assemble a digest of recently summarised meetings (the daily run uses --since)."""
+    from datetime import datetime
 
-    md = build_digest(since_days=since_days)
+    from repower.policy.digest import build_digest, build_run_digest, post_digest
+
+    if since is None:
+        md = build_digest(since_days=since_days)
+    else:
+        try:
+            run_digest = build_run_digest(datetime.fromisoformat(since))
+        except ValueError as e:
+            raise typer.BadParameter(f"--since must be an ISO time: {e}") from e
+        if run_digest is None:
+            typer.echo(f"No meetings finished since {since}; nothing to post")
+            return
+        md = run_digest
     typer.echo(md)
     if not dry_run:
         ok = post_digest(md)

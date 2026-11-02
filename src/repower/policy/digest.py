@@ -14,7 +14,7 @@ import httpx
 
 from repower.config import WEBHOOK_URL
 from repower.policy.committees import committee_by_key
-from repower.policy.store import recent_done_meetings
+from repower.policy.store import list_committees, meetings_summarised_since, recent_done_meetings
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,27 @@ def build_digest(since_days: int = 7, db_path: str | None = None) -> str:
         lines.append(_digest_answer(m["digest_en_json"]))
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def build_run_digest(since: datetime, db_path: str | None = None) -> str | None:
+    """A short list of what finished since *since*, or None when nothing did.
+
+    The daily workflow posts this. Names only, unlike :func:`build_digest`: a whole week of
+    digests is cut off by the webhook's length limit, and repeats the same meetings daily.
+    """
+    meetings = meetings_summarised_since(since, db_path=db_path)
+    if not meetings:
+        return None
+    committees = {c["key"]: c for c in list_committees(db_path=db_path)}
+    lines = [f"**Policy summaries finished: {len(meetings)}**"]
+    for m in meetings:
+        key = m["committee_key"]
+        c = committees.get(key) or {}
+        name = c.get("name_en") if c.get("name_en") != key else c.get("name_ja")
+        redo = " (redone)" if m["redo"] else ""
+        flag = " 🏁 (とりまとめ)" if m["has_torimatome"] else ""
+        lines.append(f"- {name or key} 第{m['meeting_num']}回{redo}{flag}")
+    return "\n".join(lines) + "\n"
 
 
 def post_digest(markdown: str) -> bool:
