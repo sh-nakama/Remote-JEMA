@@ -52,6 +52,7 @@ from repower.dashboard.read import (
     wholesale_period_stats_cached,
 )
 from repower.db import DemandSupply30m, PolicyCommittee, PolicyMeeting
+from repower.policy.committees import english_name
 from repower.scrapers.areas import AREA_NAMES
 from repower.timeutil import today_jst
 
@@ -761,7 +762,7 @@ def _policy_committees(_cache_buster: int) -> list[dict]:
             {
                 "committee_key": r.committee_key,
                 "name_ja": r.name_ja or r.committee_key,
-                "name_en": r.name_en or r.committee_key,
+                "name_en": english_name(r.committee_key, r.name_en) or r.committee_key,
                 "url": r.url,
                 "source": r.source,
                 "latest_meeting": r.latest_meeting,

@@ -45,6 +45,7 @@ from repower.db import (  # noqa: E402
 )
 from repower.policy import citations as policy_citations  # noqa: E402
 from repower.policy import tags as policy_tags  # noqa: E402
+from repower.policy.committees import english_name  # noqa: E402
 from repower.sync_merge import read_stamp, stamp_path  # noqa: E402
 from repower.timeutil import JST, today_jst  # noqa: E402
 
@@ -953,7 +954,7 @@ def build_committees_payload(committees, meetings, material_counts=None, *,
         {
             "key": c["committee_key"],
             "org": c["source"] or "METI",
-            "en": c["name_en"] or _humanize_key(c["committee_key"]),
+            "en": english_name(c["committee_key"], c["name_en"]) or _humanize_key(c["committee_key"]),
             "ja": c["name_ja"] or "",
             "tier": _committee_tier(c),
             "tracked": bool(c["enabled"]),
@@ -1256,7 +1257,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
     def build_meeting(m: RowMapping) -> dict:
         c = com_by_key.get(m["committee_key"])
         org = (c["source"] if c else None) or "METI"
-        name_en = (c["name_en"] if c else None) or _humanize_key(m["committee_key"])
+        name_en = english_name(m["committee_key"], c["name_en"] if c else None) or _humanize_key(m["committee_key"])
         name_ja = (c["name_ja"] if c else None) or m["committee_key"]
         num = m["meeting_num"]
         # Prefer the real meeting date (backfilled from the committee page). Until it
@@ -1410,7 +1411,7 @@ def build_policy_snapshot(db_path: str | None = None) -> dict:
                 "date": str(u["meeting_date"])[:10] if u["meeting_date"] else None,
                 "org": u["org"] or "METI",
                 "committee_key": ck,
-                "en": (c["name_en"] if c else None) or u["name_ja"],
+                "en": (english_name(ck, c["name_en"] if c else None) if ck else "") or u["name_ja"],
                 "ja": u["name_ja"],
                 "num": u["meeting_num"],
                 "url": u["source_url"] or "",
