@@ -531,9 +531,18 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             return "generating"
         briefing = out_md.read_text(encoding="utf-8")
 
+        # The three questions below may fail for reasons of the meeting's own, and it is still
+        # saved. An account-wide error (`_HALTING`) is different: it says nothing about this
+        # meeting, and saving now would finish it for good without those answers. This notebook
+        # is deleted below, so they cannot be asked later; the save replaces any earlier digest
+        # and clears the queue flags, so nothing would retry it. So they halt the run as they do
+        # everywhere else, and the meeting is retried whole. That includes the tag question, which
+        # has a fallback: the translation comes straight after it and would hit the same limit.
         digest_json = None
         try:
             digest_json = json.dumps(nb.ask(notebook_id, _ENGLISH_DIGEST_Q), ensure_ascii=False)
+        except _HALTING:
+            raise
         except nb.NotebookLMError as e:
             logger.warning("english digest failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
@@ -554,6 +563,8 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             if llm_tags is None:
                 logger.warning("topic classification for %s 第%d回 was not usable JSON; keeping rule tags",
                                committee.key, meeting_num)
+        except _HALTING:
+            raise
         except nb.NotebookLMError as e:
             logger.warning("topic classification failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
@@ -565,6 +576,8 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             try:
                 digest_ja_json = json.dumps(nb.ask(notebook_id, _JAPANESE_DIGEST_Q.format(digest=english)),
                                             ensure_ascii=False)
+            except _HALTING:
+                raise
             except nb.NotebookLMError as e:
                 logger.warning("japanese digest failed for %s 第%d回: %s", committee.key, meeting_num, e)
 
@@ -597,7 +610,14 @@ def summarize_meeting(committee: Committee, meeting_num: int, *, db_path: str | 
             logger.warning("could not delete notebook %s: %s", notebook_id, e)
         return "done"
     except nb.NotebookLMAuthError:
-        raise  # bubble up — the whole run should stop and alert
+        # Bubble up — the whole run should stop and alert. Handed back like the case below, but
+        # the notebook stays recorded: deleting it takes the session that just lapsed, and the
+        # next attempt deletes it first (`stale_notebook_id`). Left `generating`, a re-run's
+        # meeting would also lose its good briefing from the page (see `_keep_briefing_visible`).
+        update_meeting(meeting_row, db_path=db_path, state="detected",
+                       quality_flag=None, last_error=None, last_error_at=None)
+        keep_scratch = True
+        raise
     except (nb.NotebookLMRateLimitError, nb.NotebookLMTimeout) as e:
         # Account-wide and transient — not a bad meeting. A rate limit says the
         # quota is spent; a timeout says NotebookLM (or a lapsing session) stopped

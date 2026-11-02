@@ -93,6 +93,17 @@ _AUTH_MARKERS = ("authentication expired", "token fetch failed", "not authentica
                  "invalid_grant", "notebooklm login")
 
 
+def _cli_error(stdout: str) -> tuple[str, str]:
+    """``(code, message)`` of the error a ``--json`` command printed on stdout, else blanks."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError:
+        return "", ""
+    if not isinstance(data, dict) or not data.get("error"):
+        return "", ""
+    return str(data.get("code") or ""), str(data.get("message") or "")
+
+
 def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXIT_OK,)) -> str:
     """Run ``notebooklm <args>`` and return stdout. Raise on disallowed exit codes."""
     cmd = [find_binary() or os.getenv("NOTEBOOKLM_BIN") or "notebooklm", *args]
@@ -106,17 +117,24 @@ def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXI
     except subprocess.TimeoutExpired as e:
         raise NotebookLMTimeout(f"timeout after {timeout}s: notebooklm {' '.join(args)}") from e
     stderr = proc.stderr.strip()
-    if proc.returncode != EXIT_OK and any(m in stderr.lower() for m in _AUTH_MARKERS):
-        raise NotebookLMAuthError(f"notebooklm {' '.join(args)}: session expired — {stderr[:300]}")
+    # With --json the CLI reports a failure on *stdout*, as {"error": true, "code": ..., "message": ...},
+    # and stderr holds only what was logged on the way, which for `ask` is nothing. Reading stderr
+    # alone made a chat rate limit or a lapsed session look like a plain exit 1.
+    code, message = _cli_error(proc.stdout) if proc.returncode != EXIT_OK else ("", "")
+    detail = stderr or message
+    if proc.returncode != EXIT_OK and (code == "AUTH_ERROR" or any(m in stderr.lower() for m in _AUTH_MARKERS)):
+        raise NotebookLMAuthError(f"notebooklm {' '.join(args)}: session expired — {detail[:300]}")
     if proc.returncode == EXIT_TIMEOUT and EXIT_TIMEOUT not in allow_codes:
-        raise NotebookLMTimeout(stderr or "notebooklm timed out")
+        raise NotebookLMTimeout(detail or "notebooklm timed out")
     if proc.returncode not in allow_codes:
-        # The CLI surfaces a server-side rate limit as exit 1 with a "RateLimitError"
-        # in stderr (e.g. RPC CREATE_ARTIFACT). Classify it so the pipeline can back
-        # off without burning a meeting's retry budget.
-        if "RateLimitError" in stderr or "RATE_LIMIT" in stderr.upper():
-            raise NotebookLMRateLimitError(f"notebooklm {' '.join(args)} rate-limited: {stderr[:300]}")
-        raise NotebookLMError(f"notebooklm {' '.join(args)} -> exit {proc.returncode}: {stderr}")
+        # The CLI surfaces a server-side rate limit as exit 1: code RATE_LIMITED with --json,
+        # "Error: Rate limited." without it, and a logged "RateLimitError" on stderr when an RPC
+        # hit it (e.g. CREATE_ARTIFACT). Classify it so the pipeline can back off without
+        # burning a meeting's retry budget.
+        if (code == "RATE_LIMITED" or "RateLimitError" in stderr
+                or "RATE LIMIT" in stderr.upper().replace("_", " ")):
+            raise NotebookLMRateLimitError(f"notebooklm {' '.join(args)} rate-limited: {detail[:300]}")
+        raise NotebookLMError(f"notebooklm {' '.join(args)} -> exit {proc.returncode}: {detail}")
     return proc.stdout
 
 

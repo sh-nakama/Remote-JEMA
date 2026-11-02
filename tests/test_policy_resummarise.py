@@ -268,6 +268,141 @@ def test_a_failed_translation_does_not_fail_the_meeting(monkeypatch, policy_db, 
     assert m.state == "done" and m.digest_ja_json is None and json.loads(m.digest_en_json)["answer"] == "EN BODY"
 
 
+_JAPANESE_PREFIX = pipeline._JAPANESE_DIGEST_Q.split("{digest}")[0]
+_DIGEST_QUESTIONS = ["english", "tags", "japanese"]
+_HALTING_ERRORS = [(nb_mod.NotebookLMRateLimitError("quota"), "rate_limited"),
+                   (nb_mod.NotebookLMTimeout("slow"), "timed_out"),
+                   (nb_mod.NotebookLMAuthError("lapsed"), "auth_expired")]
+
+
+def _ask_failing_at(monkeypatch, which: str, exc: Exception) -> list[str]:
+    """Fake ``nb.ask``: *which* of the three summary-time questions raises *exc*."""
+    asked: list[str] = []
+
+    def ask(nb_id, question, **k):
+        asked.append(question)
+        if question == pipeline._ENGLISH_DIGEST_Q:
+            kind, answer = "english", "EN BODY"
+        elif question.startswith(_JAPANESE_PREFIX):
+            kind, answer = "japanese", "JA BODY"
+        else:
+            kind, answer = "tags", '{"tags": ["wind_offshore"]}'
+        if kind == which:
+            raise exc
+        return {"answer": answer}
+
+    monkeypatch.setattr(pipeline.nb, "ask", ask)
+    return asked
+
+
+def test_a_failed_english_digest_does_not_fail_the_meeting(monkeypatch, policy_db, tmp_path):
+    """A failure that is the meeting's own: saved without a digest, and nothing to translate."""
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    asked = _ask_failing_at(monkeypatch, "english", pipeline.nb.NotebookLMError("nope"))
+    store.record_meeting(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+
+    m = _row(db, KEY, 9)
+    assert m.state == "done" and m.digest_en_json is None and m.digest_ja_json is None
+    assert not any(q.startswith(_JAPANESE_PREFIX) for q in asked)
+
+
+@pytest.mark.parametrize("question", _DIGEST_QUESTIONS)
+@pytest.mark.parametrize(("exc", "reason"), _HALTING_ERRORS, ids=[r for _, r in _HALTING_ERRORS])
+def test_an_account_error_in_a_digest_question_leaves_a_rerun_as_it_was(
+        monkeypatch, policy_db, tmp_path, question, exc, reason):
+    """Evidence: industrial_restructuring 第39回 ended with a new briefing, no digests, no
+    last_error and its queue flags cleared, in a round that stopped with ``rate_limited``."""
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 新しい要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, question, exc)
+    deleted: list[str] = []
+    monkeypatch.setattr(pipeline.nb, "delete_notebook", lambda nb_id, **k: deleted.append(nb_id))
+    _summarised(db, KEY, 9, [_mat(9, "gijishidai", "agenda")])
+    _update(db, KEY, 9, digest_en_json='{"answer": "OLD EN"}', digest_ja_json='{"answer": "OLD JA"}',
+            citations_json='{"items": []}', tags='["nuclear"]', tags_source="llm")
+    store.add_late_materials(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+    store.request_generation(KEY, 9, db_path=db)
+
+    res = pipeline.run([KEY], db_path=db)
+
+    assert res["stopped_early"] == reason and res["done"] == 0 and res["errored"] == 0
+    m = _row(db, KEY, 9)
+    assert m.state == "done" and m.briefing_md == "# 要約"  # the old briefing, still on the page
+    assert m.digest_en_json == '{"answer": "OLD EN"}' and m.digest_ja_json == '{"answer": "OLD JA"}'
+    assert m.citations_json == '{"items": []}' and m.synth_done is True
+    assert m.tags == '["nuclear"]'
+    assert m.resummarise_requested is True and m.gen_requested is True  # still queued
+    assert not m.retry_count and m.last_error is None                   # and not the meeting's fault
+    if reason == "auth_expired":  # deleting takes the session that lapsed: the retry does it
+        assert m.notebook_id == "nb1" and deleted == []
+    else:
+        assert m.notebook_id is None and deleted == ["nb1"]             # no notebook left behind
+    assert list((tmp_path / "scratch" / KEY / "9").glob("*.pdf"))       # the PDFs wait for the retry
+    assert _worklist(db) == [(KEY, 9)]
+
+
+@pytest.mark.parametrize("question", _DIGEST_QUESTIONS)
+@pytest.mark.parametrize(("exc", "reason"), _HALTING_ERRORS, ids=[r for _, r in _HALTING_ERRORS])
+def test_an_account_error_in_a_digest_question_returns_a_first_summary_to_the_worklist(
+        monkeypatch, policy_db, tmp_path, question, exc, reason):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _ask_failing_at(monkeypatch, question, exc)
+    store.record_meeting(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+    store.request_generation(KEY, 9, db_path=db)
+
+    assert pipeline.run([KEY], db_path=db)["stopped_early"] == reason
+
+    m = _row(db, KEY, 9)
+    assert m.state == "detected" and m.briefing_md is None and m.digest_en_json is None
+    assert m.gen_requested is True and not m.retry_count
+    assert _worklist(db) == [(KEY, 9)]
+
+
+def test_a_meeting_halted_at_its_digest_finishes_whole_on_the_next_run(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 新しい要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    _summarised(db, KEY, 9, [_mat(9, "gijishidai", "agenda")])
+    _update(db, KEY, 9, digest_en_json='{"answer": "OLD EN"}')
+    store.add_late_materials(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+    _ask_failing_at(monkeypatch, "english", nb_mod.NotebookLMRateLimitError("quota"))
+    assert pipeline.run([KEY], db_path=db)["rate_limited"] is True
+
+    _ask_failing_at(monkeypatch, "none", nb_mod.NotebookLMError("unused"))
+    res = pipeline.run([KEY], db_path=db)
+
+    assert res["done"] == 1 and res["stopped_early"] is None
+    m = _row(db, KEY, 9)
+    assert m.state == "done" and m.briefing_md.startswith("## 新しい要約")
+    assert json.loads(m.digest_en_json)["answer"] == "EN BODY"
+    assert json.loads(m.digest_ja_json)["answer"] == "JA BODY"
+    assert m.resummarise_requested is False
+
+
+def test_the_retry_deletes_the_notebook_a_lapsed_session_could_not(monkeypatch, policy_db, tmp_path):
+    db = policy_db
+    _stub_notebooklm(monkeypatch, tmp_path, "## 要約\n" + "y" * 500)
+    _no_auth_no_synthesis(monkeypatch)
+    store.record_meeting(KEY, 9, [_mat(9, "gijiroku", "minutes")], db_path=db)
+    _ask_failing_at(monkeypatch, "english", nb_mod.NotebookLMAuthError("lapsed"))
+    assert pipeline.run([KEY], db_path=db)["stopped_early"] == "auth_expired"
+
+    deleted: list[str] = []
+    monkeypatch.setattr(pipeline.nb, "delete_notebook", lambda nb_id, **k: deleted.append(nb_id))
+    monkeypatch.setattr(pipeline.nb, "create_notebook", lambda *a, **k: (deleted.append("created"), "nb2")[1])
+    _ask_failing_at(monkeypatch, "none", nb_mod.NotebookLMError("unused"))
+
+    assert pipeline.run([KEY], db_path=db)["done"] == 1
+    assert deleted == ["nb1", "created", "nb2"]  # the old one goes first, then the attempt's own
+
+
 @pytest.mark.parametrize("outcome", ["error", "blocked", "unsent"])
 def test_a_failed_rerun_keeps_the_old_briefing_on_the_page(monkeypatch, policy_db, outcome):
     db = policy_db
