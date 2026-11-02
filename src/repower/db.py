@@ -509,6 +509,31 @@ def _migrate_add_policy_synth_done(engine) -> None:
         ))
 
 
+def _add_missing_columns(engine: Engine, spec: dict[str, list[tuple[str, str]]]) -> None:
+    """Add the columns of ``{table: [(column, ddl), ...]}`` that their table lacks, by running the DDL.
+
+    What every additive migration does, written once. One ``inspect()`` serves all the tables. A table
+    that does not exist yet is skipped: ``create_all`` builds it whole, with every current column. The
+    ALTERs run in spec order through one ``engine.begin()``, and when nothing is missing, which is the
+    usual case, no write transaction is opened at all.
+    """
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+    insp = inspect(engine)
+    names = insp.get_table_names()
+    missing: list[str] = []
+    for table, adds in spec.items():
+        if table not in names:
+            continue
+        have = {c["name"] for c in insp.get_columns(table)}
+        missing.extend(ddl for col, ddl in adds if col not in have)
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for ddl in missing:
+            conn.execute(sql_text(ddl))
+
+
 def _migrate_add_policy_registry(engine) -> None:
     """Add the dashboard-editable registry columns (all additive).
 
@@ -518,14 +543,8 @@ def _migrate_add_policy_registry(engine) -> None:
     tracked set is unchanged); ``priority`` is added NULL and seeded from the code
     config by ``sync_committees`` (which can't be expressed in plain SQL here).
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    names = insp.get_table_names()
-
-    if "policy_committee" in names:
-        cols = {c["name"] for c in insp.get_columns("policy_committee")}
-        adds = [
+    _add_missing_columns(engine, {
+        "policy_committee": [
             ("enabled", "ALTER TABLE policy_committee ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT 1"),
             ("user_added", "ALTER TABLE policy_committee ADD COLUMN user_added BOOLEAN NOT NULL DEFAULT 0"),
             ("priority", "ALTER TABLE policy_committee ADD COLUMN priority INTEGER"),
@@ -534,19 +553,11 @@ def _migrate_add_policy_registry(engine) -> None:
             ("log_pages", "ALTER TABLE policy_committee ADD COLUMN log_pages TEXT"),
             ("min_meeting", "ALTER TABLE policy_committee ADD COLUMN min_meeting INTEGER"),
             ("archived", "ALTER TABLE policy_committee ADD COLUMN archived BOOLEAN NOT NULL DEFAULT 0"),
-        ]
-        with engine.begin() as conn:
-            for col, ddl in adds:
-                if col not in cols:
-                    conn.execute(sql_text(ddl))
-
-    if "policy_meeting" in names:
-        cols = {c["name"] for c in insp.get_columns("policy_meeting")}
-        if "gen_requested" not in cols:
-            with engine.begin() as conn:
-                conn.execute(sql_text(
-                    "ALTER TABLE policy_meeting ADD COLUMN gen_requested BOOLEAN DEFAULT 0"
-                ))
+        ],
+        "policy_meeting": [
+            ("gen_requested", "ALTER TABLE policy_meeting ADD COLUMN gen_requested BOOLEAN DEFAULT 0"),
+        ],
+    })
 
 
 def _migrate_add_policy_meeting_error(engine) -> None:
@@ -555,22 +566,12 @@ def _migrate_add_policy_meeting_error(engine) -> None:
     Existing errored rows keep only their ``quality_flag``: the message they failed
     with was never recorded, so there is nothing to backfill from.
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    if "policy_meeting" not in insp.get_table_names():
-        return
-    cols = {c["name"] for c in insp.get_columns("policy_meeting")}
-    adds = [
-        ("last_error", "ALTER TABLE policy_meeting ADD COLUMN last_error TEXT"),
-        ("last_error_at", "ALTER TABLE policy_meeting ADD COLUMN last_error_at DATETIME"),
-    ]
-    missing = [ddl for col, ddl in adds if col not in cols]
-    if not missing:
-        return
-    with engine.begin() as conn:
-        for ddl in missing:
-            conn.execute(sql_text(ddl))
+    _add_missing_columns(engine, {
+        "policy_meeting": [
+            ("last_error", "ALTER TABLE policy_meeting ADD COLUMN last_error TEXT"),
+            ("last_error_at", "ALTER TABLE policy_meeting ADD COLUMN last_error_at DATETIME"),
+        ],
+    })
 
 
 def _migrate_add_policy_tags(engine) -> None:
@@ -580,19 +581,13 @@ def _migrate_add_policy_tags(engine) -> None:
     next daily run fills them. The production DB is pulled from Hugging Face, so a
     column added only to the model would be missing there until this runs.
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    names = insp.get_table_names()
-    for table in ("policy_committee", "policy_meeting"):
-        if table not in names:
-            continue
-        cols = {c["name"] for c in insp.get_columns(table)}
-        with engine.begin() as conn:
-            if "tags" not in cols:
-                conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags TEXT"))
-            if "tags_source" not in cols:
-                conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN tags_source VARCHAR(8)"))
+    _add_missing_columns(engine, {
+        table: [
+            ("tags", f"ALTER TABLE {table} ADD COLUMN tags TEXT"),
+            ("tags_source", f"ALTER TABLE {table} ADD COLUMN tags_source VARCHAR(8)"),
+        ]
+        for table in ("policy_committee", "policy_meeting")
+    })
 
 
 def _migrate_add_policy_citations(engine) -> None:
@@ -601,31 +596,24 @@ def _migrate_add_policy_citations(engine) -> None:
     The production DB is pulled from Hugging Face, so a column added only to the model
     would be missing there until this runs.
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    if "policy_meeting" not in insp.get_table_names():
-        return
-    if "citations_json" not in {c["name"] for c in insp.get_columns("policy_meeting")}:
-        with engine.begin() as conn:
-            conn.execute(sql_text("ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"))
+    _add_missing_columns(engine, {
+        "policy_meeting": [
+            ("citations_json", "ALTER TABLE policy_meeting ADD COLUMN citations_json TEXT"),
+        ],
+    })
 
 
 def _migrate_add_policy_index_note(engine) -> None:
     """Add ``policy_meeting.index_note`` and ``policy_committee.index_notes_at`` (additive; NULL =
     nothing noted / never read)."""
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    adds = {
-        "policy_meeting": ("index_note", "ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"),
-        "policy_committee": ("index_notes_at",
-                             "ALTER TABLE policy_committee ADD COLUMN index_notes_at DATETIME"),
-    }
-    with engine.begin() as conn:
-        for table, (col, ddl) in adds.items():
-            if table in insp.get_table_names() and col not in {c["name"] for c in insp.get_columns(table)}:
-                conn.execute(sql_text(ddl))
+    _add_missing_columns(engine, {
+        "policy_meeting": [
+            ("index_note", "ALTER TABLE policy_meeting ADD COLUMN index_note VARCHAR(16)"),
+        ],
+        "policy_committee": [
+            ("index_notes_at", "ALTER TABLE policy_committee ADD COLUMN index_notes_at DATETIME"),
+        ],
+    })
 
 
 def _migrate_add_policy_minutes_watch(engine) -> None:
@@ -634,11 +622,7 @@ def _migrate_add_policy_minutes_watch(engine) -> None:
     ``policy_meeting.resummarise_requested`` / ``materials_checked_at`` and
     ``policy_material.first_seen_at``. Pulled production DBs predate them.
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    names = insp.get_table_names()
-    adds = {
+    _add_missing_columns(engine, {
         "policy_meeting": [
             ("resummarise_requested",
              "ALTER TABLE policy_meeting ADD COLUMN resummarise_requested BOOLEAN DEFAULT 0"),
@@ -651,15 +635,7 @@ def _migrate_add_policy_minutes_watch(engine) -> None:
         "policy_material": [
             ("first_seen_at", "ALTER TABLE policy_material ADD COLUMN first_seen_at DATETIME"),
         ],
-    }
-    with engine.begin() as conn:
-        for table, cols_ddl in adds.items():
-            if table not in names:
-                continue
-            have = {c["name"] for c in insp.get_columns(table)}
-            for col, ddl in cols_ddl:
-                if col not in have:
-                    conn.execute(sql_text(ddl))
+    })
 
 
 def _migrate_add_fetch_observability(engine) -> None:
@@ -669,12 +645,7 @@ def _migrate_add_fetch_observability(engine) -> None:
     the first detection pass fills them in. ``consecutive_failures`` defaults to 0
     so the "is this committee failing repeatedly?" query works before any pass runs.
     """
-    from sqlalchemy import inspect
-    from sqlalchemy import text as sql_text
-    insp = inspect(engine)
-    names = insp.get_table_names()
-
-    tables = {
+    _add_missing_columns(engine, {
         "http_cache": [
             ("last_error_kind", "ALTER TABLE http_cache ADD COLUMN last_error_kind VARCHAR(32)"),
             ("last_error_at", "ALTER TABLE http_cache ADD COLUMN last_error_at DATETIME"),
@@ -690,17 +661,7 @@ def _migrate_add_fetch_observability(engine) -> None:
             ("consecutive_failures",
              "ALTER TABLE policy_committee ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0"),
         ],
-    }
-    for table, adds in tables.items():
-        if table not in names:
-            continue
-        cols = {c["name"] for c in insp.get_columns(table)}
-        missing = [ddl for col, ddl in adds if col not in cols]
-        if not missing:
-            continue
-        with engine.begin() as conn:
-            for ddl in missing:
-                conn.execute(sql_text(ddl))
+    })
 
 
 def get_session(db_path: str | None = None) -> Session:
