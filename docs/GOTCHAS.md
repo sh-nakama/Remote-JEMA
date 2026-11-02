@@ -712,6 +712,17 @@ fixed.
   separate in any new check. (`web-api` is long-running: restart it after upgrading.)
 - `energy_board.py`'s module-level feed cache (`_feed_cache`/`_feed_ts`) is unlocked — fine
   under today's single-flight usage, unsafe if you add threads.
+- **energy-board's council label is not a committee name.** It can be a parent body
+  (`distributed_energy_wg`, really 分散型エネルギー推進戦略WG, was stored as 省エネルギー小委員会) or
+  truncated (`plastic_wg` as 戦略ワーキンググループ). `cross_check` now names a newly found committee
+  from its page's `<h1>` and uses the label only when the page can't be fetched. When that fallback
+  stores a wrong name, add the page's real one to `committees.CATALOG_NAMES_JA`, which
+  `sync_committees` applies to every run (editing the row alone is undone by the next HF pull).
+- **Committee English names are resolved at read time.** Discovered committees store `name_en`
+  as `''`; `committees.english_name()` supplies the curated name (`COMMITTEES`, then
+  `CATALOG_NAMES_EN`). Read `name_en` through it, never raw; a new discovered committee needs a
+  `CATALOG_NAMES_EN` entry or it falls back to a humanised key on the site and its Japanese name
+  in the weekly email.
 - EGC index tables list **non-public meetings** (`※非公開開催` / `※書面開催`) with an *empty
   materials column* — the main-commission page (`index_emsc.html`) is full of them. `parse_egc_index`
   keeps a row when it has materials **or** a parseable date, so these still register and don't leave a
