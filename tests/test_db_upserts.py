@@ -7,6 +7,7 @@ All tests use synthetic data and a temporary SQLite path via pytest's
 from __future__ import annotations
 
 import datetime as dt
+import sqlite3
 import threading
 
 import pandas as pd
@@ -16,8 +17,10 @@ from repower.db import (
     DemandSupply30m,
     FuelDaily,
     NewsItem,
+    dispose_engines,
     get_engine,
     get_session,
+    init_db,
 )
 from repower.scrapers.area_base import BaseAreaScraper
 from repower.scrapers.fuels_futures import upsert_fuels
@@ -62,6 +65,37 @@ def test_get_engine_thread_safe(tmp_path):
     assert len(results) == n_threads
     # The lock must guarantee every thread observes the same single engine.
     assert all(e is results[0] for e in results)
+
+
+# ── init_db is once-per-path, until a pull replaces the file ───────────────
+def _columns(path: str, table: str) -> set[str]:
+    con = sqlite3.connect(path)
+    try:
+        return {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+    finally:
+        con.close()
+
+
+def test_init_db_migrates_again_once_the_db_file_has_been_replaced(tmp_path):
+    """A pull puts the Hub's copy in place of the file, and that copy can predate a column the code
+    reads (``policy_meeting.index_note``). init_db only sets a path up once, so without
+    dispose_engines() forgetting it every PolicyMeeting query would raise "no such column" until a
+    restart."""
+    path = str(tmp_path / "t.db")
+    init_db(path)
+    assert "index_note" in _columns(path, "policy_meeting")
+
+    # The older copy: the current schema with the newest column gone.
+    con = sqlite3.connect(path)
+    con.execute("ALTER TABLE policy_meeting DROP COLUMN index_note")
+    con.commit()
+    con.close()
+    assert "index_note" not in _columns(path, "policy_meeting")
+
+    dispose_engines()
+    init_db(path)
+
+    assert "index_note" in _columns(path, "policy_meeting")
 
 
 # ── Fuel upsert idempotency ────────────────────────────────────────────────

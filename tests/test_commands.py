@@ -286,6 +286,20 @@ def test_a_pull_drops_pooled_connections_before_and_after_and_is_logged(monkeypa
     assert logged == [("pull-hf", ok)]
 
 
+def test_a_refresh_drops_pooled_connections_afterwards(monkeypatch):
+    """refresh-web starts with a sync, which rewrites the DB under this server's connections (through
+    SQLite, so nothing needs closing first). Disposing afterwards makes the next init_db migrate
+    whatever the Hub's copy left behind."""
+    calls: list[str] = []
+    monkeypatch.setattr(web_api, "dispose_engines", lambda: calls.append("dispose"))
+    monkeypatch.setattr(web_api.subprocess, "Popen", lambda *a, **k: (calls.append("spawn"), _FakeProc(0))[1])
+    monkeypatch.setattr(web_api.command_log, "record", lambda *a: None)
+    with web_api._job_lock:
+        web_api._job.update(state="running", cmd="refresh-web")
+    web_api._run_command_job(["refresh-web"], timeout=5, cmd_id="refresh-web")
+    assert calls == ["spawn", "dispose"]
+
+
 def test_other_commands_do_not_touch_the_engines(monkeypatch):
     monkeypatch.setattr(web_api, "dispose_engines", lambda: pytest.fail("only a pull replaces the DB"))
     monkeypatch.setattr(web_api.subprocess, "Popen", lambda *a, **k: _FakeProc(0))

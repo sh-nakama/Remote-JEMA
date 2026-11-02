@@ -295,11 +295,13 @@ class PolicyMeeting(Base):
     # since it was first recorded). Drives the sparse re-check for late minutes.
     materials_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime)
     # What the committee's index says about this meeting's own documents, read from the index
-    # row beside the date (EGC's ※書面開催 / ※非公開開催 / ※削除済み): ``no_papers`` (a written or
-    # closed meeting whose row links nothing) or ``removed`` (METI took the documents down).
-    # NULL = nothing noted. Either value means there is nothing to summarise, so the meeting
-    # leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
-    # Refreshed on every ``detect`` pass, so a document posted later clears it.
+    # row beside the date (EGC's ※書面開催 / ※非公開開催 / ※削除済み, remarks in the 動画 video cell:
+    # the last means the video was taken down): ``no_papers`` when the row also links no document.
+    # NULL = nothing noted. With no paper on file that means there is nothing to summarise, so the
+    # meeting leaves the worklist instead of failing and retrying; see ``store.meeting_readiness``.
+    # Re-derived whenever ``detect`` reads the index *body* — any change to the page breaks the 304, and a
+    # full read is forced once ``store.INDEX_NOTES_REFRESH_DAYS`` have passed since
+    # ``PolicyCommittee.index_notes_at`` — so a document posted later clears it.
     index_note: Mapped[str | None] = mapped_column(String(16))
     # When the pipeline last finished writing this meeting's briefing, and — when that
     # replaced an existing briefing rather than writing the first — when. ``updated_at``
@@ -379,7 +381,7 @@ class PolicyMaterial(Base):
 # (e.g. a threaded scrape, or Streamlit's worker threads) can't race on cache
 # population or run the migration twice.
 _ENGINES: dict[str, Engine] = {}
-_INITIALIZED: set[str] = set()
+_INITIALIZED: set[str] = set()  # paths create_all + migrations have run on; dispose_engines() empties it
 _LOCK = threading.Lock()
 
 
@@ -397,10 +399,17 @@ def get_engine(db_path: str | None = None) -> Engine:
 
 
 def dispose_engines() -> None:
-    """Close pooled connections, e.g. once a pull has replaced the DB file under them."""
+    """Close pooled connections, e.g. once a pull has replaced the DB file under them.
+
+    Also forgets which paths ``init_db`` has set up. A replaced file is a different database
+    (the Hub copy can predate a column the code reads, e.g. ``policy_meeting.index_note``),
+    so the next ``init_db`` must run ``create_all`` and the migrations on it again; both are
+    idempotent, so doing it for a file that did not need it is harmless.
+    """
     with _LOCK:
         for engine in _ENGINES.values():
             engine.dispose()
+        _INITIALIZED.clear()
 
 
 def init_db(db_path: str | None = None) -> Engine:

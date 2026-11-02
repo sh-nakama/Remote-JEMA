@@ -17,6 +17,7 @@ from repower.notify import mail
 from repower.policy import committees, store, weekly
 from repower.policy import schedule as sched
 from repower.policy.energy_board import BoardEntry
+from repower.policy.scraper import Material
 
 TODAY = date(2026, 10, 9)  # the last day of the window under test
 NOW = datetime(2026, 10, 9, 8, 0, tzinfo=UTC)
@@ -60,8 +61,9 @@ BRIEFING = """# 第101回 調達価格等算定委員会 議論要約レポー�
 
 
 def _meeting(db, key, num, day, *, state="detected", digest=None, briefing=None, summarised_at=None,
-             detected_at=None):
-    store.record_meeting(key, num, None, db_path=db)
+             detected_at=None, index_note=None, kinds=()):
+    docs = [Material(num, f"{num:03d}_{k}", f"https://x/{num}/{k}.pdf", k, k) for k in kinds]
+    store.record_meeting(key, num, docs or None, db_path=db)
     with store.session_scope(db) as s:
         m = s.query(PolicyMeeting).filter_by(committee_key=key, meeting_num=num).one()
         m.meeting_date = day
@@ -69,6 +71,7 @@ def _meeting(db, key, num, day, *, state="detected", digest=None, briefing=None,
         m.digest_en_json = json.dumps({"answer": digest}) if digest else None
         m.briefing_md = briefing
         m.summarised_at = summarised_at
+        m.index_note = index_note
         if detected_at is not None:
             m.detected_at = detected_at
 
@@ -291,6 +294,55 @@ def test_a_detected_but_undated_meeting_on_the_calendar_reads_as_pending(policy_
     r = _build(db)
     assert [(i.meeting_num, i.status) for i in r.held] == [(51, weekly.PENDING)]
     assert r.undated == 1
+
+
+# ── Meetings whose committee index says there is nothing to read ─────────────
+def test_a_meeting_with_no_papers_is_not_promised_a_summary(policy_db):
+    """A written or closed meeting whose index row links nothing never gets a summary, so "Summary
+    pending" would promise one. The web view calls it "No papers published"."""
+    db = policy_db
+    _meeting(db, "system_review", 50, TODAY - timedelta(days=2), index_note=store.NO_PAPERS)
+    r = _build(db)
+    assert [(i.meeting_num, i.status) for i in r.held] == [(50, weekly.NO_PAPERS)]
+    assert weekly.NO_PAPERS == "No papers published"
+    assert "— No papers published" in weekly.render_text(r)
+
+
+def test_a_noted_meeting_with_papers_on_file_is_still_pending(policy_db):
+    """Papers on file outrank the index note (store.meeting_readiness): it only records that the row
+    linked nothing when it was read, so this meeting really is waiting for its summary."""
+    db = policy_db
+    _meeting(db, "system_review", 50, TODAY - timedelta(days=2), index_note=store.NO_PAPERS, kinds=("minutes",))
+    _meeting(db, "doji_shijo", 26, TODAY - timedelta(days=2), index_note=store.NO_PAPERS, kinds=("agenda",))
+    r = _build(db)
+    # An agenda alone is not a paper to read, so that one is still "no papers".
+    assert {i.meeting_num: i.status for i in r.held} == {50: weekly.PENDING, 26: weekly.NO_PAPERS}
+
+
+def test_a_failure_on_a_meeting_with_no_papers_reads_as_no_papers_not_failed(policy_db):
+    """The old no_sources error of such a meeting is cleared by the next detect pass; until then the
+    web view already shows it as "No papers published", and a real failure still reads as one."""
+    db = policy_db
+    _meeting(db, "doji_shijo", 26, TODAY - timedelta(days=3), state="error", index_note=store.NO_PAPERS)
+    _meeting(db, "system_review", 51, TODAY - timedelta(days=3), state="error")
+    r = _build(db)
+    assert {i.meeting_num: i.status for i in r.held} == {26: weekly.NO_PAPERS, 51: weekly.FAILED}
+
+
+def test_a_stale_note_does_not_demote_a_summarised_meeting(policy_db):
+    db = policy_db
+    _meeting(db, "chousei_jukyu", 122, TODAY - timedelta(days=3), state="done", digest=DIGEST,
+             summarised_at=NOW, index_note=store.NO_PAPERS)
+    r = _build(db)
+    assert [(i.meeting_num, i.status) for i in r.summarised] == [(122, weekly.SUMMARISED)] and not r.held
+
+
+def test_no_papers_is_styled_like_materials_not_yet_published():
+    fg, bg = weekly._STATUS_COLORS[weekly.NOT_PUBLISHED]
+    item = weekly.WeeklyItem(date=TODAY, name="Committee", name_ja=None, org="METI", status=weekly.NO_PAPERS,
+                             tracked=True)
+    out = weekly.render_html(_report(summarised=[], held=[item]))
+    assert f'color:{fg};background:{bg}">No papers published</span>' in out
 
 
 # ── Calendar history (policy_upcoming keeps its past) ───────────────────────

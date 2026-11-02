@@ -1,4 +1,4 @@
-"""The HF Space pulls the DB once per process, not once per visitor session.
+"""The HF Space pulls the DB once per process, not once per visitor session, and migrates what it pulled.
 
 Runs Streamlit's AppTest in a subprocess (see test_dashboard_policy.py) with the
 pull stubbed out, so it is network-free and leaves the real local DB untouched.
@@ -31,15 +31,64 @@ print("SPACE_OK")
 '''
 
 
-def test_space_pulls_once_per_process_not_per_session(tmp_path):
+# The hourly re-pull puts the Hub's copy over a file this process already set up, and that copy can
+# predate a column the code reads. Only the pull may migrate it here: the dashboard is stubbed out
+# (its cached session calls init_db once per process, so it would not do it for a later pull).
+_MIGRATE_RUNNER = r'''
+import os
+import sqlite3
+import sys
+import types
+
+import repower.hf_sync as hf_sync
+from repower.config import DB_PATH
+from repower.db import dispose_engines, init_db
+from streamlit.testing.v1 import AppTest
+
+dashboard = types.ModuleType("repower.dashboard")
+dashboard.main = lambda **kwargs: None
+sys.modules["repower.dashboard"] = dashboard
+
+init_db()  # this process has already set the file up
+
+
+def pull_an_older_copy():
+    dispose_engines()  # as the real pull does, around replacing the file
+    con = sqlite3.connect(DB_PATH)
+    con.execute("ALTER TABLE policy_meeting DROP COLUMN index_note")
+    con.commit()
+    con.close()
+    dispose_engines()
+
+
+hf_sync.pull_db_from_hf = pull_an_older_copy
+at = AppTest.from_file(os.environ["SPACE_APP"], default_timeout=60)
+at.run()
+assert not at.exception, at.exception
+
+con = sqlite3.connect(DB_PATH)
+columns = {row[1] for row in con.execute("PRAGMA table_info(policy_meeting)")}
+con.close()
+assert "index_note" in columns, columns
+print("SPACE_MIGRATED")
+'''
+
+
+def _run(tmp_path, source: str) -> subprocess.CompletedProcess:
     runner = tmp_path / "runner.py"
-    runner.write_text(_RUNNER, encoding="utf-8")
+    runner.write_text(source, encoding="utf-8")
     env = dict(os.environ)
     env["REPOWER_DB_PATH"] = str(tmp_path / "t.db")
     env["SPACE_APP"] = str(_ROOT / "space" / "app.py")
     env["PYTHONPATH"] = str(_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+    return subprocess.run([sys.executable, str(runner)], env=env, capture_output=True, text=True, timeout=180)
 
-    proc = subprocess.run(
-        [sys.executable, str(runner)], env=env, capture_output=True, text=True, timeout=180,
-    )
+
+def test_space_pulls_once_per_process_not_per_session(tmp_path):
+    proc = _run(tmp_path, _RUNNER)
     assert "SPACE_OK" in proc.stdout, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+
+
+def test_space_migrates_the_database_it_just_pulled(tmp_path):
+    proc = _run(tmp_path, _MIGRATE_RUNNER)
+    assert "SPACE_MIGRATED" in proc.stdout, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
