@@ -651,9 +651,53 @@ def _cli_json_error(code: str, message: str) -> str:
 def test_ask_classifies_the_error_the_cli_prints_on_stdout(monkeypatch, code, expected):
     """With --json the CLI reports a failure on stdout and leaves stderr empty. Output captured
     from notebooklm-py's own error handler; reading only stderr made these plain exit 1s."""
+    monkeypatch.setattr(nb_mod.time, "sleep", lambda s: None)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _FakeProc(1, "", _cli_json_error(code, "Error: nope")))
     with pytest.raises(expected):
         nb_mod.ask("nb-1", "question")
+
+
+_CHAT_LIMIT = "Error: Chat request was rate limited or rejected by the API. Wait a few seconds and try again."
+
+
+def test_ask_retries_the_chat_limit_then_treats_it_as_a_rate_limit(monkeypatch):
+    """Worded this way under a generic code, it left a meeting finished with no digest."""
+    calls, pauses = [], []
+    monkeypatch.setattr(nb_mod.time, "sleep", pauses.append)
+
+    def limited(cmd, **k):
+        calls.append(cmd)
+        return _FakeProc(1, "", _cli_json_error("CHAT_ERROR", _CHAT_LIMIT))
+
+    monkeypatch.setattr(subprocess, "run", limited)
+    with pytest.raises(nb_mod.NotebookLMRateLimitError):
+        nb_mod.ask("nb-1", "question")
+    assert len(calls) == 3
+    assert pauses == list(nb_mod._ASK_RETRY_PAUSES)
+
+
+def test_ask_recovers_when_the_chat_limit_clears(monkeypatch):
+    replies = [_FakeProc(1, "", _cli_json_error("CHAT_ERROR", _CHAT_LIMIT)),
+               _FakeProc(0, "", json.dumps({"answer": "ok"}))]
+    monkeypatch.setattr(nb_mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: replies.pop(0))
+    assert nb_mod.ask("nb-1", "question") == {"answer": "ok"}
+
+
+def test_ask_does_not_retry_an_over_long_question(monkeypatch):
+    """The server's size rejection is the meeting's own problem: waiting cannot fix it."""
+    calls = []
+
+    def rejected(cmd, **k):
+        calls.append(cmd)
+        message = "Error: Chat request was rejected by the server (status 3)."
+        return _FakeProc(1, "", _cli_json_error("CHAT_ERROR", message))
+
+    monkeypatch.setattr(subprocess, "run", rejected)
+    with pytest.raises(nb_mod.NotebookLMError) as ei:
+        nb_mod.ask("nb-1", "question")
+    assert type(ei.value) is nb_mod.NotebookLMError
+    assert len(calls) == 1
 
 
 def test_an_unrelated_cli_error_stays_plain_and_says_what_went_wrong(monkeypatch):

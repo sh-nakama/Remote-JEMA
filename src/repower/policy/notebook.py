@@ -129,10 +129,11 @@ def _run(args: list[str], *, timeout: float, allow_codes: tuple[int, ...] = (EXI
     if proc.returncode not in allow_codes:
         # The CLI surfaces a server-side rate limit as exit 1: code RATE_LIMITED with --json,
         # "Error: Rate limited." without it, and a logged "RateLimitError" on stderr when an RPC
-        # hit it (e.g. CREATE_ARTIFACT). Classify it so the pipeline can back off without
-        # burning a meeting's retry budget.
+        # hit it (e.g. CREATE_ARTIFACT). `ask` can also fail with "Chat request was rate limited or
+        # rejected by the API", in the JSON message under a generic code. Classify them all so the
+        # pipeline can back off without burning a meeting's retry budget.
         if (code == "RATE_LIMITED" or "RateLimitError" in stderr
-                or "RATE LIMIT" in stderr.upper().replace("_", " ")):
+                or "RATE LIMIT" in f"{stderr} {message}".upper().replace("_", " ")):
             raise NotebookLMRateLimitError(f"notebooklm {' '.join(args)} rate-limited: {detail[:300]}")
         raise NotebookLMError(f"notebooklm {' '.join(args)} -> exit {proc.returncode}: {detail}")
     return proc.stdout
@@ -337,10 +338,20 @@ def download_report(notebook_id: str, task_id: str, dest: Path, *, timeout: floa
         return False
 
 
+# A chat limit can clear in seconds, and giving up halts the whole run for hours.
+_ASK_RETRY_PAUSES = (20.0, 60.0)
+
+
 def ask(notebook_id: str, question: str, *, language: str | None = None, timeout: float = 180.0) -> dict:
     args = ["ask", question, "-n", notebook_id]
     if language:
         args += ["--language", language]
+    for pause in _ASK_RETRY_PAUSES:
+        try:
+            return _json(args, timeout=timeout)
+        except NotebookLMRateLimitError as e:
+            logger.info("notebooklm ask rate-limited; retrying in %.0fs: %s", pause, str(e)[-200:])
+            time.sleep(pause)
     return _json(args, timeout=timeout)
 
 

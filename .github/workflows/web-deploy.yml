@@ -5,9 +5,9 @@ name: Deploy Web (JEMA)
 # pulling the latest DB from the Hugging Face dataset, so the deployed site is a
 # self-contained static bundle (app + data/web/**) with no runtime server.
 #
-# Automated runs (workflow_run / schedule) are idempotent: they fingerprint the
-# pulled DB and skip the rebuild + deploy when it matches the last-deployed one (so
-# an unchanged HF dataset doesn't redeploy identical data). Pushes to main and manual
+# Automated runs (workflow_run / schedule / dispatch with `automated`) are idempotent: they
+# fingerprint the pulled DB and skip the rebuild + deploy when it matches the last-deployed one
+# (so an unchanged HF dataset doesn't redeploy identical data). Pushes to main and manual
 # dispatch always rebuild, since those imply the app/exporter changed.
 #
 # Prerequisites (one-time):
@@ -22,15 +22,21 @@ name: Deploy Web (JEMA)
 
 on:
   workflow_dispatch:
+    inputs:
+      automated:
+        description: "Treat as an automated run: skip an unchanged DB, refuse a failed pull"
+        type: boolean
+        default: false
   # Rebuild when a workflow that writes the dataset finishes, whatever its conclusion
   # (the freshness gate can fail a run after its push; an unchanged DB is skipped).
   # A fixed-time cron raced the daily run, which GitHub starts hours after its slot.
+  # policy.yml is not listed: it starts this workflow itself, because policy-gate.yml starts
+  # it with GITHUB_TOKEN and GitHub fires no workflow_run for such a run.
   workflow_run:
     workflows:
       - "Daily Scrape & Analyze"
       - "Weekly Deep Re-validation"
       - "Historical Backfill"
-      - "Daily Policy Summaries"
       - "Monthly Committee Cross-check"
     types: [completed]
   schedule:
@@ -80,7 +86,7 @@ jobs:
         # to the curated in-repo data; an automated run must not — it would
         # silently replace the live site with a near-empty one (and, because the
         # no-DB fingerprint is unique per run, redeploy it every day).
-        continue-on-error: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        continue-on-error: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.automated != true) }}
 
       - name: Warn when building without the HF DB
         if: steps.pull.outcome == 'failure'
@@ -111,7 +117,7 @@ jobs:
       - name: Decide whether to rebuild
         id: decide
         run: |
-          case "${{ github.event_name }}" in schedule|workflow_run) automated=true ;; *) automated=false ;; esac
+          case "${{ github.event_name }}" in schedule|workflow_run) automated=true ;; *) automated=${{ inputs.automated == true }} ;; esac
           if [ "$automated" = "true" ] && [ "${{ steps.cache.outputs.cache-hit }}" = "true" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "::notice::HF DB unchanged since the last deploy — skipping rebuild."

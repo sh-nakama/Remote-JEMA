@@ -79,6 +79,18 @@ def test_summarising_is_gated_on_the_notebooklm_limit():
     assert "hf-dataset" not in gate.split("permissions:")[1]  # it must not queue behind a run it would start
 
 
+def test_policy_run_starts_the_site_deploy_itself():
+    """GitHub fires no workflow_run for a run GITHUB_TOKEN started, which is how the gate starts it."""
+    policy = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
+    steps = re.findall(r"^\s*- name: (.+)$", policy, re.MULTILINE)
+    assert steps.index("Push updated DB to Hugging Face") < steps.index("Start the site deploy")
+    assert "gh workflow run web-deploy.yml --ref main -f automated=true" in policy
+    assert "actions: write" in policy
+    deploy = (WORKFLOWS / "web-deploy.yml").read_text(encoding="utf-8")
+    assert '- "Daily Policy Summaries"' not in deploy  # would deploy twice after a run started by hand
+    assert "inputs.automated != true" in deploy  # a failed pull must not replace the live site
+
+
 def test_a_stale_login_fails_the_policy_run_only_after_the_push():
     """Green runs hid weeks of skipped summaries; failing any earlier would lose detection's results."""
     text = (WORKFLOWS / "policy.yml").read_text(encoding="utf-8")
