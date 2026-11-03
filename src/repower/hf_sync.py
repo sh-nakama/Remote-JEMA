@@ -23,7 +23,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
-from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
+from huggingface_hub import CommitInfo, CommitOperationAdd, HfApi, hf_hub_download
+from huggingface_hub.errors import HfHubHTTPError
 
 from repower.config import (
     DB_PATH,
@@ -141,13 +142,49 @@ def _snapshot_db(db_path: Path, dest: Path) -> None:
         raise RuntimeError(f"{db_path} failed PRAGMA quick_check: {result}")
 
 
+def _unchanged_parquets(
+    api: HfApi, parquets: list[tuple[Path, str]], revision: str | None
+) -> tuple[str | None, set[str]]:
+    """``(commit read, repo names of the *parquets* it already holds byte for byte)``.
+
+    A file the Hub keeps as a plain git blob has no sha256 to compare, so it counts as
+    changed. An unreadable Hub leaves nothing to compare against: everything is uploaded.
+    """
+    try:
+        commit, remote = remote_revision(api, revision=revision)
+    except Exception:
+        logger.warning("could not read the Hub's files; uploading every Parquet", exc_info=True)
+        return None, set()
+    return commit, {name for path, name in parquets if remote.get(name) == _sha256(path)}
+
+
+def _commit_files(
+    api: HfApi, snapshot: Path, parquets: list[tuple[Path, str]], parent_commit: str | None
+) -> tuple[CommitInfo, str]:
+    """One Hub commit of the DB *snapshot* and *parquets*: ``(commit info, the names uploaded)``."""
+    ops = [CommitOperationAdd(path_in_repo=_DB_FILE, path_or_fileobj=str(snapshot))]
+    ops += [CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(path)) for path, name in parquets]
+    names = ", ".join(op.path_in_repo for op in ops)
+    info = api.create_commit(
+        repo_id=HF_DATASET_REPO,
+        repo_type="dataset",
+        operations=ops,
+        commit_message=f"Update {names}",
+        parent_commit=parent_commit,
+    )
+    return info, names
+
+
 def push_db_to_hf(parent_commit: str | None = None) -> str:
-    """Upload a checked DB snapshot and the EPRX Parquet files in one Hub commit.
+    """Upload a checked DB snapshot and the changed EPRX Parquet files in one Hub commit.
 
     One commit keeps the DB (which holds the ETags) and the Parquet rows those
-    ETags vouch for from landing out of step. With *parent_commit* the Hub refuses
-    the commit if the dataset has moved past it, so the push cannot overwrite a
-    newer copy. Returns the new commit sha.
+    ETags vouch for from landing out of step. A Parquet identical to the Hub's is left
+    out, and stays in the commit's tree only if the commit lands on the revision it was
+    compared with, so that revision becomes the commit's parent. If the dataset moves
+    first, a push with no *parent_commit* uploads every Parquet instead (last write
+    wins, as ever). With *parent_commit* the Hub refuses the commit if the dataset has
+    moved past it, so the push cannot overwrite a newer copy. Returns the new commit sha.
     """
     _require_hub()
 
@@ -158,25 +195,30 @@ def push_db_to_hf(parent_commit: str | None = None) -> str:
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         snapshot = Path(tmp) / _DB_FILE
         _snapshot_db(db_path, snapshot)
-        ops = [CommitOperationAdd(path_in_repo=_DB_FILE, path_or_fileobj=str(snapshot))]
+        parquets = []
         for local_path, repo_name in _SYNC_FILES:
             if repo_name == _DB_FILE:
                 continue
             if not local_path.exists():
                 logger.info("Skip push (missing locally): %s", repo_name)
                 continue
-            ops.append(CommitOperationAdd(path_in_repo=repo_name, path_or_fileobj=str(local_path)))
+            parquets.append((local_path, repo_name))
 
-        names = ", ".join(op.path_in_repo for op in ops)
         api = HfApi(token=HF_TOKEN)
         api.create_repo(repo_id=HF_DATASET_REPO, repo_type="dataset", exist_ok=True, private=True)
-        info = api.create_commit(
-            repo_id=HF_DATASET_REPO,
-            repo_type="dataset",
-            operations=ops,
-            commit_message=f"Update {names}",
-            parent_commit=parent_commit,
-        )
+        compared, unchanged = _unchanged_parquets(api, parquets, parent_commit)
+        if unchanged:
+            logger.info("Skip push (unchanged on the Hub): %s", ", ".join(sorted(unchanged)))
+            changed = [p for p in parquets if p[1] not in unchanged]
+            try:
+                info, names = _commit_files(api, snapshot, changed, compared)
+            except HfHubHTTPError as e:
+                if parent_commit is not None or e.response.status_code != 412:
+                    raise
+                logger.info("The dataset moved during the push; uploading every Parquet")
+                info, names = _commit_files(api, snapshot, parquets, None)
+        else:
+            info, names = _commit_files(api, snapshot, parquets, parent_commit)
         pushed_state = _state_or_none(snapshot)
     logger.info("Pushed %s", names)
     previous = read_stamp(stamp_path(db_path)) or {}
