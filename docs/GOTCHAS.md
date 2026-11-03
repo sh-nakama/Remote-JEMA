@@ -354,8 +354,9 @@ fixed.
   concurrency eviction is invisible to the alert steps.
 - **GitHub starts cron runs late — hours late.** `daily.yml`'s 20:30 UTC slot started between
   22:20 and 23:25 UTC throughout September 2026. Never chain workflows by clock offset:
-  `web-deploy.yml` rebuilds on `workflow_run` completion of the five dataset-writing workflows
-  (its cron is only a backstop for pushes made outside Actions). Its `workflow_run` list
+  `web-deploy.yml` rebuilds on `workflow_run` completion of the dataset-writing workflows, and
+  `policy.yml` starts it directly (its cron is only a backstop for pushes made outside Actions).
+  Its `workflow_run` list
   matches workflow **names** — renaming one of them silently stops the deploy.
 - Default concurrency keeps **one pending run per group** and silently cancels the rest;
   `queue: max` (up to 100, FIFO) fixes that but is invalid combined with
@@ -799,6 +800,18 @@ fixed.
 - **The weekly email does not wait for summaries.** Nothing links the two workflows, and policy
   runs start whenever the gate allows, so one may still be going at 12:00 JST on a Monday. The
   email cannot see what that run has not pushed yet.
+- **A run started with `GITHUB_TOKEN` fires no `workflow_run`.** `workflow_dispatch` is the exception
+  to GitHub's no-chaining rule, so the gate can start `policy.yml`, but `web-deploy.yml` then never
+  heard it finish and the site stayed stale. `policy.yml` now dispatches the deploy after its push,
+  with `automated=true`: a plain dispatch always rebuilds and tolerates a failed pull, which would
+  replace the live site with the curated data.
+- **The chat limit has more than one wording.** `ask` can fail with "Chat request was rate limited or
+  rejected by the API", in the JSON message under a generic code. Missed, it left a meeting saved with
+  no digest and no retry. `ask` now retries it, then halts the run. The wording is ambiguous: if one
+  meeting's question were really being rejected, every run would halt on it, so look for the same
+  meeting stopping run after run. The separate "rejected by the server (status 3)" means an over-long
+  question and stays per-meeting: the Japanese digest puts the whole English digest in its question,
+  so the longest digests get no translation and the email uses a briefing extract.
 - **NotebookLM's 5-hour limit is enforced by `policy-gate.yml`, not by a schedule.** GitHub starts
   crons hours late and a run's length varies, and the limit is measured from a run's end, so a
   6-hour slot after a 1.5-hour run would land inside it. The gate ticks hourly, and `policy.yml`

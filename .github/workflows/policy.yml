@@ -23,10 +23,10 @@ on:
         default: false
 
 # Everything here writes to Hugging Face with its own token; GITHUB_TOKEN only reads the repo
-# and this workflow's earlier runs.
+# and this workflow's earlier runs, and starts the site deploy.
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 # Queue behind the other HF-dataset-mutating workflows (see daily.yml).
 concurrency:
@@ -167,6 +167,19 @@ jobs:
             [ "$attempt" -lt 3 ] && sleep $((attempt * 60))
           done
           exit 1
+
+      - name: Start the site deploy
+        # policy-gate.yml starts this workflow with GITHUB_TOKEN, and GitHub fires no workflow_run
+        # for a run started that way, so web-deploy.yml has to be started directly. `automated`
+        # keeps its unchanged-DB skip and its refusal to deploy after a failed pull. Keep the
+        # condition in sync with the push step's. A failure here must not fail the run: the
+        # summaries are safe, and web-deploy.yml's daily schedule catches up.
+        if: always() && (steps.pull.outcome == 'success' || inputs.bootstrap == true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh workflow run web-deploy.yml --ref main -f automated=true \
+            || echo "::warning::The site deploy could not be started"
 
       - name: Alert on failure
         if: failure()
