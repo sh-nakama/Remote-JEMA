@@ -221,7 +221,7 @@ export const AUTOMATED_RUNS: AutoRun[] = [
     writes: true,
   },
   {
-    file: 'policy-gate.yml', cron: '17 * * * *', jst: 'hourly at :17',
+    file: 'policy-gate.yml', cron: '21 * * * *', jst: 'hourly at :21',
     nameEn: 'Policy run gate', nameJa: '政策要約の実行ゲート',
     whenEn: 'Every hour', whenJa: '毎時',
     doesEn: 'Starts the policy summaries when at least 5 hours have passed since the last run ended and fewer than 4 have run that day (JST).',
